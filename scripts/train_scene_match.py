@@ -52,6 +52,7 @@ class Config:
     # Viewpoints
     use_policy: bool = True  # Use learned policy for viewpoint selection
     n_policy_viewpoints: int = 2  # Number of policy-selected viewpoints (after first imposed)
+    n_random_viewpoints: int = 2  # For non-policy mode: random viewpoints after full scene
     # For imposed first viewpoint:
     min_viewpoint_scale: float = 0.3
     max_viewpoint_scale: float = 1.0
@@ -110,7 +111,7 @@ def load_teacher(device: torch.device) -> DINOv3Backbone:
 
 def get_teacher_raw_patches(teacher: DINOv3Backbone, images: Tensor) -> Tensor:
     """Get raw teacher patch features BEFORE LayerNorm."""
-    with torch.inference_mode():
+    with torch.no_grad():
         x, H, W = teacher.prepare_tokens(images)
         for i in range(teacher.n_blocks):
             x = teacher.forward_block(i, x, rope=None)

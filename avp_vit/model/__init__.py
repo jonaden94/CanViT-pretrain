@@ -153,14 +153,14 @@ class AVPViT(nn.Module):
         scene_t = self._init_scene(B, scene)
 
         # Prepend POL token to local stream if policy enabled
-        has_pol = self.pol_token is not None
-        if has_pol:
-            pol = self.pol_token.expand(B, -1, -1)  # [B, 1, D]
+        pol_token = self.pol_token
+        if pol_token is not None:
+            pol = pol_token.expand(B, -1, -1)  # [B, 1, D]
             local = torch.cat([pol, local], dim=1)  # [B, 1+N, D]
 
         # Compute positions: POL uses viewpoint center, patches use glimpse_positions
         local_pos = glimpse_positions(centers, scales, H, W, dtype=rope_dtype)
-        if has_pol:
+        if pol_token is not None:
             pol_pos = centers.unsqueeze(1).to(rope_dtype)  # [B, 1, 2]
             local_pos = torch.cat([pol_pos, local_pos], dim=1)  # [B, 1+H*W, 2]
 
@@ -180,7 +180,7 @@ class AVPViT(nn.Module):
 
         # Extract POL token and decode policy output
         pol_out: Tensor | None = None
-        if has_pol:
+        if pol_token is not None:
             assert self.pol_norm is not None and self.pol_proj is not None
             pol_out = self.pol_proj(self.pol_norm(local[:, 0, :]))  # [B, 2]
             local = local[:, 1:, :]  # Strip POL from local
