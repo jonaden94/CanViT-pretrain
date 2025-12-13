@@ -1,10 +1,16 @@
 from dataclasses import dataclass
+from typing import Protocol
 
 import torch
 from torch import Tensor, nn
 
-from .attention import CrossAttention
-from .rope import compute_rope, glimpse_positions, make_grid_positions
+from ..attention import CrossAttention
+from ..rope import compute_rope, glimpse_positions, make_grid_positions
+
+
+class RopeEmbed(Protocol):
+    dtype: torch.dtype
+    periods: Tensor
 
 
 @dataclass
@@ -20,7 +26,7 @@ class AVPViT(nn.Module):
     def __init__(
         self,
         blocks: nn.ModuleList,
-        rope_embed: nn.Module,
+        rope_embed: RopeEmbed,
         embed_dim: int,
         num_heads: int,
         n_prefix_tokens: int,
@@ -64,39 +70,37 @@ class AVPViT(nn.Module):
     def forward(
         self,
         local: Tensor,  # [B, N, D] = prefix + H*W patch tokens
-        centers: Tensor,  # [B, 2] glimpse centers in [0,1]^2
+        centers: Tensor,  # [B, 2] glimpse centers in [-1,1]^2
         scales: Tensor,  # [B] glimpse scales
     ) -> tuple[Tensor, Tensor]:
         B = local.shape[0]
         H = W = self.cfg.glimpse_grid_size
+        rope_dtype = self.rope_embed.dtype
 
         # Expand scene tokens
         scene = self.scene_tokens.expand(B, -1, -1)
 
-        # Compute positions
-        local_pos = glimpse_positions(centers, scales, H, W)  # [B, HW, 2]
-        scene_pos = self.scene_positions.unsqueeze(0).expand(B, -1, -1)  # [B, S*S, 2]
+        # Compute positions in rope dtype for numerical consistency
+        periods = self.rope_embed.periods
+        local_pos = glimpse_positions(centers, scales, H, W, dtype=rope_dtype)
+        scene_pos = self.scene_positions.to(rope_dtype).unsqueeze(0).expand(B, -1, -1)
 
         # Compute RoPE: [B, 1, N, head_dim]
-        local_rope = compute_rope(local_pos, self.head_dim, self.rope_embed.base)
-        scene_rope = compute_rope(scene_pos, self.head_dim, self.rope_embed.base)
+        local_rope = compute_rope(local_pos, periods)
+        scene_rope = compute_rope(scene_pos, periods)
 
         for i, block in enumerate(self.blocks):
             # Read: local attends to scene
             local = local + self.read_gate[i] * self.read_attn[i](
-                local, scene,
-                q_rope=local_rope, kv_rope=scene_rope,
-                q_prefix=self.n_prefix_tokens, kv_prefix=0,
+                local, scene, q_rope=local_rope, kv_rope=scene_rope
             )
 
-            # Backbone block with scene-space positions
+            # Backbone block
             local = block(local, local_rope)
 
             # Write: scene attends to local
             scene = scene + self.write_gate[i] * self.write_attn[i](
-                scene, local,
-                q_rope=scene_rope, kv_rope=local_rope,
-                q_prefix=0, kv_prefix=self.n_prefix_tokens,
+                scene, local, q_rope=scene_rope, kv_rope=local_rope
             )
 
         return local, scene

@@ -9,12 +9,24 @@ dependencies = [
     "torchvision",
     "omegaconf",
     "dinov3",
+    "ybml",
 ]
 
 [tool.uv.sources]
 dinov3 = { path = "dinov3", editable = true }
+ybml = { git = "https://github.com/yberreby/ybml.git" }
 
 [dependency-groups]
 dev = [
+    "basedpyright>=1.36.1",
+    "ipython>=9.8.0",
     "pytest>=9.0.2",
+    "ruff>=0.14.9",
 ]
+
+[tool.pytest.ini_options]
+python_files = ["test.py", "test_*.py"]
+
+[tool.basedpyright]
+ignore = ["dinov3"]
+reportMissingImports = "warning"
