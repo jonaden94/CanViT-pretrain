@@ -26,10 +26,22 @@ def make_rope_periods(
     return base**exponents
 
 
-def _grid_offsets(
-    grid_h: int, grid_w: int, device: torch.device, dtype: torch.dtype
+def grid_offsets(
+    grid_h: int, grid_w: int, device: torch.device, dtype: torch.dtype = torch.float32
 ) -> Tensor:
-    """Normalized grid offsets in [-1, 1]^2 (DINOv3 convention)."""
+    """Normalized grid offsets in [-1, 1]^2 (DINOv3 convention).
+
+    This is the SINGLE SOURCE OF TRUTH for patch center coordinates.
+    Used by both glimpse_positions (for RoPE) and extract_glimpse (for cropping).
+
+    Convention: (idx + 0.5) / grid_size * 2 - 1
+    - Maps patch centers to [-1, 1] (not edges)
+    - Grid indexed as (row, col) = (y, x)
+    - Output shape: [H*W, 2] with [..., 0] = y, [..., 1] = x
+
+    Returns:
+        Tensor of shape [grid_h * grid_w, 2] with (y, x) coordinates
+    """
     h = torch.arange(grid_h, device=device, dtype=dtype)
     w = torch.arange(grid_w, device=device, dtype=dtype)
     h = (h + 0.5) / grid_h * 2 - 1
@@ -44,7 +56,7 @@ def make_grid_positions(
     dtype: torch.dtype = torch.float32,
 ) -> Tensor:
     """Fixed grid positions in [-1, 1]^2 (DINOv3 convention)."""
-    out = _grid_offsets(grid_h, grid_w, device, dtype)
+    out = grid_offsets(grid_h, grid_w, device, dtype)
     assert_shape(out, (grid_h * grid_w, 2))
     return out
 
@@ -61,7 +73,7 @@ def glimpse_positions(
     device = centers.device
     scales = scales.view(B, 1, 1).to(dtype)
     centers = centers.to(dtype)
-    offsets = _grid_offsets(grid_h, grid_w, device, dtype)
+    offsets = grid_offsets(grid_h, grid_w, device, dtype)
     positions = centers.unsqueeze(1) + scales * offsets.unsqueeze(0)
     assert_shape(positions, (B, grid_h * grid_w, 2))
     return positions
