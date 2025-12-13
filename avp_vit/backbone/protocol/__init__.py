@@ -31,6 +31,12 @@ class ViTBackbone(ABC):
 
     @property
     @abstractmethod
+    def n_register_tokens(self) -> int:
+        """Number of register/storage tokens (excluding CLS)."""
+        ...
+
+    @property
+    @abstractmethod
     def n_blocks(self) -> int: ...
 
     @property

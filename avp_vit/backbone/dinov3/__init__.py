@@ -53,6 +53,11 @@ class DINOv3Backbone(ViTBackbone, nn.Module):
 
     @property
     @override
+    def n_register_tokens(self) -> int:
+        return self._backbone.n_storage_tokens
+
+    @property
+    @override
     def n_blocks(self) -> int:
         return len(self._backbone.blocks)
 

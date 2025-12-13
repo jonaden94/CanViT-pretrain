@@ -57,6 +57,11 @@ class IJEPABackbone(ViTBackbone, nn.Module):
 
     @property
     @override
+    def n_register_tokens(self) -> int:
+        return 0
+
+    @property
+    @override
     def n_blocks(self) -> int:
         return len(self._backbone.blocks)
 

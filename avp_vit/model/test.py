@@ -14,14 +14,18 @@ class MockBackbone(ViTBackbone, nn.Module):
     _embed_dim: int
     _num_heads: int
     _n_blocks: int
+    _n_register_tokens: int
     _rope_periods: Tensor
     _norm: nn.LayerNorm
 
-    def __init__(self, embed_dim: int, num_heads: int, n_blocks: int) -> None:
+    def __init__(
+        self, embed_dim: int, num_heads: int, n_blocks: int, n_register_tokens: int = 0
+    ) -> None:
         nn.Module.__init__(self)
         self._embed_dim = embed_dim
         self._num_heads = num_heads
         self._n_blocks = n_blocks
+        self._n_register_tokens = n_register_tokens
         self._norm = nn.LayerNorm(embed_dim)
         head_dim = embed_dim // num_heads
         self.register_buffer("_rope_periods", make_rope_periods(head_dim))
@@ -45,6 +49,11 @@ class MockBackbone(ViTBackbone, nn.Module):
     @override
     def n_prefix_tokens(self) -> int:
         return 1
+
+    @property
+    @override
+    def n_register_tokens(self) -> int:
+        return self._n_register_tokens
 
     @property
     @override
@@ -98,3 +107,59 @@ def test_gate_init():
         assert (g == 0.5).all()
     for g in avp.write_gate:
         assert (g == 0.5).all()
+
+
+def test_scene_registers_disabled_by_default():
+    cfg = AVPConfig(scene_grid_size=4)
+    backbone = MockBackbone(64, 4, 2, n_register_tokens=4)
+    avp = AVPViT(backbone, cfg)
+
+    assert avp.n_scene_registers == 0
+    assert avp.scene_registers is None
+
+
+def test_scene_registers_uses_backbone_count():
+    cfg = AVPConfig(scene_grid_size=4, use_scene_registers=True)
+    backbone = MockBackbone(64, 4, 2, n_register_tokens=4)
+    avp = AVPViT(backbone, cfg)
+
+    assert avp.n_scene_registers == 4
+    assert avp.scene_registers is not None
+    assert avp.scene_registers.shape == (1, 4, 64)
+
+
+def test_scene_registers_output_shape_unchanged():
+    """Output should only contain grid tokens, not registers."""
+    embed_dim, num_heads, n_blocks = 64, 4, 2
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_scene_registers=True)
+    backbone = MockBackbone(embed_dim, num_heads, n_blocks, n_register_tokens=4)
+    avp = AVPViT(backbone, cfg)
+
+    B, n_prefix, n_patches = 2, 1, 9
+    local = torch.randn(B, n_prefix + n_patches, embed_dim)
+    centers = torch.rand(B, 2)
+    scales = torch.rand(B)
+
+    out_local, out_scene = avp(local, centers, scales)
+
+    assert out_local.shape == local.shape
+    assert out_scene.shape == (B, 16, embed_dim)  # 4x4 grid, no registers
+
+
+def test_scene_registers_with_return_layers():
+    """Layer outputs should also exclude registers."""
+    embed_dim, num_heads, n_blocks = 64, 4, 2
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_scene_registers=True)
+    backbone = MockBackbone(embed_dim, num_heads, n_blocks, n_register_tokens=4)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    local = torch.randn(B, 1 + 9, embed_dim)
+    centers = torch.rand(B, 2)
+    scales = torch.rand(B)
+
+    out_local, out_scene, layers = avp(local, centers, scales, return_layers=True)
+
+    assert len(layers) == n_blocks
+    for layer in layers:
+        assert layer.shape == (B, 16, embed_dim)  # Grid only, no registers

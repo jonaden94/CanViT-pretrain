@@ -14,6 +14,7 @@ from avp_vit.rope import compute_rope, glimpse_positions, make_grid_positions
 class AVPConfig:
     scene_grid_size: int
     glimpse_grid_size: int = 7
+    use_scene_registers: bool = False
     gate_init: float = 0.0
     use_output_proj: bool = False
 
@@ -24,6 +25,8 @@ class AVPViT(nn.Module):
 
     backbone: ViTBackbone
     cfg: AVPConfig
+    n_scene_registers: int
+    scene_registers: nn.Parameter | None
     scene_tokens: nn.Parameter
     scene_positions: Tensor
     read_attn: nn.ModuleList
@@ -40,6 +43,14 @@ class AVPViT(nn.Module):
         embed_dim = backbone.embed_dim
         num_heads = backbone.num_heads
         n_blocks = backbone.n_blocks
+
+        self.n_scene_registers = backbone.n_register_tokens if cfg.use_scene_registers else 0
+        if self.n_scene_registers > 0:
+            self.scene_registers = nn.Parameter(
+                torch.randn(1, self.n_scene_registers, embed_dim)
+            )
+        else:
+            self.scene_registers = None
 
         self.scene_tokens = nn.Parameter(
             torch.randn(1, cfg.scene_grid_size**2, embed_dim)
@@ -90,14 +101,20 @@ class AVPViT(nn.Module):
         H = W = self.cfg.glimpse_grid_size
         rope_dtype = self.backbone.rope_dtype
         periods = self.backbone.rope_periods
+        n_reg = self.n_scene_registers
 
-        scene = self.scene_tokens.expand(B, -1, -1)
+        # Scene = [registers, grid_tokens]. Registers don't get RoPE (prefix mechanism).
+        scene_grid = self.scene_tokens.expand(B, -1, -1)
+        if self.scene_registers is not None:
+            scene = torch.cat([self.scene_registers.expand(B, -1, -1), scene_grid], dim=1)
+        else:
+            scene = scene_grid
 
         local_pos = glimpse_positions(centers, scales, H, W, dtype=rope_dtype)
         scene_pos = self.scene_positions.to(rope_dtype).unsqueeze(0).expand(B, -1, -1)
 
         local_rope = compute_rope(local_pos, periods)
-        scene_rope = compute_rope(scene_pos, periods)
+        scene_rope = compute_rope(scene_pos, periods)  # Only grid positions, not registers
 
         scene_layers: list[Tensor] = []
         for i in range(self.backbone.n_blocks):
@@ -109,11 +126,14 @@ class AVPViT(nn.Module):
                 scene, local, scene_rope, local_rope
             )
             if return_layers:
-                scene_layers.append(scene)
+                scene_layers.append(scene[:, n_reg:])  # Strip registers for layer outputs
+
+        # Strip registers, keep only grid tokens for output
+        scene_out = scene[:, n_reg:]
 
         if self.output_proj is not None:
-            scene = self.output_proj(scene)
+            scene_out = self.output_proj(scene_out)
 
         if return_layers:
-            return local, scene, scene_layers
-        return local, scene
+            return local, scene_out, scene_layers
+        return local, scene_out
