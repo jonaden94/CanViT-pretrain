@@ -1,12 +1,24 @@
 import torch
 
 from . import (
+    compute_rope,
     glimpse_positions,
     make_grid_positions,
+    make_rope_periods,
     rope_apply,
     rope_apply_with_prefix,
     rope_rotate_half,
 )
+
+
+def test_make_rope_periods_shape():
+    periods = make_rope_periods(head_dim=64)
+    assert periods.shape == (16,)
+
+
+def test_make_rope_periods_dtype():
+    periods = make_rope_periods(head_dim=64, dtype=torch.bfloat16)
+    assert periods.dtype == torch.bfloat16
 
 
 def test_grid_positions_shape():
@@ -16,7 +28,7 @@ def test_grid_positions_shape():
 
 def test_grid_positions_range():
     pos = make_grid_positions(7, 7, torch.device("cpu"))
-    assert pos.min() > -1 and pos.max() < 1  # strictly within [-1, 1]
+    assert pos.min() > -1 and pos.max() < 1
 
 
 def test_glimpse_positions_shape():
@@ -33,6 +45,14 @@ def test_glimpse_center_zero_scale_one_matches_grid():
     scales = torch.ones(1)
     glimpse = glimpse_positions(centers, scales, 7, 7)
     assert torch.allclose(glimpse[0], grid)
+
+
+def test_compute_rope_shape():
+    positions = torch.randn(2, 49, 2)
+    periods = make_rope_periods(head_dim=64)
+    sin, cos = compute_rope(positions, periods)
+    assert sin.shape == (2, 1, 49, 64)
+    assert cos.shape == (2, 1, 49, 64)
 
 
 def test_rope_rotate_half():

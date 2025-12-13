@@ -1,55 +1,73 @@
+from typing import override
+
 import torch
 from torch import Tensor, nn
 
-from ..backend import ViTBackend
+from ..backbone import ViTBackbone
+from ..rope import make_rope_periods
 from . import AVPConfig, AVPViT
 
 
-class MockBackend(ViTBackend, nn.Module):
-    def __init__(self, embed_dim: int, num_heads: int, n_blocks: int):
+class MockBackbone(ViTBackbone, nn.Module):
+    """Minimal backbone for unit testing AVPViT without real weights."""
+
+    _embed_dim: int
+    _num_heads: int
+    _n_blocks: int
+    _rope_periods: Tensor
+
+    def __init__(self, embed_dim: int, num_heads: int, n_blocks: int) -> None:
         nn.Module.__init__(self)
         self._embed_dim = embed_dim
         self._num_heads = num_heads
         self._n_blocks = n_blocks
         head_dim = embed_dim // num_heads
-        self.register_buffer("_rope_periods", torch.ones(head_dim // 4))
+        self.register_buffer("_rope_periods", make_rope_periods(head_dim))
 
     @property
+    @override
     def embed_dim(self) -> int:
         return self._embed_dim
 
     @property
+    @override
     def num_heads(self) -> int:
         return self._num_heads
 
     @property
+    @override
     def n_prefix_tokens(self) -> int:
         return 1
 
     @property
+    @override
     def n_blocks(self) -> int:
         return self._n_blocks
 
     @property
+    @override
     def rope_periods(self) -> Tensor:
         return self._rope_periods
 
     @property
+    @override
     def rope_dtype(self) -> torch.dtype:
         return torch.float32
 
+    @override
     def forward_block(self, idx: int, x: Tensor, rope: tuple[Tensor, Tensor] | None) -> Tensor:
         return x
 
+    @override
     def prepare_tokens(self, images: Tensor) -> tuple[Tensor, int, int]:
         raise NotImplementedError
 
 
-def test_avp_forward_shapes():
+def test_forward_shapes():
     embed_dim, num_heads, n_blocks = 64, 4, 2
     cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3)
-    backend = MockBackend(embed_dim, num_heads, n_blocks)
-    avp = AVPViT(backend, cfg)
+    backbone = MockBackbone(embed_dim, num_heads, n_blocks)
+    avp = AVPViT(backbone, cfg)
 
     B, n_prefix, n_patches = 2, 1, 9
     local = torch.randn(B, n_prefix + n_patches, embed_dim)
@@ -64,8 +82,8 @@ def test_avp_forward_shapes():
 
 def test_gate_init():
     cfg = AVPConfig(scene_grid_size=4, gate_init=0.5)
-    backend = MockBackend(64, 4, 2)
-    avp = AVPViT(backend, cfg)
+    backbone = MockBackbone(64, 4, 2)
+    avp = AVPViT(backbone, cfg)
 
     for g in avp.read_gate:
         assert (g == 0.5).all()

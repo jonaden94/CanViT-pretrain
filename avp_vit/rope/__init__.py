@@ -1,5 +1,4 @@
-"""
-RoPE utilities for AVP.
+"""RoPE utilities for AVP.
 
 We reimplement RoPE computation here because DINOv3's rope_embed(H=H, W=W) computes
 positions internally from the grid size. We need per-batch-item positions for glimpses
@@ -7,6 +6,7 @@ with varying (center, scale), which their API doesn't support.
 
 We use their `periods` buffer directly to stay numerically consistent.
 """
+
 import math
 
 import torch
@@ -14,8 +14,23 @@ from torch import Tensor
 from ytch.correctness import assert_shape
 
 
+def make_rope_periods(
+    head_dim: int,
+    base: float = 100.0,
+    device: torch.device | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> Tensor:
+    """Create RoPE frequency periods (DINOv3-style)."""
+    n_freqs = head_dim // 4
+    exponents = torch.arange(n_freqs, device=device, dtype=dtype) / n_freqs
+    return base**exponents
+
+
 def make_grid_positions(
-    grid_h: int, grid_w: int, device: torch.device, dtype: torch.dtype = torch.float32
+    grid_h: int,
+    grid_w: int,
+    device: torch.device,
+    dtype: torch.dtype = torch.float32,
 ) -> Tensor:
     """Fixed grid positions in [-1, 1]^2 (DINOv3 convention)."""
     h = torch.arange(grid_h, device=device, dtype=dtype)
@@ -74,6 +89,7 @@ def rope_rotate_half(x: Tensor) -> Tensor:
 
 
 def rope_apply(x: Tensor, sin: Tensor, cos: Tensor) -> Tensor:
+    """Apply RoPE rotation to tensor."""
     assert x.shape[-2:] == sin.shape[-2:] == cos.shape[-2:]
     return (x * cos) + (rope_rotate_half(x) * sin)
 

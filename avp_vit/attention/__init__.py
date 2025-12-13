@@ -1,26 +1,35 @@
+from typing import final, override
+
 import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..rope import rope_apply_with_prefix
 
 
+@final
 class CrossAttention(nn.Module):
     """Cross-attention with RoPE. Q attends to KV."""
 
-    def __init__(self, dim: int, num_heads: int, qkv_bias: bool = True):
+    num_heads: int
+    head_dim: int
+    q_proj: nn.Linear
+    kv_proj: nn.Linear
+    out_proj: nn.Linear
+
+    def __init__(self, dim: int, num_heads: int, qkv_bias: bool = True) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-
         self.q_proj = nn.Linear(dim, dim, bias=qkv_bias)
         self.kv_proj = nn.Linear(dim, dim * 2, bias=qkv_bias)
         self.out_proj = nn.Linear(dim, dim)
 
+    @override
     def forward(
         self,
-        q_tokens: Tensor,  # [B, N_q, D]
-        kv_tokens: Tensor,  # [B, N_kv, D]
-        q_rope: tuple[Tensor, Tensor] | None = None,  # (sin, cos) [B, 1, N_rope, head_dim]
+        q_tokens: Tensor,
+        kv_tokens: Tensor,
+        q_rope: tuple[Tensor, Tensor] | None = None,
         kv_rope: tuple[Tensor, Tensor] | None = None,
     ) -> Tensor:
         B, N_q, D = q_tokens.shape

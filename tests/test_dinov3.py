@@ -1,4 +1,5 @@
 """Integration tests with DINOv3 backbone."""
+
 import math
 
 import pytest
@@ -6,22 +7,21 @@ import torch
 from dinov3.models.vision_transformer import vit_small
 
 from avp_vit import AVPConfig, AVPViT
-from avp_vit.backend.dinov3 import DINOv3Backend
+from avp_vit.backbone.dinov3 import DINOv3Backbone
 from avp_vit.rope import compute_rope, glimpse_positions
 
 
 @pytest.mark.parametrize("rope_dtype", ["fp32", "bf16"])
-def test_rope_matches_dinov3(rope_dtype: str):
+def test_rope_matches_dinov3(rope_dtype: str) -> None:
     """Our RoPE sin/cos must exactly match DINOv3's computation."""
     H, W = 7, 7
-    backbone = vit_small(img_size=112, patch_size=16, pos_embed_rope_dtype=rope_dtype)
-    backbone.init_weights()
+    native = vit_small(img_size=112, patch_size=16, pos_embed_rope_dtype=rope_dtype)
+    native.init_weights()
 
-    rope_embed = backbone.rope_embed
+    rope_embed = native.rope_embed
     dtype = rope_embed.dtype
     device = rope_embed.periods.device
 
-    # DINOv3's computation (from rope_position_encoding.py)
     dd = {"device": device, "dtype": dtype}
     coords_h = torch.arange(0.5, H, **dd) / H
     coords_w = torch.arange(0.5, W, **dd) / W
@@ -33,7 +33,6 @@ def test_rope_matches_dinov3(rope_dtype: str):
     angles_dino = angles_dino.flatten(1, 2).tile((2,))
     sin_dino, cos_dino = torch.sin(angles_dino), torch.cos(angles_dino)
 
-    # Ours with center=0, scale=1
     centers = torch.zeros(1, 2, device=device)
     scales = torch.ones(1, device=device)
     our_pos = glimpse_positions(centers, scales, H, W, dtype=dtype)
@@ -45,79 +44,79 @@ def test_rope_matches_dinov3(rope_dtype: str):
 
 
 @pytest.mark.parametrize("rope_dtype", ["fp32", "bf16"])
-def test_rope_matches_backbone_forward(rope_dtype: str):
+def test_rope_matches_backbone_forward(rope_dtype: str) -> None:
     """Full forward with our RoPE must match backbone's native forward."""
     torch.manual_seed(42)
-    backbone = vit_small(img_size=112, patch_size=16, pos_embed_rope_dtype=rope_dtype)
-    backbone.init_weights()
-    backbone.eval()
+    native = vit_small(img_size=112, patch_size=16, pos_embed_rope_dtype=rope_dtype)
+    native.init_weights()
+    native.eval()
 
-    backend = DINOv3Backend(backbone)
+    backbone = DINOv3Backbone(native)
     B = 2
     img = torch.randn(B, 3, 112, 112)
 
     with torch.no_grad():
-        native_out = backbone.forward_features(img)
+        native_out = native.forward_features(img)
     native_tokens = native_out["x_prenorm"]
 
-    x, H, W = backend.prepare_tokens(img)
+    x, H, W = backbone.prepare_tokens(img)
     centers = torch.zeros(B, 2)
     scales = torch.ones(B)
-    positions = glimpse_positions(centers, scales, H, W, dtype=backend.rope_dtype)
-    rope = compute_rope(positions, backend.rope_periods)
+    positions = glimpse_positions(centers, scales, H, W, dtype=backbone.rope_dtype)
+    rope = compute_rope(positions, backbone.rope_periods)
 
     with torch.no_grad():
-        for i in range(backend.n_blocks):
-            x = backend.forward_block(i, x, rope)
+        for i in range(backbone.n_blocks):
+            x = backbone.forward_block(i, x, rope)
 
     assert torch.allclose(x, native_tokens, atol=1e-5)
 
 
-def test_per_batch_rope_differs():
+def test_per_batch_rope_differs() -> None:
     """Different glimpse positions must produce different outputs."""
     torch.manual_seed(42)
-    backbone = vit_small(img_size=112, patch_size=16, pos_embed_rope_dtype="fp32")
-    backbone.init_weights()
+    native = vit_small(img_size=112, patch_size=16, pos_embed_rope_dtype="fp32")
+    native.init_weights()
 
-    backend = DINOv3Backend(backbone)
+    backbone = DINOv3Backbone(native)
     B, H, W = 2, 7, 7
 
-    local = torch.randn(1, backend.n_prefix_tokens + H * W, backend.embed_dim).expand(B, -1, -1).clone()
+    local = torch.randn(1, backbone.n_prefix_tokens + H * W, backbone.embed_dim).expand(B, -1, -1).clone()
     centers = torch.tensor([[-0.5, -0.5], [0.5, 0.5]])
     scales = torch.tensor([0.3, 0.7])
 
-    positions = glimpse_positions(centers, scales, H, W, dtype=backend.rope_dtype)
-    rope = compute_rope(positions, backend.rope_periods)
+    positions = glimpse_positions(centers, scales, H, W, dtype=backbone.rope_dtype)
+    rope = compute_rope(positions, backbone.rope_periods)
 
     out = local.clone()
-    for i in range(backend.n_blocks):
-        out = backend.forward_block(i, out, rope)
+    for i in range(backbone.n_blocks):
+        out = backbone.forward_block(i, out, rope)
 
     assert not torch.allclose(out[0], out[1], atol=1e-3)
 
 
-def test_avp_identity_init():
+def test_avp_identity_init() -> None:
     """With γ=0, AVP should be identity: local = backbone(local), scene = scene."""
     torch.manual_seed(42)
-    backbone = vit_small(img_size=112, patch_size=16, pos_embed_rope_dtype="fp32")
-    backbone.init_weights()
+    native = vit_small(img_size=112, patch_size=16, pos_embed_rope_dtype="fp32")
+    native.init_weights()
 
-    backend = DINOv3Backend(backbone)
+    backbone = DINOv3Backbone(native)
     cfg = AVPConfig(scene_grid_size=8, glimpse_grid_size=7, gate_init=0.0)
-    avp = AVPViT(backend, cfg)
+    avp = AVPViT(backbone, cfg)
 
     B, H, W = 2, 7, 7
 
-    local = torch.randn(B, backend.n_prefix_tokens + H * W, backend.embed_dim)
+    local = torch.randn(B, backbone.n_prefix_tokens + H * W, backbone.embed_dim)
     centers = torch.zeros(B, 2)
     scales = torch.ones(B)
 
-    positions = glimpse_positions(centers, scales, H, W, dtype=backend.rope_dtype)
-    rope = compute_rope(positions, backend.rope_periods)
+    positions = glimpse_positions(centers, scales, H, W, dtype=backbone.rope_dtype)
+    rope = compute_rope(positions, backbone.rope_periods)
 
     expected = local.clone()
-    for i in range(backend.n_blocks):
-        expected = backend.forward_block(i, expected, rope)
+    for i in range(backbone.n_blocks):
+        expected = backbone.forward_block(i, expected, rope)
 
     actual_local, actual_scene = avp(local.clone(), centers, scales)
 
