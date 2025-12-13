@@ -27,7 +27,8 @@ class AVPConfig:
     use_scene_registers: bool = False
     gate_init: float = 0.0
     use_output_proj: bool = False
-    use_policy: bool = False  # Enable learned viewpoint policy
+    use_policy: bool = False
+    policy_init_scale: float = 1e-3  # Uniform init range for policy head weights
 
 
 @final
@@ -120,8 +121,7 @@ class AVPViT(nn.Module):
             )
             self.pol_norm = nn.LayerNorm(embed_dim)
             self.pol_proj = nn.Linear(embed_dim, 2)
-            # Small uniform init to avoid tanh saturation at start
-            nn.init.uniform_(self.pol_proj.weight, -1e-2, 1e-2)
+            nn.init.uniform_(self.pol_proj.weight, -cfg.policy_init_scale, cfg.policy_init_scale)
             nn.init.zeros_(self.pol_proj.bias)
         else:
             self.pol_token = None
