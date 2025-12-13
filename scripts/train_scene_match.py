@@ -3,6 +3,7 @@
 import copy
 import io
 import logging
+import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -44,12 +45,13 @@ class Config:
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
     # Model
-    scene_grid_size: int = 32
+    scene_grid_size: int = 16
     glimpse_grid_size: int = 7
     gate_init: float = 1e-5
     use_output_proj: bool = True
     use_scene_registers: bool = True
     freeze_inner_backbone: bool = False
+    gradient_checkpointing: bool = True  # Checkpoint at timestep boundaries to save VRAM
     # Viewpoints
     use_policy: bool = True  # Use learned policy for viewpoint selection
     n_policy_viewpoints: int = 2  # Number of policy-selected viewpoints (after first imposed)
@@ -59,8 +61,8 @@ class Config:
     min_viewpoint_scale: float = 0.3
     max_viewpoint_scale: float = 1.0
     # Training
-    n_steps: int = 2000
-    batch_size: int = 32
+    n_steps: int = 20000
+    batch_size: int = 64
     num_workers: int = 8
     ref_lr: float = 1e-5
     weight_decay: float = 1e-5
@@ -68,7 +70,7 @@ class Config:
     grad_clip: float = 1.0
     # Logging
     log_every: int = 20
-    viz_every: int = 100
+    viz_every: int = 50
     val_every: int = 200
     ckpt_every: int = 1000
     ckpt_dir: Path = Path("checkpoints")
@@ -81,13 +83,11 @@ class Config:
 def random_viewpoint(
     B: int, device: torch.device, min_scale: float, max_scale: float
 ) -> Viewpoint:
-    """Random viewpoint with scale in [min_scale, max_scale], center constrained to stay in bounds."""
-    scales = torch.rand(B, device=device) * (max_scale - min_scale) + min_scale
-    # Center must satisfy |c| <= 1 - s to keep glimpse in [-1, 1]
-    max_offset = (1 - scales).unsqueeze(1)  # [B, 1]
-    centers = (
-        torch.rand(B, 2, device=device) * 2 - 1
-    ) * max_offset  # [B, 2] in [-max_offset, max_offset]
+    """Random viewpoint with log-uniform scale in [min_scale, max_scale], center constrained to stay in bounds."""
+    log_min, log_max = math.log(min_scale), math.log(max_scale)
+    scales = torch.exp(torch.rand(B, device=device) * (log_max - log_min) + log_min)
+    max_offset = (1 - scales).unsqueeze(1)
+    centers = (torch.rand(B, 2, device=device) * 2 - 1) * max_offset
     return Viewpoint(name="random", centers=centers, scales=scales)
 
 
@@ -122,6 +122,7 @@ def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
         use_output_proj=cfg.use_output_proj,
         use_scene_registers=cfg.use_scene_registers,
         use_policy=cfg.use_policy,
+        gradient_checkpointing=cfg.gradient_checkpointing,
     )
     return AVPViT(backbone_copy, avp_cfg).to(cfg.device)
 

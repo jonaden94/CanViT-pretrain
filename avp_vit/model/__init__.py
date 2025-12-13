@@ -1,9 +1,10 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import NamedTuple, final, override
+from typing import NamedTuple, cast, final, override
 
 import torch
 from torch import Tensor, nn
+from torch.utils.checkpoint import checkpoint
 
 from avp_vit.attention import RoPEReadCrossAttention, RoPEWriteCrossAttention
 from avp_vit.backbone import ViTBackbone
@@ -29,6 +30,7 @@ class AVPConfig:
     use_output_proj: bool = False
     use_policy: bool = False
     policy_init_scale: float = 1e-3  # Uniform init range for policy head weights
+    gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries to save VRAM
 
 
 @final
@@ -207,6 +209,18 @@ class AVPViT(nn.Module):
         """Single step: extract glimpse, process, return StepOutput."""
         glimpse = extract_glimpse(images, viewpoint, self.glimpse_size)
         tokens, _, _ = self.backbone.prepare_tokens(glimpse)
+        B = tokens.shape[0]
+        if scene is None:
+            scene = self.scene_tokens.expand(B, -1, -1)
+        if self.cfg.gradient_checkpointing and self.training:
+            return cast(StepOutput, checkpoint(
+                self._process_glimpse,
+                tokens,
+                viewpoint.centers,
+                viewpoint.scales,
+                scene,
+                use_reentrant=False,
+            ))
         return self._process_glimpse(tokens, viewpoint.centers, viewpoint.scales, scene)
 
     @override
