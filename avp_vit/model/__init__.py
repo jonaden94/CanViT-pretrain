@@ -16,6 +16,7 @@ class AVPConfig:
     glimpse_grid_size: int = 7
     gate_init: float = 0.0
     use_output_proj: bool = False
+    use_output_norm: bool = False
 
 
 @final
@@ -76,13 +77,15 @@ class AVPViT(nn.Module):
             self.output_proj = nn.Linear(embed_dim, embed_dim)
             nn.init.eye_(self.output_proj.weight)
             nn.init.zeros_(self.output_proj.bias)
-            # Clone backbone's final LayerNorm for scene output normalization
+        else:
+            self.output_proj = None
+
+        if cfg.use_output_norm:
             self.output_norm = nn.LayerNorm(embed_dim)
             with torch.no_grad():
                 self.output_norm.weight.copy_(backbone.norm.weight)
                 self.output_norm.bias.copy_(backbone.norm.bias)
         else:
-            self.output_proj = None
             self.output_norm = None
 
     @override
@@ -119,8 +122,9 @@ class AVPViT(nn.Module):
                 scene_layers.append(scene)
 
         if self.output_proj is not None:
-            assert self.output_norm is not None
-            scene = self.output_norm(self.output_proj(scene))
+            scene = self.output_proj(scene)
+        if self.output_norm is not None:
+            scene = self.output_norm(scene)
 
         if return_layers:
             return local, scene, scene_layers
