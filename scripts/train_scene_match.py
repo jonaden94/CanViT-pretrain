@@ -43,15 +43,14 @@ class Config:
     scene_grid_size: int = 16
     glimpse_grid_size: int = 7
     gate_init: float = 1e-4
-    use_output_proj: bool = False
+    use_output_proj: bool = True
     freeze_inner_backbone: bool = True
-    layer_loss: bool = True
     n_steps: int = 50000
     batch_size: int = 256
     num_workers: int = 8
     ref_lr: float = 1e-5
     weight_decay: float = 1e-3
-    warmup_ratio: float = 0.02
+    warmup_ratio: float = 0.04
     grad_clip: float = 1.0
     log_every: int = 20
     viz_every: int = 200
@@ -158,18 +157,6 @@ def teacher_forward(teacher: DINOv3Backbone, img: Tensor) -> Tensor:
     return out["x_norm_patchtokens"]
 
 
-def teacher_forward_layers(teacher: DINOv3Backbone, img: Tensor) -> list[Tensor]:
-    """Teacher forward returning patch tokens after each block (pre-norm)."""
-    with torch.no_grad():
-        x, _ = teacher._backbone.prepare_tokens_with_masks(img, masks=None)
-        n_prefix = teacher.n_prefix_tokens
-        states = []
-        for blk in teacher._backbone.blocks:
-            x = blk(x)
-            states.append(x[:, n_prefix:])  # patch tokens only, [B, S, D]
-    return states
-
-
 def tokenize_glimpse(teacher: DINOv3Backbone, img: Tensor) -> Tensor:
     """Tokenize glimpse image for AVP input."""
     tokens, _ = teacher._backbone.prepare_tokens_with_masks(img, masks=None)
@@ -187,24 +174,14 @@ def train_step(
     S = cfg.scene_grid_size**2
     D = teacher.embed_dim
 
-    glimpse_tokens = tokenize_glimpse(teacher, sample.glimpse_img)
+    teacher_patches = teacher_forward(teacher, sample.teacher_img)
+    assert_shape(teacher_patches, (B, S, D))
 
-    if cfg.layer_loss:
-        teacher_layers = teacher_forward_layers(teacher, sample.teacher_img)
-        _, _, scene_layers = avp(
-            glimpse_tokens, sample.centers, sample.scales, return_layers=True
-        )
-        assert len(teacher_layers) == len(scene_layers)
-        loss = sum(
-            nn.functional.mse_loss(s, t) for s, t in zip(scene_layers, teacher_layers)
-        )
-        return loss / len(scene_layers)
-    else:
-        teacher_patches = teacher_forward(teacher, sample.teacher_img)
-        assert_shape(teacher_patches, (B, S, D))
-        _, scene = avp(glimpse_tokens, sample.centers, sample.scales)
-        assert_shape(scene, (B, S, D))
-        return nn.functional.mse_loss(scene, teacher_patches)
+    glimpse_tokens = tokenize_glimpse(teacher, sample.glimpse_img)
+    _, scene = avp(glimpse_tokens, sample.centers, sample.scales)
+    assert_shape(scene, (B, S, D))
+
+    return nn.functional.mse_loss(scene, teacher_patches)
 
 
 def normalize_local(avp: AVPViT, local: Tensor) -> Tensor:
