@@ -763,7 +763,7 @@ wheels = [
 [[package]]
 name = "ijepa"
 version = "0.1.0"
-source = { git = "https://github.com/yberreby/ijepa.git#fc9469a838ea2b6239a62d7a2f43c9cc536f6dc0" }
+source = { git = "https://github.com/yberreby/ijepa.git#cbc63d8af0a7295b08e32ec082ffda741104b430" }
 
 [[package]]
 name = "importlib-metadata"

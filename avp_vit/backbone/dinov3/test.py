@@ -46,4 +46,6 @@ def test_properties():
     assert backbone.num_heads == 6
     assert backbone.n_blocks == 12
     assert backbone.n_prefix_tokens == 1 + native.n_storage_tokens
-    assert backbone.rope_periods.shape[0] == backbone.embed_dim // backbone.num_heads // 4
+    assert (
+        backbone.rope_periods.shape[0] == backbone.embed_dim // backbone.num_heads // 4
+    )

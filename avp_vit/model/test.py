@@ -3,9 +3,9 @@ from typing import override
 import torch
 from torch import Tensor, nn
 
-from ..backbone import ViTBackbone
-from ..rope import make_rope_periods
-from . import AVPConfig, AVPViT
+from avp_vit.backbone import ViTBackbone
+from avp_vit.model import AVPConfig, AVPViT
+from avp_vit.rope import make_rope_periods
 
 
 class MockBackbone(ViTBackbone, nn.Module):
@@ -55,7 +55,9 @@ class MockBackbone(ViTBackbone, nn.Module):
         return torch.float32
 
     @override
-    def forward_block(self, idx: int, x: Tensor, rope: tuple[Tensor, Tensor] | None) -> Tensor:
+    def forward_block(
+        self, idx: int, x: Tensor, rope: tuple[Tensor, Tensor] | None
+    ) -> Tensor:
         return x
 
     @override

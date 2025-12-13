@@ -40,7 +40,9 @@ class ViTBackbone(ABC):
         ...
 
     @abstractmethod
-    def forward_block(self, idx: int, x: Tensor, rope: tuple[Tensor, Tensor] | None) -> Tensor:
+    def forward_block(
+        self, idx: int, x: Tensor, rope: tuple[Tensor, Tensor] | None
+    ) -> Tensor:
         """Run single transformer block. Backbone decides whether to use rope."""
         ...
 

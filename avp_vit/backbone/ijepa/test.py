@@ -2,9 +2,9 @@
 
 import pytest
 import torch
-from src.models.vision_transformer import vit_small
+from ijepa.models.vision_transformer import vit_small
 
-from . import IJEPABackbone
+from avp_vit.backbone.ijepa import IJEPABackbone
 
 
 def test_forward_matches_native():
@@ -40,7 +40,9 @@ def test_properties():
     assert backbone.num_heads == 6
     assert backbone.n_blocks == 12
     assert backbone.n_prefix_tokens == 0
-    assert backbone.rope_periods.shape[0] == backbone.embed_dim // backbone.num_heads // 4
+    assert (
+        backbone.rope_periods.shape[0] == backbone.embed_dim // backbone.num_heads // 4
+    )
 
 
 def test_ijepa_variable_resolution_crashes():

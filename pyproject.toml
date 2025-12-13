@@ -9,8 +9,8 @@ dependencies = [
     "torchvision",
     "omegaconf",
     "dinov3",
-    "ijepa",
     "ybml",
+    "ijepa",
 ]
 
 [build-system]
@@ -19,8 +19,8 @@ build-backend = "hatchling.build"
 
 [tool.uv.sources]
 dinov3 = { git = "https://github.com/yberreby/dinov3.git" }
-ijepa = { git = "https://github.com/yberreby/ijepa.git" }
 ybml = { git = "https://github.com/yberreby/ybml.git" }
+ijepa = { git = "https://github.com/yberreby/ijepa.git" }
 
 [dependency-groups]
 dev = [
@@ -36,3 +36,5 @@ testpaths = ["avp_vit", "tests"]
 
 [tool.basedpyright]
 reportMissingImports = "warning"
+reportAny = false
+stubPath = "stubs"

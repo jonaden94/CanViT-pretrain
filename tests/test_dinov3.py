@@ -21,9 +21,8 @@ def test_rope_matches_dinov3(rope_dtype: str) -> None:
     dtype = rope_embed.dtype
     device = rope_embed.periods.device
 
-    dd = {"device": device, "dtype": dtype}
-    coords_h = torch.arange(0.5, H, **dd) / H
-    coords_w = torch.arange(0.5, W, **dd) / W
+    coords_h = torch.arange(0.5, H, device=device, dtype=dtype) / H
+    coords_w = torch.arange(0.5, W, device=device, dtype=dtype) / W
     coords = torch.stack(torch.meshgrid(coords_h, coords_w, indexing="ij"), dim=-1)
     coords = coords.flatten(0, 1)
     coords = 2.0 * coords - 1.0
@@ -80,7 +79,11 @@ def test_per_batch_rope_differs() -> None:
     backbone = DINOv3Backbone(native)
     B, H, W = 2, 7, 7
 
-    local = torch.randn(1, backbone.n_prefix_tokens + H * W, backbone.embed_dim).expand(B, -1, -1).clone()
+    local = (
+        torch.randn(1, backbone.n_prefix_tokens + H * W, backbone.embed_dim)
+        .expand(B, -1, -1)
+        .clone()
+    )
     centers = torch.tensor([[-0.5, -0.5], [0.5, 0.5]])
     scales = torch.tensor([0.3, 0.7])
 
@@ -92,5 +95,3 @@ def test_per_batch_rope_differs() -> None:
         out = backbone.forward_block(i, out, rope)
 
     assert not torch.allclose(out[0], out[1], atol=1e-3)
-
-

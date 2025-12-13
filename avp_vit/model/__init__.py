@@ -4,9 +4,9 @@ from typing import final, override
 import torch
 from torch import Tensor, nn
 
-from ..attention import CrossAttention
-from ..backbone import ViTBackbone
-from ..rope import compute_rope, glimpse_positions, make_grid_positions
+from avp_vit.attention import CrossAttention
+from avp_vit.backbone import ViTBackbone
+from avp_vit.rope import compute_rope, glimpse_positions, make_grid_positions
 
 
 @final
@@ -39,22 +39,35 @@ class AVPViT(nn.Module):
         num_heads = backbone.num_heads
         n_blocks = backbone.n_blocks
 
-        self.scene_tokens = nn.Parameter(torch.zeros(1, cfg.scene_grid_size**2, embed_dim))
-
-        self.read_attn = nn.ModuleList([CrossAttention(embed_dim, num_heads) for _ in range(n_blocks)])
-        self.write_attn = nn.ModuleList([CrossAttention(embed_dim, num_heads) for _ in range(n_blocks)])
-
-        self.read_gate = nn.ParameterList([
-            nn.Parameter(torch.full((embed_dim,), cfg.gate_init)) for _ in range(n_blocks)
-        ])
-        self.write_gate = nn.ParameterList([
-            nn.Parameter(torch.full((embed_dim,), cfg.gate_init)) for _ in range(n_blocks)
-        ])
-
-        self.register_buffer(
-            "scene_positions",
-            make_grid_positions(cfg.scene_grid_size, cfg.scene_grid_size, torch.device("cpu")),
+        self.scene_tokens = nn.Parameter(
+            torch.zeros(1, cfg.scene_grid_size**2, embed_dim)
         )
+
+        self.read_attn = nn.ModuleList(
+            [CrossAttention(embed_dim, num_heads) for _ in range(n_blocks)]
+        )
+        self.write_attn = nn.ModuleList(
+            [CrossAttention(embed_dim, num_heads) for _ in range(n_blocks)]
+        )
+
+        self.read_gate = nn.ParameterList(
+            [
+                nn.Parameter(torch.full((embed_dim,), cfg.gate_init))
+                for _ in range(n_blocks)
+            ]
+        )
+        self.write_gate = nn.ParameterList(
+            [
+                nn.Parameter(torch.full((embed_dim,), cfg.gate_init))
+                for _ in range(n_blocks)
+            ]
+        )
+
+        pos = make_grid_positions(
+            cfg.scene_grid_size, cfg.scene_grid_size, self.scene_tokens.device
+        )
+        self.register_buffer("scene_positions", pos)
+        self.scene_positions = pos
 
     @override
     def forward(

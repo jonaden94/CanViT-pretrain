@@ -3,7 +3,7 @@ from typing import final, override
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from ..rope import rope_apply_with_prefix
+from avp_vit.rope import rope_apply_with_prefix
 
 
 @final

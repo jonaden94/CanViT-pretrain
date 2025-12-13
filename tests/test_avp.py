@@ -3,7 +3,7 @@
 import pytest
 import torch
 from dinov3.models.vision_transformer import vit_small as dinov3_vit_small
-from src.models.vision_transformer import vit_small as ijepa_vit_small
+from ijepa.models.vision_transformer import vit_small as ijepa_vit_small
 
 from avp_vit import AVPConfig, AVPViT
 from avp_vit.backbone import ViTBackbone
@@ -69,7 +69,11 @@ def test_different_glimpses_differ(backbone: ViTBackbone) -> None:
     avp = AVPViT(backbone, cfg)
 
     B, H, W = 2, 7, 7
-    local = torch.randn(1, backbone.n_prefix_tokens + H * W, backbone.embed_dim).expand(B, -1, -1).clone()
+    local = (
+        torch.randn(1, backbone.n_prefix_tokens + H * W, backbone.embed_dim)
+        .expand(B, -1, -1)
+        .clone()
+    )
     centers = torch.tensor([[-0.5, -0.5], [0.5, 0.5]])
     scales = torch.tensor([0.3, 0.7])
 
