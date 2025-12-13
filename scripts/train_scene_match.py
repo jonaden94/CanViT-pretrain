@@ -47,6 +47,7 @@ class Config:
     scene_grid_size: int = 8
     glimpse_grid_size: int = 7
     gate_init: float = 1e-4
+    use_output_proj: bool = True
     freeze_inner_backbone: bool = False
     n_steps: int = 5000
     batch_size: int = 8
@@ -88,6 +89,7 @@ def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
         scene_grid_size=cfg.scene_grid_size,
         glimpse_grid_size=cfg.glimpse_grid_size,
         gate_init=cfg.gate_init,
+        use_output_proj=cfg.use_output_proj,
     )
     return AVPViT(backbone_copy, avp_cfg).to(cfg.device)
 
@@ -399,11 +401,8 @@ def main() -> None:
         VAL_IMAGE_URL, cfg.scene_grid_size, cfg.glimpse_grid_size, cfg.device
     )
 
-    # Trainable params
-    trainable = list(avp.read_attn.parameters()) + list(avp.write_attn.parameters())
-    trainable += list(avp.read_gate) + list(avp.write_gate) + [avp.scene_tokens]
-    if not cfg.freeze_inner_backbone:
-        trainable += list(avp.backbone.parameters())
+    # Trainable params (backbone already has requires_grad set in create_avp)
+    trainable = [p for p in avp.parameters() if p.requires_grad]
 
     n_trainable = sum(p.numel() for p in trainable)
     n_teacher = count_parameters(teacher)

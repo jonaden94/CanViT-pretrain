@@ -15,6 +15,7 @@ class AVPConfig:
     scene_grid_size: int
     glimpse_grid_size: int = 7
     gate_init: float = 0.0
+    use_output_proj: bool = False
 
 
 @final
@@ -29,6 +30,7 @@ class AVPViT(nn.Module):
     write_attn: nn.ModuleList
     read_gate: nn.ParameterList
     write_gate: nn.ParameterList
+    output_proj: nn.Linear | None
 
     def __init__(self, backbone: ViTBackbone, cfg: AVPConfig) -> None:
         super().__init__()
@@ -69,6 +71,13 @@ class AVPViT(nn.Module):
         self.register_buffer("scene_positions", pos)
         self.scene_positions = pos
 
+        if cfg.use_output_proj:
+            self.output_proj = nn.Linear(embed_dim, embed_dim)
+            nn.init.eye_(self.output_proj.weight)
+            nn.init.zeros_(self.output_proj.bias)
+        else:
+            self.output_proj = None
+
     @override
     def forward(
         self,
@@ -97,5 +106,8 @@ class AVPViT(nn.Module):
             scene = scene + self.write_gate[i] * self.write_attn[i](
                 scene, local, scene_rope, local_rope
             )
+
+        if self.output_proj is not None:
+            scene = self.output_proj(scene)
 
         return local, scene
