@@ -21,25 +21,34 @@ class IJEPABackbone(ViTBackbone, nn.Module):
     """
 
     _backbone: "IJEPAVisionTransformer"
-    _rope_dtype: torch.dtype
+    _embed_dim: int
+    _num_heads: int
+    _n_blocks: int
     _rope_periods: Tensor
+    _rope_dtype: torch.dtype
 
     def __init__(self, backbone: "IJEPAVisionTransformer", rope_dtype: torch.dtype = torch.float32) -> None:
         nn.Module.__init__(self)
         self._backbone = backbone
         self._rope_dtype = rope_dtype
-        head_dim: int = backbone.embed_dim // backbone.num_heads
+
+        # Cache with explicit types
+        self._embed_dim = backbone.embed_dim
+        self._num_heads = backbone.num_heads
+        self._n_blocks = len(backbone.blocks)
+
+        head_dim = self._embed_dim // self._num_heads
         self.register_buffer("_rope_periods", make_rope_periods(head_dim, dtype=rope_dtype))
 
     @property
     @override
     def embed_dim(self) -> int:
-        return self._backbone.embed_dim
+        return self._embed_dim
 
     @property
     @override
     def num_heads(self) -> int:
-        return self._backbone.num_heads
+        return self._num_heads
 
     @property
     @override
@@ -49,7 +58,7 @@ class IJEPABackbone(ViTBackbone, nn.Module):
     @property
     @override
     def n_blocks(self) -> int:
-        return len(self._backbone.blocks)
+        return self._n_blocks
 
     @property
     @override
@@ -63,7 +72,8 @@ class IJEPABackbone(ViTBackbone, nn.Module):
 
     @override
     def forward_block(self, idx: int, x: Tensor, rope: tuple[Tensor, Tensor] | None) -> Tensor:
-        return self._backbone.blocks[idx](x)
+        out: Tensor = self._backbone.blocks[idx](x)
+        return out
 
     @override
     def prepare_tokens(self, images: Tensor) -> tuple[Tensor, int, int]:
