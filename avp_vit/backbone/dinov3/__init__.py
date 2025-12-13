@@ -1,6 +1,6 @@
 """DINOv3 backbone wrapper for AVP."""
 
-from typing import cast, override
+from typing import Any, cast, override
 
 import torch
 from dinov3.models.vision_transformer import DinoVisionTransformer
@@ -79,6 +79,11 @@ class DINOv3Backbone(ViTBackbone, nn.Module):
     def output_norm(self) -> nn.Module:
         """The LayerNorm applied to produce x_norm_patchtokens."""
         return self._backbone.norm
+
+    def forward_norm_patches(self, images: Tensor) -> Tensor:
+        """Forward pass returning normalized patch tokens [B, H*W, D]."""
+        out = cast(dict[str, Any], self._backbone.forward_features(images))
+        return out["x_norm_patchtokens"]
 
     @override
     def prepare_tokens(self, images: Tensor) -> tuple[Tensor, int, int]:

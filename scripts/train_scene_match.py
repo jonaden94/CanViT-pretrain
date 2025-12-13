@@ -4,15 +4,13 @@ import copy
 import io
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, cast
 
 import comet_ml
 import matplotlib
 import matplotlib.pyplot as plt
 import optuna
-from dataclasses import replace
 from matplotlib.figure import Figure
 import torch
 import torch.nn as nn
@@ -176,25 +174,12 @@ def init_scene_tokens(avp: AVPViT, embed_dim: int) -> None:
     log.info(f"scene_tokens initialized to randn / sqrt({embed_dim})")
 
 
-def teacher_forward(teacher: DINOv3Backbone, img: Tensor) -> Tensor:
-    """Teacher forward: img -> patch features [B, H*W, D]."""
-    with torch.no_grad():
-        out = cast(dict[str, Any], teacher._backbone.forward_features(img))
-    return out["x_norm_patchtokens"]
-
-
-def tokenize_glimpse(teacher: DINOv3Backbone, img: Tensor) -> Tensor:
-    """Tokenize glimpse image for AVP input."""
-    tokens, _ = teacher._backbone.prepare_tokens_with_masks(img, masks=None)
-    return tokens
-
-
 def make_glimpse_fn(
     teacher: DINOv3Backbone,
     teacher_img: Tensor,
     viewpoints: list[Viewpoint],
     glimpse_size: int,
-) -> "Callable[[int, Tensor | None], tuple[Tensor, Tensor, Tensor]]":
+) -> Callable[[int, Tensor | None], tuple[Tensor, Tensor, Tensor]]:
     """Create glimpse function for fixed viewpoints (ignores scene)."""
 
     def glimpse_fn(
@@ -202,7 +187,7 @@ def make_glimpse_fn(
     ) -> tuple[Tensor, Tensor, Tensor]:
         vp = viewpoints[step_idx]
         glimpse_img = extract_glimpse(teacher_img, vp, glimpse_size)
-        tokens = tokenize_glimpse(teacher, glimpse_img)
+        tokens, _, _ = teacher.prepare_tokens(glimpse_img)
         return tokens, vp.centers, vp.scales
 
     return glimpse_fn
@@ -220,7 +205,7 @@ def train_step(
     S = cfg.scene_grid_size**2
     D = teacher.embed_dim
 
-    teacher_patches = teacher_forward(teacher, teacher_img)
+    teacher_patches = teacher.forward_norm_patches(teacher_img)
     assert_shape(teacher_patches, (B, S, D))
 
     glimpse_fn = make_glimpse_fn(teacher, teacher_img, viewpoints, cfg.glimpse_size)
@@ -250,31 +235,16 @@ def tensor_to_img(t: Tensor) -> Tensor:
     return t.permute(1, 2, 0)
 
 
+@dataclass
 class MultistepResult:
     """Results from multi-step AVP inference."""
 
-    teacher_patches: Tensor  # [B, S², D]
-    scenes: list[Tensor]  # [n_views] of [B, S², D]
-    locals: list[Tensor]  # [n_views] of [B, G², D] (glimpse patches only, no prefix)
-    glimpse_imgs: list[Tensor]  # [n_views] of [B, 3, H, W]
-    mses: list[float]  # [n_views]
+    teacher_patches: Tensor
+    scenes: list[Tensor]
+    locals: list[Tensor]
+    glimpse_imgs: list[Tensor]
+    mses: list[float]
     viewpoints: list[Viewpoint]
-
-    def __init__(
-        self,
-        teacher_patches: Tensor,
-        scenes: list[Tensor],
-        locals: list[Tensor],
-        glimpse_imgs: list[Tensor],
-        mses: list[float],
-        viewpoints: list[Viewpoint],
-    ) -> None:
-        self.teacher_patches = teacher_patches
-        self.scenes = scenes
-        self.locals = locals
-        self.glimpse_imgs = glimpse_imgs
-        self.mses = mses
-        self.viewpoints = viewpoints
 
 
 def run_multistep_inference(
@@ -290,7 +260,7 @@ def run_multistep_inference(
     """
     n_prefix = teacher.n_prefix_tokens
     with torch.inference_mode():
-        teacher_patches = teacher_forward(teacher, teacher_img)
+        teacher_patches = teacher.forward_norm_patches(teacher_img)
         scene: Tensor | None = None
         scenes: list[Tensor] = []
         locals_list: list[Tensor] = []
@@ -298,9 +268,8 @@ def run_multistep_inference(
         mses: list[float] = []
 
         for vp in viewpoints:
-            # Same code path as make_glimpse_fn uses for training
             glimpse_img = extract_glimpse(teacher_img, vp, glimpse_size)
-            tokens = tokenize_glimpse(teacher, glimpse_img)
+            tokens, _, _ = teacher.prepare_tokens(glimpse_img)
             glimpse_imgs.append(glimpse_img)
             local, scene = avp.forward_step(tokens, vp.centers, vp.scales, scene)
             # Strip prefix tokens and apply teacher's output norm for fair comparison
