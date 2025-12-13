@@ -4,7 +4,7 @@ from typing import final, override
 import torch
 from torch import Tensor, nn
 
-from avp_vit.attention import CrossAttention
+from avp_vit.attention import RoPEReadCrossAttention, RoPEWriteCrossAttention
 from avp_vit.backbone import ViTBackbone
 from avp_vit.rope import compute_rope, glimpse_positions, make_grid_positions
 
@@ -44,10 +44,10 @@ class AVPViT(nn.Module):
         )
 
         self.read_attn = nn.ModuleList(
-            [CrossAttention(embed_dim, num_heads) for _ in range(n_blocks)]
+            [RoPEReadCrossAttention(embed_dim, num_heads) for _ in range(n_blocks)]
         )
         self.write_attn = nn.ModuleList(
-            [CrossAttention(embed_dim, num_heads) for _ in range(n_blocks)]
+            [RoPEWriteCrossAttention(embed_dim, num_heads) for _ in range(n_blocks)]
         )
 
         self.read_gate = nn.ParameterList(
@@ -91,11 +91,11 @@ class AVPViT(nn.Module):
 
         for i in range(self.backbone.n_blocks):
             local = local + self.read_gate[i] * self.read_attn[i](
-                local, scene, q_rope=local_rope, kv_rope=scene_rope
+                local, scene, local_rope, scene_rope
             )
             local = self.backbone.forward_block(i, local, local_rope)
             scene = scene + self.write_gate[i] * self.write_attn[i](
-                scene, local, q_rope=scene_rope, kv_rope=local_rope
+                scene, local, scene_rope, local_rope
             )
 
         return local, scene

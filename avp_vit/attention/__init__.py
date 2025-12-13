@@ -1,4 +1,4 @@
-from typing import final, override
+from typing import final
 
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -6,46 +6,71 @@ from torch import Tensor, nn
 from avp_vit.rope import rope_apply_with_prefix
 
 
-@final
-class CrossAttention(nn.Module):
-    """Cross-attention with RoPE. Q attends to KV."""
+class RoPECrossAttention(nn.Module):
+    """Cross-attention with RoPE. Subclasses configure Q/K/V/O transforms."""
 
     num_heads: int
     head_dim: int
-    q_proj: nn.Linear
-    kv_proj: nn.Linear
-    out_proj: nn.Linear
+    norm_q: nn.LayerNorm
+    norm_kv: nn.LayerNorm
+    q_transform: nn.Module
+    k_transform: nn.Module
+    v_transform: nn.Module
+    out_transform: nn.Module
 
-    def __init__(self, dim: int, num_heads: int, qkv_bias: bool = True) -> None:
+    def __init__(self, dim: int, num_heads: int) -> None:
         super().__init__()
+        assert dim % num_heads == 0, f"dim {dim} not divisible by num_heads {num_heads}"
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        self.q_proj = nn.Linear(dim, dim, bias=qkv_bias)
-        self.kv_proj = nn.Linear(dim, dim * 2, bias=qkv_bias)
-        self.out_proj = nn.Linear(dim, dim)
+        self.norm_q = nn.LayerNorm(dim)
+        self.norm_kv = nn.LayerNorm(dim)
 
-    @override
+    def _to_heads(self, x: Tensor) -> Tensor:
+        B, N, _ = x.shape
+        return x.view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+
+    def _from_heads(self, x: Tensor) -> Tensor:
+        B, _, N, _ = x.shape
+        return x.transpose(1, 2).reshape(B, N, self.num_heads * self.head_dim)
+
     def forward(
         self,
-        q_tokens: Tensor,
-        kv_tokens: Tensor,
-        q_rope: tuple[Tensor, Tensor] | None = None,
-        kv_rope: tuple[Tensor, Tensor] | None = None,
+        q_in: Tensor,
+        kv_in: Tensor,
+        q_rope: tuple[Tensor, Tensor],
+        kv_rope: tuple[Tensor, Tensor],
     ) -> Tensor:
-        B, N_q, D = q_tokens.shape
-        N_kv = kv_tokens.shape[1]
+        q = self._to_heads(self.q_transform(self.norm_q(q_in)))
+        k = self._to_heads(self.k_transform(self.norm_kv(kv_in)))
+        v = self._to_heads(self.v_transform(self.norm_kv(kv_in)))
 
-        q = self.q_proj(q_tokens).view(B, N_q, self.num_heads, self.head_dim).transpose(1, 2)
-        kv = self.kv_proj(kv_tokens).view(B, N_kv, 2, self.num_heads, self.head_dim)
-        k, v = kv.unbind(2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        if q_rope is not None:
-            q = rope_apply_with_prefix(q, q_rope)
-        if kv_rope is not None:
-            k = rope_apply_with_prefix(k, kv_rope)
+        q = rope_apply_with_prefix(q, q_rope)
+        k = rope_apply_with_prefix(k, kv_rope)
 
         out = F.scaled_dot_product_attention(q, k, v)
-        out = out.transpose(1, 2).reshape(B, N_q, D)
-        return self.out_proj(out)
+        return self.out_transform(self._from_heads(out))
+
+
+@final
+class RoPEReadCrossAttention(RoPECrossAttention):
+    """For reading: Q and O projected, K and V unprojected."""
+
+    def __init__(self, dim: int, num_heads: int) -> None:
+        super().__init__(dim, num_heads)
+        self.q_transform = nn.Linear(dim, dim)
+        self.k_transform = nn.Identity()
+        self.v_transform = nn.Identity()
+        self.out_transform = nn.Linear(dim, dim)
+
+
+@final
+class RoPEWriteCrossAttention(RoPECrossAttention):
+    """For writing: K and V projected, Q and O unprojected."""
+
+    def __init__(self, dim: int, num_heads: int) -> None:
+        super().__init__(dim, num_heads)
+        self.q_transform = nn.Identity()
+        self.k_transform = nn.Linear(dim, dim)
+        self.v_transform = nn.Linear(dim, dim)
+        self.out_transform = nn.Identity()
