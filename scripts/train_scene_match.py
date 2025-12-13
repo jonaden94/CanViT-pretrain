@@ -198,9 +198,11 @@ def mixed_sample(base_img: Tensor, cfg: Config) -> TrainSample:
         real_scene, (glimpse_size, glimpse_size), mode="bilinear"
     )
 
-    # Noise samples
+    # Noise samples (same content: generate at scene size, downsample for glimpse)
     noise_scene = spectrum_noise(B_noise, scene_size, scene_size, cfg.device)
-    noise_glimpse = spectrum_noise(B_noise, glimpse_size, glimpse_size, cfg.device)
+    noise_glimpse = torch.nn.functional.interpolate(
+        noise_scene, (glimpse_size, glimpse_size), mode="bilinear"
+    )
 
     return TrainSample(
         teacher_img=torch.cat([real_scene, noise_scene], dim=0),
@@ -217,9 +219,13 @@ def random_sample(cfg: Config) -> TrainSample:
     scene_size = cfg.scene_grid_size * 16
     glimpse_size = cfg.glimpse_grid_size * 16
 
+    scene = spectrum_noise(B, scene_size, scene_size, cfg.device)
+    glimpse = torch.nn.functional.interpolate(
+        scene, (glimpse_size, glimpse_size), mode="bilinear"
+    )
     return TrainSample(
-        teacher_img=spectrum_noise(B, scene_size, scene_size, cfg.device),
-        glimpse_img=spectrum_noise(B, glimpse_size, glimpse_size, cfg.device),
+        teacher_img=scene,
+        glimpse_img=glimpse,
         centers=torch.zeros(B, 2, device=cfg.device),
         scales=torch.ones(B, device=cfg.device),
         img_pil=None,
