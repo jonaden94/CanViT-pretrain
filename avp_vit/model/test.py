@@ -5,7 +5,7 @@ from torch import Tensor, nn
 
 from avp_vit.backbone import ViTBackbone
 from avp_vit.glimpse import Viewpoint
-from avp_vit.model import AVPConfig, AVPViT
+from avp_vit.model import AVPConfig, AVPViT, StepOutput
 from avp_vit.rope import make_rope_periods
 
 
@@ -224,7 +224,7 @@ def test_policy_enabled():
     assert isinstance(avp.pol_proj, torch.nn.Linear)
 
 
-def test_policy_forward_step_returns_pol_out():
+def test_policy_forward_step_returns_step_output():
     embed_dim = 64
     cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_policy=True)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
@@ -234,12 +234,13 @@ def test_policy_forward_step_returns_pol_out():
     images = torch.randn(B, 3, 64, 64)
     vp = Viewpoint.full_scene(B, images.device)
 
-    local, scene, pol_out = avp.forward_step(images, vp, None)
+    out = avp.forward_step(images, vp, None)
 
-    assert local.shape == (B, 10, embed_dim)  # CLS + 3x3 glimpse grid
-    assert scene.shape == (B, 16, embed_dim)  # 4x4 scene grid
-    assert pol_out is not None
-    assert pol_out.shape == (B, 2)
+    assert isinstance(out, StepOutput)
+    assert out.local.shape == (B, 10, embed_dim)  # CLS + 3x3 glimpse grid
+    assert out.scene.shape == (B, 16, embed_dim)  # 4x4 scene grid
+    assert out.pol_out is not None
+    assert out.pol_out.shape == (B, 2)
 
 
 def test_policy_to_viewpoint():

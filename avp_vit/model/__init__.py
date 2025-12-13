@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import final, override
+from typing import NamedTuple, final, override
 
 import torch
 from torch import Tensor, nn
@@ -9,6 +9,14 @@ from avp_vit.attention import RoPEReadCrossAttention, RoPEWriteCrossAttention
 from avp_vit.backbone import ViTBackbone
 from avp_vit.glimpse import Viewpoint, extract_glimpse
 from avp_vit.rope import compute_rope, glimpse_positions, make_grid_positions
+
+
+class StepOutput(NamedTuple):
+    """Output from a single AVPViT forward step."""
+
+    local: Tensor  # [B, N, D] local features (CLS + patches)
+    scene: Tensor  # [B, G*G, D] updated scene representation
+    pol_out: Tensor | None  # [B, 2] raw policy output, or None if policy disabled
 
 
 @final
@@ -134,11 +142,8 @@ class AVPViT(nn.Module):
         centers: Tensor,
         scales: Tensor,
         scene: Tensor | None,
-    ) -> tuple[Tensor, Tensor, Tensor | None]:
-        """Process one glimpse: read from scene, forward through backbone, write to scene.
-
-        Returns (local, scene, pol_out) where pol_out is raw policy output [B, 2] or None.
-        """
+    ) -> StepOutput:
+        """Process one glimpse: read from scene, forward through backbone, write to scene."""
         B = local.shape[0]
         H = W = self.cfg.glimpse_grid_size
         rope_dtype = self.backbone.rope_dtype
@@ -181,12 +186,12 @@ class AVPViT(nn.Module):
             local = local[:, 1:, :]  # Strip POL from local
 
         # Strip registers, return grid tokens only
-        return local, scene_t[:, n_reg:], pol_out
+        return StepOutput(local, scene_t[:, n_reg:], pol_out)
 
     def forward_step(
         self, images: Tensor, viewpoint: Viewpoint, scene: Tensor | None = None
-    ) -> tuple[Tensor, Tensor, Tensor | None]:
-        """Single step: extract glimpse, process, return (local, scene, pol_out)."""
+    ) -> StepOutput:
+        """Single step: extract glimpse, process, return StepOutput."""
         glimpse = extract_glimpse(images, viewpoint, self.glimpse_size)
         tokens, _, _ = self.backbone.prepare_tokens(glimpse)
         return self._process_glimpse(tokens, viewpoint.centers, viewpoint.scales, scene)
@@ -196,7 +201,8 @@ class AVPViT(nn.Module):
         """Process full images through viewpoints, return final scene representation."""
         scene: Tensor | None = None
         for vp in viewpoints:
-            _, scene, _ = self.forward_step(images, vp, scene)
+            out = self.forward_step(images, vp, scene)
+            scene = out.scene
         assert scene is not None
         return self.output_proj(scene)
 
@@ -206,17 +212,16 @@ class AVPViT(nn.Module):
         viewpoints: list[Viewpoint],
         loss_fn: Callable[[Tensor], Tensor],
     ) -> Tensor:
-        """Stream through viewpoints, compute loss at each step, return average loss.
+        """Stream through fixed viewpoints, compute loss at each step, return average.
 
-        More memory efficient than storing all intermediate scenes - each scene
-        is consumed by loss_fn immediately then discarded.
+        For policy-based viewpoints, use forward_step directly in a loop.
         """
         scene: Tensor | None = None
         loss_sum = torch.tensor(0.0, device=images.device)
         for vp in viewpoints:
-            _, scene, _ = self.forward_step(images, vp, scene)
-            scene_proj = self.output_proj(scene)
-            loss_sum = loss_sum + loss_fn(scene_proj)
+            out = self.forward_step(images, vp, scene)
+            scene = out.scene
+            loss_sum = loss_sum + loss_fn(self.output_proj(scene))
         return loss_sum / len(viewpoints)
 
     def policy_to_viewpoint(self, pol_out: Tensor, scale: float) -> Viewpoint:

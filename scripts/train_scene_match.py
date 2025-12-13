@@ -50,7 +50,9 @@ class Config:
     use_scene_registers: bool = True
     freeze_inner_backbone: bool = False
     # Viewpoints
-    n_random_viewpoints: int = 1
+    use_policy: bool = True  # Use learned policy for viewpoint selection
+    n_policy_viewpoints: int = 2  # Number of policy-selected viewpoints (after first imposed)
+    # For imposed first viewpoint:
     min_viewpoint_scale: float = 0.3
     max_viewpoint_scale: float = 1.0
     # Training
@@ -125,8 +127,14 @@ def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
         gate_init=cfg.gate_init,
         use_output_proj=cfg.use_output_proj,
         use_scene_registers=cfg.use_scene_registers,
+        use_policy=cfg.use_policy,
     )
     return AVPViT(backbone_copy, avp_cfg).to(cfg.device)
+
+
+def policy_scale(cfg: Config) -> float:
+    """Fixed scale for policy viewpoints = finest meaningful scale."""
+    return cfg.glimpse_grid_size / cfg.scene_grid_size
 
 
 def make_train_loader(
@@ -187,21 +195,49 @@ class ValIter:
         return imgs
 
 
-def train_step(
+def train_step_fixed(
     avp: AVPViT,
     teacher: DINOv3Backbone,
     images: Tensor,
     viewpoints: list[Viewpoint],
 ) -> Tensor:
-    """Compute average MSE loss on RAW features (pre-LayerNorm).
-
-    Training on raw features then applying LayerNorm at eval converges better
-    than training on normalized features directly.
-    """
+    """Train with fixed (pre-defined) viewpoints."""
     target_raw = get_teacher_raw_patches(teacher, images)
     return avp.forward_with_loss(
         images, viewpoints, lambda scene: nn.functional.mse_loss(scene, target_raw)
     )
+
+
+def train_step_policy(
+    avp: AVPViT,
+    teacher: DINOv3Backbone,
+    images: Tensor,
+    first_vp: Viewpoint,
+    n_policy_steps: int,
+    pol_scale: float,
+) -> Tensor:
+    """Train with policy-selected viewpoints.
+
+    First viewpoint is imposed, subsequent viewpoints selected by policy.
+    """
+    target_raw = get_teacher_raw_patches(teacher, images)
+    n_total = 1 + n_policy_steps
+
+    scene: Tensor | None = None
+    vp = first_vp
+    loss_sum = torch.tensor(0.0, device=images.device)
+
+    for i in range(n_total):
+        out = avp.forward_step(images, vp, scene)
+        scene = out.scene
+        loss_sum = loss_sum + nn.functional.mse_loss(avp.output_proj(scene), target_raw)
+
+        # Generate next viewpoint from policy (except on last step)
+        if i < n_total - 1:
+            assert out.pol_out is not None, "Policy must be enabled for train_step_policy"
+            vp = avp.policy_to_viewpoint(out.pol_out, pol_scale)
+
+    return loss_sum / n_total
 
 
 def fit_pca(features: Tensor) -> PCA:
@@ -255,9 +291,10 @@ def run_multistep_inference(
 
         for vp in viewpoints:
             glimpse_imgs.append(extract_glimpse(images, vp, avp.glimpse_size))
-            local, scene = avp.forward_step(images, vp, scene)
+            out = avp.forward_step(images, vp, scene)
+            scene = out.scene
             # Strip prefix tokens and apply teacher's output norm for fair comparison
-            local_patches = teacher.output_norm(local[:, n_prefix:])
+            local_patches = teacher.output_norm(out.local[:, n_prefix:])
             locals_list.append(local_patches)
             # Apply output_proj then LayerNorm for normalized scene features
             scene_proj = avp.output_proj(scene)
@@ -265,6 +302,51 @@ def run_multistep_inference(
             scenes.append(scene_norm)
             mse = nn.functional.mse_loss(scene_norm, teacher_patches).item()
             mses.append(mse)
+
+    return MultistepResult(
+        teacher_patches, scenes, locals_list, glimpse_imgs, mses, viewpoints
+    )
+
+
+def run_multistep_inference_policy(
+    avp: AVPViT,
+    teacher: DINOv3Backbone,
+    images: Tensor,
+    first_vp: Viewpoint,
+    n_policy_steps: int,
+    pol_scale: float,
+) -> MultistepResult:
+    """Run multi-step inference with policy-selected viewpoints."""
+    n_prefix = teacher.n_prefix_tokens
+    n_total = 1 + n_policy_steps
+
+    with torch.inference_mode():
+        teacher_patches = teacher.forward_norm_patches(images)
+        scene: Tensor | None = None
+        scenes: list[Tensor] = []
+        locals_list: list[Tensor] = []
+        glimpse_imgs: list[Tensor] = []
+        mses: list[float] = []
+        viewpoints: list[Viewpoint] = []
+
+        vp = first_vp
+        for i in range(n_total):
+            viewpoints.append(vp)
+            glimpse_imgs.append(extract_glimpse(images, vp, avp.glimpse_size))
+            out = avp.forward_step(images, vp, scene)
+            scene = out.scene
+            local_patches = teacher.output_norm(out.local[:, n_prefix:])
+            locals_list.append(local_patches)
+            scene_proj = avp.output_proj(scene)
+            scene_norm = teacher.output_norm(scene_proj)
+            scenes.append(scene_norm)
+            mse = nn.functional.mse_loss(scene_norm, teacher_patches).item()
+            mses.append(mse)
+
+            # Generate next viewpoint from policy (except on last step)
+            if i < n_total - 1:
+                assert out.pol_out is not None
+                vp = avp.policy_to_viewpoint(out.pol_out, pol_scale)
 
     return MultistepResult(
         teacher_patches, scenes, locals_list, glimpse_imgs, mses, viewpoints
@@ -346,11 +428,16 @@ def log_train_pca(
     avp: AVPViT,
     teacher: DINOv3Backbone,
     images: Tensor,
-    viewpoints: list[Viewpoint],
     cfg: Config,
 ) -> None:
     """Log multi-row train PCA viz to Comet."""
-    result = run_multistep_inference(avp, teacher, images, viewpoints)
+    B = images.shape[0]
+    if cfg.use_policy:
+        first_vp = random_viewpoint(B, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale)
+        result = run_multistep_inference_policy(avp, teacher, images, first_vp, cfg.n_policy_viewpoints, policy_scale(cfg))
+    else:
+        viewpoints = make_viewpoints(B, cfg)
+        result = run_multistep_inference(avp, teacher, images, viewpoints)
     fig = plot_multistep_pca(result, images, cfg.scene_grid_size, cfg.glimpse_grid_size)
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
@@ -370,9 +457,14 @@ def eval_and_log(
     """Eval on one random val batch, log multi-row PCA plots to Comet."""
     imgs = val_iter.next_batch()
     images = imgs.to(cfg.device)
-    viewpoints = make_viewpoints(images.shape[0], cfg)
+    B = images.shape[0]
 
-    result = run_multistep_inference(avp, teacher, images, viewpoints)
+    if cfg.use_policy:
+        first_vp = random_viewpoint(B, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale)
+        result = run_multistep_inference_policy(avp, teacher, images, first_vp, cfg.n_policy_viewpoints, policy_scale(cfg))
+    else:
+        viewpoints = make_viewpoints(B, cfg)
+        result = run_multistep_inference(avp, teacher, images, viewpoints)
 
     fig = plot_multistep_pca(result, images, cfg.scene_grid_size, cfg.glimpse_grid_size)
     buf = io.BytesIO()
@@ -472,10 +564,15 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             imgs, _ = next(train_iter)
 
         teacher_img = imgs.to(cfg.device)
-        viewpoints = make_viewpoints(teacher_img.shape[0], cfg)
+        B = teacher_img.shape[0]
 
         optimizer.zero_grad()
-        loss = train_step(avp, teacher, teacher_img, viewpoints)
+        if cfg.use_policy:
+            first_vp = random_viewpoint(B, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale)
+            loss = train_step_policy(avp, teacher, teacher_img, first_vp, cfg.n_policy_viewpoints, policy_scale(cfg))
+        else:
+            viewpoints = make_viewpoints(B, cfg)
+            loss = train_step_fixed(avp, teacher, teacher_img, viewpoints)
         if not torch.isfinite(loss):
             log.warning(f"NaN/Inf loss at step {step}, pruning trial")
             exp.end()
@@ -503,7 +600,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             )
 
         if step > 0 and step % cfg.viz_every == 0:
-            log_train_pca(exp, step, avp, teacher, teacher_img, viewpoints, cfg)
+            log_train_pca(exp, step, avp, teacher, teacher_img, cfg)
 
         if step > 0 and step % cfg.val_every == 0:
             val_loss = eval_and_log(exp, step, avp, teacher, val_iter, cfg)
