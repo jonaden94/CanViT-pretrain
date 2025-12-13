@@ -228,7 +228,7 @@ def train_step(
     def loss_fn(scene_proj: Tensor) -> Tensor:
         return nn.functional.mse_loss(scene_proj, teacher_patches)
 
-    _, avg_loss = avp.forward_sequence(glimpse_fn, len(viewpoints), loss_fn=loss_fn)
+    _, avg_loss = avp.forward_sequence_with_loss(glimpse_fn, len(viewpoints), loss_fn)
     return avg_loss
 
 

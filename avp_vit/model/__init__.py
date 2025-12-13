@@ -153,41 +153,33 @@ class AVPViT(nn.Module):
         self,
         glimpse_fn: Callable[[int, Tensor | None], tuple[Tensor, Tensor, Tensor]],
         n_steps: int,
-        *,
-        loss_fn: Callable[[Tensor], Tensor] | None = None,
-    ) -> Tensor | tuple[Tensor, Tensor]:
-        """Process sequence of glimpses with recurrent scene.
+    ) -> Tensor:
+        """Process sequence of glimpses, return final projected scene."""
+        assert n_steps > 0
+        scene: Tensor | None = None
+        for step_idx in range(n_steps):
+            tokens, centers, scales = glimpse_fn(step_idx, scene)
+            _, scene = self.forward_step(tokens, centers, scales, scene)
+        assert scene is not None
+        return self.output_proj(scene)
 
-        Args:
-            glimpse_fn: Called at each step with (step_idx, scene) -> (tokens, centers, scales).
-                        scene is None for first step. For fixed viewpoints, ignore scene.
-                        For policy-based, use scene to decide where to look.
-            n_steps: Number of steps to run.
-            loss_fn: If provided, called with output_proj(scene) at each step.
-                     The loss is accumulated (memory-efficient, no stored intermediates).
-
-        Returns:
-            If loss_fn: (final_scene, avg_loss)
-            Otherwise: final_scene
-        """
-        assert n_steps > 0, "n_steps must be positive"
+    def forward_sequence_with_loss(
+        self,
+        glimpse_fn: Callable[[int, Tensor | None], tuple[Tensor, Tensor, Tensor]],
+        n_steps: int,
+        loss_fn: Callable[[Tensor], Tensor],
+    ) -> tuple[Tensor, Tensor]:
+        """Process sequence, compute loss at each step, return (final_scene, avg_loss)."""
+        assert n_steps > 0
         scene: Tensor | None = None
         loss_sum: Tensor | None = None
-        final_proj: Tensor | None = None
-
         for step_idx in range(n_steps):
             tokens, centers, scales = glimpse_fn(step_idx, scene)
             _, scene = self.forward_step(tokens, centers, scales, scene)
             assert scene is not None
-            if loss_fn is not None:
-                proj = self.output_proj(scene)
-                assert isinstance(proj, Tensor)
-                final_proj = proj
-                step_loss = loss_fn(proj)
-                loss_sum = step_loss if loss_sum is None else loss_sum + step_loss
-
-        assert scene is not None  # n_steps > 0 guarantees at least one iteration
-        if loss_fn is not None:
-            assert final_proj is not None and loss_sum is not None
-            return final_proj, loss_sum / n_steps
-        return self.output_proj(scene)
+            proj = self.output_proj(scene)
+            assert isinstance(proj, Tensor)
+            step_loss = loss_fn(proj)
+            loss_sum = step_loss if loss_sum is None else loss_sum + step_loss
+        assert scene is not None and loss_sum is not None
+        return self.output_proj(scene), loss_sum / n_steps

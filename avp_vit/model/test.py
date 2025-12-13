@@ -236,7 +236,7 @@ def test_forward_sequence_with_callback():
 
 
 def test_forward_sequence_with_loss_fn():
-    """forward_sequence accumulates loss when loss_fn provided."""
+    """forward_sequence_with_loss accumulates loss across steps."""
     embed_dim = 64
     cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3)
     backbone = MockBackbone(embed_dim, 4, 2)
@@ -254,9 +254,7 @@ def test_forward_sequence_with_loss_fn():
     def loss_fn(scene_proj: Tensor) -> Tensor:
         return torch.nn.functional.mse_loss(scene_proj, target)
 
-    result = avp.forward_sequence(glimpse_fn, n_steps=3, loss_fn=loss_fn)
+    scene, avg_loss = avp.forward_sequence_with_loss(glimpse_fn, 3, loss_fn)
 
-    assert isinstance(result, tuple)
-    scene, avg_loss = result
     assert scene.shape == (B, 16, embed_dim)
     assert avg_loss.shape == ()  # scalar
