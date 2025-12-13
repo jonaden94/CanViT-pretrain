@@ -51,6 +51,7 @@ class AVPViT(nn.Module):
     write_gate: nn.ParameterList
     output_proj: nn.Module
     pol_token: nn.Parameter | None
+    pol_gate: nn.ParameterList | None
     pol_norm: nn.Module | None
     pol_proj: nn.Module | None
 
@@ -114,10 +115,14 @@ class AVPViT(nn.Module):
         else:
             self.output_proj = nn.Identity()
 
-        # Policy: learnable POL token + LayerNorm + projection to (y, x)
+        # Policy: learnable POL token + bypass gate + LayerNorm + projection to (y, x)
         if cfg.use_policy:
             self.pol_token = nn.Parameter(
                 torch.randn(1, 1, embed_dim) / (embed_dim**0.5)
+            )
+            # Bypass gate: at init (all zeros), POL output = POL input (no backbone perturbation)
+            self.pol_gate = nn.ParameterList(
+                [nn.Parameter(torch.zeros(embed_dim)) for _ in range(n_blocks)]
             )
             self.pol_norm = nn.LayerNorm(embed_dim)
             self.pol_proj = nn.Linear(embed_dim, 2)
@@ -125,6 +130,7 @@ class AVPViT(nn.Module):
             nn.init.zeros_(self.pol_proj.bias)
         else:
             self.pol_token = None
+            self.pol_gate = None
             self.pol_norm = None
             self.pol_proj = None
 
@@ -169,11 +175,18 @@ class AVPViT(nn.Module):
         local_rope = compute_rope(local_pos, periods)
         scene_rope = compute_rope(scene_pos, periods)
 
+        pol_gate = self.pol_gate
         for i in range(self.backbone.n_blocks):
             local = local + self.read_gate[i] * self.read_attn[i](
                 local, scene_t, local_rope, scene_rope
             )
+            pol_in = local[:, 0:1, :] if pol_gate is not None else None
             local = self.backbone.forward_block(i, local, local_rope)
+            if pol_gate is not None:
+                assert pol_in is not None
+                # Bypass: interpolate between preserved POL and backbone output
+                pol = pol_in + pol_gate[i] * (local[:, 0:1, :] - pol_in)
+                local = torch.cat([pol, local[:, 1:, :]], dim=1)
             scene_t = scene_t + self.write_gate[i] * self.write_attn[i](
                 scene_t, local, scene_rope, local_rope
             )
