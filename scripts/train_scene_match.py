@@ -40,15 +40,15 @@ PATCH_SIZE = 16
 class Config:
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
-    scene_grid_size: int = 16
+    scene_grid_size: int = 64
     glimpse_grid_size: int = 7
     gate_init: float = 1e-4
     use_output_proj: bool = True
-    freeze_inner_backbone: bool = True
+    freeze_inner_backbone: bool = False
     n_steps: int = 50000
-    batch_size: int = 256
+    batch_size: int = 32
     num_workers: int = 8
-    ref_lr: float = 1e-5
+    ref_lr: float = 1e-4
     weight_decay: float = 1e-3
     warmup_ratio: float = 0.04
     grad_clip: float = 1.0
@@ -108,12 +108,14 @@ def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
 
 
 def make_train_loader(cfg: Config) -> DataLoader[tuple[Tensor, Tensor]]:
-    transform = transforms.Compose([
-        transforms.RandomResizedCrop(cfg.scene_size, scale=(0.4, 1.0)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-    ])
+    transform = transforms.Compose(
+        [
+            transforms.RandomResizedCrop(cfg.scene_size, scale=(0.4, 1.0)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+        ]
+    )
     dataset = ImageFolder(str(cfg.train_dir), transform=transform)
     return DataLoader(
         dataset,
@@ -126,12 +128,14 @@ def make_train_loader(cfg: Config) -> DataLoader[tuple[Tensor, Tensor]]:
 
 
 def make_val_loader(cfg: Config) -> DataLoader[tuple[Tensor, Tensor]]:
-    transform = transforms.Compose([
-        transforms.Resize(cfg.scene_size),
-        transforms.CenterCrop(cfg.scene_size),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-    ])
+    transform = transforms.Compose(
+        [
+            transforms.Resize(cfg.scene_size),
+            transforms.CenterCrop(cfg.scene_size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+        ]
+    )
     dataset = ImageFolder(str(cfg.val_dir), transform=transform)
     return DataLoader(
         dataset,
@@ -331,7 +335,9 @@ def save_checkpoint(
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(avp.state_dict(), ckpt_path)
     size_mb = ckpt_path.stat().st_size / (1024 * 1024)
-    log.info(f"Saved checkpoint: {ckpt_path} ({size_mb:.1f} MB), val_loss={val_loss:.4f}")
+    log.info(
+        f"Saved checkpoint: {ckpt_path} ({size_mb:.1f} MB), val_loss={val_loss:.4f}"
+    )
     exp.log_metric("ckpt/val_loss", val_loss, step=step)
 
 
@@ -367,12 +373,14 @@ def main() -> None:
     n_val = len(val_loader.dataset)  # type: ignore[arg-type]
     log.info(f"Trainable: {n_trainable:,}, Teacher: {n_teacher:,}")
     log.info(f"Train: {n_train:,}, Val: {n_val:,}")
-    exp.log_parameters({
-        "trainable_params": n_trainable,
-        "teacher_params": n_teacher,
-        "train_size": n_train,
-        "val_size": n_val,
-    })
+    exp.log_parameters(
+        {
+            "trainable_params": n_trainable,
+            "teacher_params": n_teacher,
+            "train_size": n_train,
+            "val_size": n_val,
+        }
+    )
 
     peak_lr = get_linear_scaled_lr(cfg.ref_lr, cfg.batch_size)
     optimizer = torch.optim.AdamW(trainable, lr=peak_lr, weight_decay=cfg.weight_decay)
@@ -412,14 +420,22 @@ def main() -> None:
         grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
         optimizer.step()
         scheduler.step()
-        ema_loss_t = alpha * loss.detach() + (1 - alpha) * ema_loss_t if step > 0 else loss.detach()
+        ema_loss_t = (
+            alpha * loss.detach() + (1 - alpha) * ema_loss_t
+            if step > 0
+            else loss.detach()
+        )
 
         if step % cfg.log_every == 0:
             # Sync only when logging
             ema_loss = ema_loss_t.item()
             grad_norm = grad_norm_t.item()
             lr = scheduler.get_last_lr()[0]
-            sps = pbar.format_dict["rate"] * cfg.batch_size if pbar.format_dict["rate"] else 0
+            sps = (
+                pbar.format_dict["rate"] * cfg.batch_size
+                if pbar.format_dict["rate"]
+                else 0
+            )
             exp.log_metrics(
                 {"train/loss": ema_loss, "train/grad_norm": grad_norm, "train/lr": lr},
                 step=step,
@@ -446,7 +462,9 @@ def main() -> None:
     val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, val_loader, cfg)
     if val_loss < best_val_loss:
         save_checkpoint(avp, ckpt_path, exp, cfg.n_steps, val_loss)
-    log.info(f"Final: train_ema={ema_loss_t.item():.4f}, val={val_loss:.4f}, best={best_val_loss:.4f}")
+    log.info(
+        f"Final: train_ema={ema_loss_t.item():.4f}, val={val_loss:.4f}, best={best_val_loss:.4f}"
+    )
     exp.end()
 
 
