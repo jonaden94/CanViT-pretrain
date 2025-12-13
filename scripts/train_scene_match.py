@@ -298,16 +298,6 @@ def pca_rgb(pca: PCA, features: Tensor, H: int, W: int) -> Tensor:
     return torch.sigmoid(torch.from_numpy(proj).view(H, W, 3) * 2.0)
 
 
-def upsample_latents(latents: Tensor, src_size: int, dst_size: int) -> Tensor:
-    """Bilinearly upsample latents from [src_size², D] to [dst_size², D]."""
-    D = latents.shape[-1]
-    spatial = latents.view(src_size, src_size, D).permute(2, 0, 1).unsqueeze(0)
-    upsampled = nn.functional.interpolate(
-        spatial, size=(dst_size, dst_size), mode="bilinear", align_corners=False
-    )
-    return upsampled.squeeze(0).permute(1, 2, 0).reshape(dst_size * dst_size, D)
-
-
 def tensor_to_img(t: Tensor) -> Tensor:
     """Convert [3, H, W] tensor to displayable [H, W, 3] in [0, 1]."""
     t = t.detach().cpu().float()
@@ -315,20 +305,38 @@ def tensor_to_img(t: Tensor) -> Tensor:
     return t.permute(1, 2, 0)
 
 
-def log_train_pca(
-    exp: comet_ml.Experiment,
-    step: int,
+class MultistepResult:
+    """Results from multi-step AVP inference."""
+
+    teacher_patches: Tensor  # [B, S², D]
+    scenes: list[Tensor]  # [n_views] of [B, S², D]
+    glimpse_imgs: list[Tensor]  # [n_views] of [B, 3, H, W]
+    mses: list[float]  # [n_views]
+    viewpoints: list[Viewpoint]
+
+    def __init__(
+        self,
+        teacher_patches: Tensor,
+        scenes: list[Tensor],
+        glimpse_imgs: list[Tensor],
+        mses: list[float],
+        viewpoints: list[Viewpoint],
+    ) -> None:
+        self.teacher_patches = teacher_patches
+        self.scenes = scenes
+        self.glimpse_imgs = glimpse_imgs
+        self.mses = mses
+        self.viewpoints = viewpoints
+
+
+def run_multistep_inference(
     avp: AVPViT,
     teacher: DINOv3Backbone,
     teacher_img: Tensor,
     viewpoints: list[Viewpoint],
-    cfg: Config,
-) -> None:
-    """Log multi-row train PCA viz to Comet."""
-    S = cfg.scene_grid_size
-    B = teacher_img.shape[0]
-    n_views = len(viewpoints)
-
+    glimpse_size: int,
+) -> MultistepResult:
+    """Run multi-step inference, collecting intermediate scenes and MSEs."""
     with torch.inference_mode():
         teacher_patches = teacher_forward(teacher, teacher_img)
         scene: Tensor | None = None
@@ -337,7 +345,7 @@ def log_train_pca(
         mses: list[float] = []
 
         for vp in viewpoints:
-            glimpse_img = extract_glimpse(teacher_img, vp, cfg.glimpse_size)
+            glimpse_img = extract_glimpse(teacher_img, vp, glimpse_size)
             glimpse_imgs.append(glimpse_img)
             tokens = tokenize_glimpse(teacher, glimpse_img)
             _, scene = avp.forward_step(tokens, vp.centers, vp.scales, scene)
@@ -346,16 +354,27 @@ def log_train_pca(
             mse = nn.functional.mse_loss(scene_proj, teacher_patches).item()
             mses.append(mse)
 
+    return MultistepResult(teacher_patches, scenes, glimpse_imgs, mses, viewpoints)
+
+
+def plot_multistep_pca(
+    result: MultistepResult, teacher_img: Tensor, scene_grid_size: int
+) -> plt.Figure:
+    """Create multi-row PCA visualization figure."""
+    S = scene_grid_size
+    B = teacher_img.shape[0]
+    n_views = len(result.viewpoints)
+
     idx = int(torch.randint(B, (1,)).item())
-    teacher_i = teacher_patches[idx]
+    teacher_i = result.teacher_patches[idx]
     pca = fit_pca(teacher_i)
     teacher_pca = pca_rgb(pca, teacher_i, S, S)
 
     fig, axes = plt.subplots(n_views, 4, figsize=(16, 4 * n_views))
 
-    for row, vp in enumerate(viewpoints):
-        glimpse_i = glimpse_imgs[row][idx]
-        scene_i = scenes[row][idx]
+    for row, vp in enumerate(result.viewpoints):
+        glimpse_i = result.glimpse_imgs[row][idx]
+        scene_i = result.scenes[row][idx]
         scene_pca = pca_rgb(pca, scene_i, S, S)
         error_map = (scene_i - teacher_i).pow(2).mean(dim=-1).view(S, S).cpu()
 
@@ -372,11 +391,26 @@ def log_train_pca(
         axes[row, 2].axis("off")
 
         im = axes[row, 3].imshow(error_map.numpy(), cmap="hot")
-        axes[row, 3].set_title(f"MSE={mses[row]:.2f}")
+        axes[row, 3].set_title(f"MSE={result.mses[row]:.2f}")
         axes[row, 3].axis("off")
         fig.colorbar(im, ax=axes[row, 3], fraction=0.046, pad=0.04)
 
     plt.tight_layout()
+    return fig
+
+
+def log_train_pca(
+    exp: comet_ml.Experiment,
+    step: int,
+    avp: AVPViT,
+    teacher: DINOv3Backbone,
+    teacher_img: Tensor,
+    viewpoints: list[Viewpoint],
+    cfg: Config,
+) -> None:
+    """Log multi-row train PCA viz to Comet."""
+    result = run_multistep_inference(avp, teacher, teacher_img, viewpoints, cfg.glimpse_size)
+    fig = plot_multistep_pca(result, teacher_img, cfg.scene_grid_size)
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
     buf.seek(0)
@@ -393,69 +427,13 @@ def eval_and_log(
     cfg: Config,
 ) -> float:
     """Eval on one random val batch, log multi-row PCA plots to Comet."""
-    S = cfg.scene_grid_size
-
     imgs = val_iter.next_batch()
     teacher_img = imgs.to(cfg.device)
-    B = teacher_img.shape[0]
-    viewpoints = make_viewpoints(B, cfg.device)
-    n_views = len(viewpoints)
+    viewpoints = make_viewpoints(teacher_img.shape[0], cfg.device)
 
-    with torch.inference_mode():
-        teacher_patches = teacher_forward(teacher, teacher_img)
+    result = run_multistep_inference(avp, teacher, teacher_img, viewpoints, cfg.glimpse_size)
 
-        # Loop through viewpoints to collect intermediate scenes
-        scene: Tensor | None = None
-        scenes: list[Tensor] = []
-        glimpse_imgs: list[Tensor] = []
-        mses: list[float] = []
-
-        for vp in viewpoints:
-            glimpse_img = extract_glimpse(teacher_img, vp, cfg.glimpse_size)
-            glimpse_imgs.append(glimpse_img)
-            tokens = tokenize_glimpse(teacher, glimpse_img)
-            _, scene = avp.forward_step(tokens, vp.centers, vp.scales, scene)
-            scene_proj = avp.output_proj(scene)
-            scenes.append(scene_proj)
-            mse = nn.functional.mse_loss(scene_proj, teacher_patches).item()
-            mses.append(mse)
-
-        val_loss = mses[-1]  # Final MSE
-
-    # PCA viz from random sample in batch
-    idx = int(torch.randint(B, (1,)).item())
-    teacher_i = teacher_patches[idx]
-    pca = fit_pca(teacher_i)
-    teacher_pca = pca_rgb(pca, teacher_i, S, S)
-
-    # Create multi-row figure: one row per viewpoint
-    # Columns: Glimpse | Scene PCA | Error Map
-    fig, axes = plt.subplots(n_views, 4, figsize=(16, 4 * n_views))
-
-    for row, vp in enumerate(viewpoints):
-        glimpse_i = glimpse_imgs[row][idx]
-        scene_i = scenes[row][idx]
-        scene_pca = pca_rgb(pca, scene_i, S, S)
-        error_map = (scene_i - teacher_i).pow(2).mean(dim=-1).view(S, S).cpu()
-
-        axes[row, 0].imshow(tensor_to_img(glimpse_i).numpy())
-        axes[row, 0].set_title(f"Glimpse ({vp.name})")
-        axes[row, 0].axis("off")
-
-        axes[row, 1].imshow(teacher_pca.numpy())
-        axes[row, 1].set_title("Teacher (HR)")
-        axes[row, 1].axis("off")
-
-        axes[row, 2].imshow(scene_pca.numpy())
-        axes[row, 2].set_title(f"Scene t={row}")
-        axes[row, 2].axis("off")
-
-        im = axes[row, 3].imshow(error_map.numpy(), cmap="hot")
-        axes[row, 3].set_title(f"MSE={mses[row]:.2f}")
-        axes[row, 3].axis("off")
-        fig.colorbar(im, ax=axes[row, 3], fraction=0.046, pad=0.04)
-
-    plt.tight_layout()
+    fig = plot_multistep_pca(result, teacher_img, cfg.scene_grid_size)
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
     buf.seek(0)
@@ -463,9 +441,10 @@ def eval_and_log(
     plt.close(fig)
 
     # Log MSE evolution
-    for t, mse in enumerate(mses):
+    for t, mse in enumerate(result.mses):
         exp.log_metric(f"val/mse_t{t}", mse, step=step)
 
+    val_loss = result.mses[-1]
     exp.log_metric("val/loss", val_loss, step=step)
     return val_loss
 
