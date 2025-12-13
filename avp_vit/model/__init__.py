@@ -123,9 +123,9 @@ class AVPViT(nn.Module):
             self.pol_token = nn.Parameter(
                 torch.randn(1, 1, embed_dim) / (embed_dim**0.5)
             )
-            # Bypass gate: at init (all zeros), POL output = POL input (no backbone perturbation)
+            # Bypass gate: at init, POL output = POL input (no backbone perturbation)
             self.pol_gate = nn.ParameterList(
-                [nn.Parameter(torch.zeros(embed_dim)) for _ in range(n_blocks)]
+                [nn.Parameter(torch.full((embed_dim,), cfg.gate_init)) for _ in range(n_blocks)]
             )
             self.pol_norm = nn.LayerNorm(embed_dim)
             # Small MLP: hidden -> SiLU -> output
