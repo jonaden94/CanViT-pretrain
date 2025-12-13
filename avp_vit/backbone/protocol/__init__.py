@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 
 
 class ViTBackbone(ABC):
@@ -12,6 +12,12 @@ class ViTBackbone(ABC):
     @property
     @abstractmethod
     def embed_dim(self) -> int: ...
+
+    @property
+    @abstractmethod
+    def norm(self) -> nn.LayerNorm:
+        """Final LayerNorm applied after all blocks."""
+        ...
 
     @property
     @abstractmethod

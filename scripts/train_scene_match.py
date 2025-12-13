@@ -278,7 +278,7 @@ def train_step(
 
 def normalize_local(avp: AVPViT, local: Tensor) -> Tensor:
     """Normalize local stream and strip prefix tokens -> [B, G*G, D]."""
-    local_norm = avp.backbone._backbone.norm(local)
+    local_norm = avp.backbone.norm(local)
     return local_norm[:, avp.backbone.n_prefix_tokens :]
 
 
