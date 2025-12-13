@@ -10,6 +10,7 @@ class DinoVisionTransformer(nn.Module):
     n_storage_tokens: int
     blocks: nn.ModuleList
     rope_embed: RopePositionEncoding
+    norm: nn.Module
 
     def init_weights(self) -> None: ...
     def forward_features(self, x: Tensor) -> dict[str, Tensor]: ...

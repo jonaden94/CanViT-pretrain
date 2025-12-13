@@ -10,7 +10,11 @@ from avp_vit.backbone import ViTBackbone
 
 
 class DINOv3Backbone(ViTBackbone, nn.Module):
-    """Wraps a DINOv3 ViT for use with AVP."""
+    """Wraps a DINOv3 ViT for use with AVP.
+
+    The output_norm property exposes the LayerNorm used to produce x_norm_patchtokens
+    in forward_features. Apply it to raw block outputs before comparison with teacher.
+    """
 
     _backbone: DinoVisionTransformer
     _rope_periods: Tensor
@@ -70,6 +74,11 @@ class DINOv3Backbone(ViTBackbone, nn.Module):
     ) -> Tensor:
         out: Tensor = self._backbone.blocks[idx](x, rope)
         return out
+
+    @property
+    def output_norm(self) -> nn.Module:
+        """The LayerNorm applied to produce x_norm_patchtokens."""
+        return self._backbone.norm
 
     @override
     def prepare_tokens(self, images: Tensor) -> tuple[Tensor, int, int]:

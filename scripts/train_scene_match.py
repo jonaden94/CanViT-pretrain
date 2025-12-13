@@ -364,8 +364,8 @@ def run_multistep_inference(
             glimpse_imgs.append(glimpse_img)
             tokens = tokenize_glimpse(teacher, glimpse_img)
             local, scene = avp.forward_step(tokens, vp.centers, vp.scales, scene)
-            # Strip prefix tokens to get glimpse patch features only
-            local_patches = local[:, n_prefix:]
+            # Strip prefix tokens and apply teacher's output norm for fair comparison
+            local_patches = teacher.output_norm(local[:, n_prefix:])
             locals_list.append(local_patches)
             scene_proj = avp.output_proj(scene)
             scenes.append(scene_proj)
