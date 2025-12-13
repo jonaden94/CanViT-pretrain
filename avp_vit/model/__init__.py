@@ -7,6 +7,7 @@ from torch import Tensor, nn
 
 from avp_vit.attention import RoPEReadCrossAttention, RoPEWriteCrossAttention
 from avp_vit.backbone import ViTBackbone
+from avp_vit.glimpse import Viewpoint, extract_glimpse
 from avp_vit.rope import compute_rope, glimpse_positions, make_grid_positions
 
 
@@ -22,10 +23,14 @@ class AVPConfig:
 
 @final
 class AVPViT(nn.Module):
-    """Active Visual Pondering ViT. Wraps backbone blocks with scene read/write."""
+    """Active Visual Pondering ViT.
+
+    Takes full images + viewpoints, handles glimpse extraction and tokenization internally.
+    """
 
     backbone: ViTBackbone
     cfg: AVPConfig
+    glimpse_size: int
     n_scene_registers: int
     scene_registers: nn.Parameter | None
     scene_tokens: nn.Parameter
@@ -40,6 +45,7 @@ class AVPViT(nn.Module):
         super().__init__()
         self.backbone = backbone
         self.cfg = cfg
+        self.glimpse_size = cfg.glimpse_grid_size * backbone.patch_size
 
         embed_dim = backbone.embed_dim
         num_heads = backbone.num_heads
@@ -56,8 +62,9 @@ class AVPViT(nn.Module):
             self.n_scene_registers = 0
             self.scene_registers = None
 
+        # Initialize scene_tokens with randn / sqrt(embed_dim)
         self.scene_tokens = nn.Parameter(
-            torch.randn(1, cfg.scene_grid_size**2, embed_dim)
+            torch.randn(1, cfg.scene_grid_size**2, embed_dim) / (embed_dim**0.5)
         )
 
         self.read_attn = nn.ModuleList(
@@ -102,14 +109,14 @@ class AVPViT(nn.Module):
             scene = torch.cat([self.scene_registers.expand(B, -1, -1), scene], dim=1)
         return scene
 
-    def forward_step(
+    def _process_glimpse(
         self,
         local: Tensor,
         centers: Tensor,
         scales: Tensor,
-        scene: Tensor | None = None,
+        scene: Tensor | None,
     ) -> tuple[Tensor, Tensor]:
-        """Single step without output_proj. For multi-step, pass scene from previous step."""
+        """Process one glimpse: read from scene, forward through backbone, write to scene."""
         B = local.shape[0]
         H = W = self.cfg.glimpse_grid_size
         rope_dtype = self.backbone.rope_dtype
@@ -128,7 +135,6 @@ class AVPViT(nn.Module):
             local = local + self.read_gate[i] * self.read_attn[i](
                 local, scene_t, local_rope, scene_rope
             )
-            # DINOv3 blocks handle prefix-aware RoPE internally (skip CLS/registers)
             local = self.backbone.forward_block(i, local, local_rope)
             scene_t = scene_t + self.write_gate[i] * self.write_attn[i](
                 scene_t, local, scene_rope, local_rope
@@ -137,49 +143,38 @@ class AVPViT(nn.Module):
         # Strip registers, return grid tokens only
         return local, scene_t[:, n_reg:]
 
-    @override
-    def forward(
-        self,
-        local: Tensor,
-        centers: Tensor,
-        scales: Tensor,
-        scene: Tensor | None = None,
+    def forward_step(
+        self, images: Tensor, viewpoint: Viewpoint, scene: Tensor | None = None
     ) -> tuple[Tensor, Tensor]:
-        """Single step with output_proj. Use forward_step for multi-step loops."""
-        local, scene = self.forward_step(local, centers, scales, scene)
-        return local, self.output_proj(scene)
+        """Single step: extract glimpse, process, return (local, scene)."""
+        glimpse = extract_glimpse(images, viewpoint, self.glimpse_size)
+        tokens, _, _ = self.backbone.prepare_tokens(glimpse)
+        return self._process_glimpse(tokens, viewpoint.centers, viewpoint.scales, scene)
 
-    def forward_sequence(
-        self,
-        glimpse_fn: Callable[[int, Tensor | None], tuple[Tensor, Tensor, Tensor]],
-        n_steps: int,
-    ) -> Tensor:
-        """Process sequence of glimpses, return final projected scene."""
-        assert n_steps > 0
+    @override
+    def forward(self, images: Tensor, viewpoints: list[Viewpoint]) -> Tensor:
+        """Process full images through viewpoints, return final scene representation."""
         scene: Tensor | None = None
-        for step_idx in range(n_steps):
-            tokens, centers, scales = glimpse_fn(step_idx, scene)
-            _, scene = self.forward_step(tokens, centers, scales, scene)
+        for vp in viewpoints:
+            _, scene = self.forward_step(images, vp, scene)
         assert scene is not None
         return self.output_proj(scene)
 
-    def forward_sequence_with_loss(
+    def forward_with_loss(
         self,
-        glimpse_fn: Callable[[int, Tensor | None], tuple[Tensor, Tensor, Tensor]],
-        n_steps: int,
+        images: Tensor,
+        viewpoints: list[Viewpoint],
         loss_fn: Callable[[Tensor], Tensor],
-    ) -> tuple[Tensor, Tensor]:
-        """Process sequence, compute loss at each step, return (final_scene, avg_loss)."""
-        assert n_steps > 0
+    ) -> Tensor:
+        """Stream through viewpoints, compute loss at each step, return average loss.
+
+        More memory efficient than storing all intermediate scenes - each scene
+        is consumed by loss_fn immediately then discarded.
+        """
         scene: Tensor | None = None
-        loss_sum: Tensor | None = None
-        for step_idx in range(n_steps):
-            tokens, centers, scales = glimpse_fn(step_idx, scene)
-            _, scene = self.forward_step(tokens, centers, scales, scene)
-            assert scene is not None
-            proj = self.output_proj(scene)
-            assert isinstance(proj, Tensor)
-            step_loss = loss_fn(proj)
-            loss_sum = step_loss if loss_sum is None else loss_sum + step_loss
-        assert scene is not None and loss_sum is not None
-        return self.output_proj(scene), loss_sum / n_steps
+        loss_sum = torch.tensor(0.0, device=images.device)
+        for vp in viewpoints:
+            _, scene = self.forward_step(images, vp, scene)
+            scene_proj = self.output_proj(scene)
+            loss_sum = loss_sum + loss_fn(scene_proj)
+        return loss_sum / len(viewpoints)

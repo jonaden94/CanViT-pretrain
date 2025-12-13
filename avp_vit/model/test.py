@@ -4,6 +4,7 @@ import torch
 from torch import Tensor, nn
 
 from avp_vit.backbone import ViTBackbone
+from avp_vit.glimpse import Viewpoint
 from avp_vit.model import AVPConfig, AVPViT
 from avp_vit.rope import make_rope_periods
 
@@ -15,16 +16,23 @@ class MockBackbone(ViTBackbone, nn.Module):
     _num_heads: int
     _n_blocks: int
     _n_register_tokens: int
+    _patch_size: int
     _rope_periods: Tensor
 
     def __init__(
-        self, embed_dim: int, num_heads: int, n_blocks: int, n_register_tokens: int = 0
+        self,
+        embed_dim: int,
+        num_heads: int,
+        n_blocks: int,
+        n_register_tokens: int,
+        patch_size: int,
     ) -> None:
         nn.Module.__init__(self)
         self._embed_dim = embed_dim
         self._num_heads = num_heads
         self._n_blocks = n_blocks
         self._n_register_tokens = n_register_tokens
+        self._patch_size = patch_size
         head_dim = embed_dim // num_heads
         self.register_buffer("_rope_periods", make_rope_periods(head_dim))
 
@@ -55,6 +63,11 @@ class MockBackbone(ViTBackbone, nn.Module):
 
     @property
     @override
+    def patch_size(self) -> int:
+        return self._patch_size
+
+    @property
+    @override
     def rope_periods(self) -> Tensor:
         return self._rope_periods
 
@@ -71,29 +84,36 @@ class MockBackbone(ViTBackbone, nn.Module):
 
     @override
     def prepare_tokens(self, images: Tensor) -> tuple[Tensor, int, int]:
-        raise NotImplementedError
+        B, C, H, W = images.shape
+        n_patches_h = H // self._patch_size
+        n_patches_w = W // self._patch_size
+        n_patches = n_patches_h * n_patches_w
+        # Return [B, 1 + n_patches, embed_dim] (1 for CLS token)
+        tokens = torch.randn(B, 1 + n_patches, self._embed_dim, device=images.device)
+        return tokens, n_patches_h, n_patches_w
+
+
+PATCH_SIZE = 16
 
 
 def test_forward_shapes():
     embed_dim, num_heads, n_blocks = 64, 4, 2
     cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3)
-    backbone = MockBackbone(embed_dim, num_heads, n_blocks)
+    backbone = MockBackbone(embed_dim, num_heads, n_blocks, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
-    B, n_prefix, n_patches = 2, 1, 9
-    local = torch.randn(B, n_prefix + n_patches, embed_dim)
-    centers = torch.rand(B, 2)
-    scales = torch.rand(B)
+    B = 2
+    images = torch.randn(B, 3, 64, 64)  # scene_grid_size * patch_size = 4 * 16 = 64
+    viewpoints = [Viewpoint.full_scene(B, images.device)]
 
-    out_local, out_scene = avp(local, centers, scales)
+    scene = avp(images, viewpoints)
 
-    assert out_local.shape == local.shape
-    assert out_scene.shape == (B, 16, embed_dim)
+    assert scene.shape == (B, 16, embed_dim)  # 4x4 grid
 
 
 def test_gate_init():
     cfg = AVPConfig(scene_grid_size=4, gate_init=0.5)
-    backbone = MockBackbone(64, 4, 2)
+    backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
     for g in avp.read_gate:
@@ -104,7 +124,7 @@ def test_gate_init():
 
 def test_scene_registers_disabled_by_default():
     cfg = AVPConfig(scene_grid_size=4)
-    backbone = MockBackbone(64, 4, 2, n_register_tokens=4)
+    backbone = MockBackbone(64, 4, 2, 4, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
     assert avp.n_scene_registers == 0
@@ -114,7 +134,7 @@ def test_scene_registers_disabled_by_default():
 def test_scene_registers_scales_with_token_ratio():
     # scene=14, glimpse=7 -> ratio=4, so 4 backbone regs -> 16 scene regs
     cfg = AVPConfig(scene_grid_size=14, glimpse_grid_size=7, use_scene_registers=True)
-    backbone = MockBackbone(64, 4, 2, n_register_tokens=4)
+    backbone = MockBackbone(64, 4, 2, 4, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
     assert avp.n_scene_registers == 16  # 4 * (14/7)² = 4 * 4 = 16
@@ -126,86 +146,23 @@ def test_scene_registers_output_shape_unchanged():
     """Output should only contain grid tokens, not registers."""
     embed_dim, num_heads, n_blocks = 64, 4, 2
     cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_scene_registers=True)
-    backbone = MockBackbone(embed_dim, num_heads, n_blocks, n_register_tokens=4)
-    avp = AVPViT(backbone, cfg)
-
-    B, n_prefix, n_patches = 2, 1, 9
-    local = torch.randn(B, n_prefix + n_patches, embed_dim)
-    centers = torch.rand(B, 2)
-    scales = torch.rand(B)
-
-    out_local, out_scene = avp(local, centers, scales)
-
-    assert out_local.shape == local.shape
-    assert out_scene.shape == (B, 16, embed_dim)  # 4x4 grid, no registers
-
-
-def test_forward_step_no_output_proj():
-    """forward_step returns scene before output_proj."""
-    embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, gate_init=0.0, use_output_proj=True)
-    backbone = MockBackbone(embed_dim, 4, 2)
+    backbone = MockBackbone(embed_dim, num_heads, n_blocks, 4, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
     B = 2
-    local = torch.randn(B, 1 + 9, embed_dim)
-    centers = torch.zeros(B, 2)
-    scales = torch.ones(B)
+    images = torch.randn(B, 3, 64, 64)
+    viewpoints = [Viewpoint.full_scene(B, images.device)]
 
-    with torch.no_grad():
-        _, scene_step = avp.forward_step(local, centers, scales)
-        _, scene_fwd = avp(local, centers, scales)
+    scene = avp(images, viewpoints)
 
-    # At init: forward_step returns scene_tokens, forward applies output_proj (identity)
-    assert torch.allclose(scene_step, scene_fwd)
-
-
-def test_scene_input_accepted():
-    """forward_step accepts scene from previous step."""
-    embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3)
-    backbone = MockBackbone(embed_dim, 4, 2)
-    avp = AVPViT(backbone, cfg)
-
-    B = 2
-    local = torch.randn(B, 1 + 9, embed_dim)
-    centers = torch.zeros(B, 2)
-    scales = torch.ones(B)
-    custom_scene = torch.randn(B, 16, embed_dim)
-
-    _, scene_out = avp.forward_step(local, centers, scales, scene=custom_scene)
-
-    assert scene_out.shape == (B, 16, embed_dim)
-
-
-def test_multi_step_passthrough_at_init():
-    """At init (gates=0), multi-step returns same scene as single step."""
-    embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, gate_init=0.0)
-    backbone = MockBackbone(embed_dim, 4, 2)
-    avp = AVPViT(backbone, cfg)
-
-    B = 2
-    local = torch.randn(B, 1 + 9, embed_dim)
-    centers = torch.zeros(B, 2)
-    scales = torch.ones(B)
-
-    with torch.no_grad():
-        # Single step
-        _, scene_1 = avp.forward_step(local, centers, scales)
-
-        # Multi-step: pass scene from step 1 to step 2
-        _, scene_2 = avp.forward_step(local, centers, scales, scene=scene_1)
-
-    # At init with gates=0, scene is unchanged, so scene_1 == scene_2
-    assert torch.allclose(scene_1, scene_2)
+    assert scene.shape == (B, 16, embed_dim)  # 4x4 grid, no registers
 
 
 def test_output_proj_is_always_module():
     """output_proj is always nn.Module (Identity or Linear), never None."""
     cfg_no_proj = AVPConfig(scene_grid_size=4, use_output_proj=False)
     cfg_with_proj = AVPConfig(scene_grid_size=4, use_output_proj=True)
-    backbone = MockBackbone(64, 4, 2)
+    backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
 
     avp_no = AVPViT(backbone, cfg_no_proj)
     avp_yes = AVPViT(backbone, cfg_with_proj)
@@ -214,47 +171,30 @@ def test_output_proj_is_always_module():
     assert isinstance(avp_yes.output_proj, torch.nn.Linear)
 
 
-def test_forward_sequence_with_callback():
-    """forward_sequence accepts glimpse_fn callback and n_steps."""
+def test_multi_viewpoint_forward():
+    """Forward with multiple viewpoints processes all sequentially."""
     embed_dim = 64
     cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3)
-    backbone = MockBackbone(embed_dim, 4, 2)
+    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
     B = 2
-    local = torch.randn(B, 1 + 9, embed_dim)
-    centers = torch.zeros(B, 2)
-    scales = torch.ones(B)
+    images = torch.randn(B, 3, 64, 64)
+    viewpoints = [
+        Viewpoint.full_scene(B, images.device),
+        Viewpoint.quadrant(B, images.device, 0, 0),
+        Viewpoint.quadrant(B, images.device, 1, 1),
+    ]
 
-    def glimpse_fn(step_idx: int, scene: Tensor | None) -> tuple[Tensor, Tensor, Tensor]:
-        return local, centers, scales
+    scene = avp(images, viewpoints)
 
-    scene = avp.forward_sequence(glimpse_fn, n_steps=3)
-
-    assert isinstance(scene, Tensor)
     assert scene.shape == (B, 16, embed_dim)
 
 
-def test_forward_sequence_with_loss_fn():
-    """forward_sequence_with_loss accumulates loss across steps."""
-    embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3)
-    backbone = MockBackbone(embed_dim, 4, 2)
+def test_glimpse_size_from_backbone():
+    """glimpse_size = glimpse_grid_size * backbone.patch_size."""
+    cfg = AVPConfig(scene_grid_size=14, glimpse_grid_size=7)
+    backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
-    B = 2
-    local = torch.randn(B, 1 + 9, embed_dim)
-    centers = torch.zeros(B, 2)
-    scales = torch.ones(B)
-    target = torch.randn(B, 16, embed_dim)
-
-    def glimpse_fn(step_idx: int, scene: Tensor | None) -> tuple[Tensor, Tensor, Tensor]:
-        return local, centers, scales
-
-    def loss_fn(scene_proj: Tensor) -> Tensor:
-        return torch.nn.functional.mse_loss(scene_proj, target)
-
-    scene, avg_loss = avp.forward_sequence_with_loss(glimpse_fn, 3, loss_fn)
-
-    assert scene.shape == (B, 16, embed_dim)
-    assert avg_loss.shape == ()  # scalar
+    assert avp.glimpse_size == 7 * PATCH_SIZE  # 112

@@ -60,6 +60,11 @@ class DINOv3Backbone(ViTBackbone, nn.Module):
 
     @property
     @override
+    def patch_size(self) -> int:
+        return self._backbone.patch_size
+
+    @property
+    @override
     def rope_periods(self) -> Tensor:
         return self._rope_periods
 

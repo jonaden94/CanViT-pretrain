@@ -35,6 +35,10 @@ class ViTBackbone(ABC):
 
     @property
     @abstractmethod
+    def patch_size(self) -> int: ...
+
+    @property
+    @abstractmethod
     def rope_periods(self) -> Tensor:
         """RoPE frequency periods for cross-attention."""
         ...

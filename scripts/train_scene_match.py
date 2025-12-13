@@ -3,7 +3,6 @@
 import copy
 import io
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -22,7 +21,6 @@ from torchvision import transforms
 from torchvision.datasets import ImageFolder
 from tqdm import tqdm
 from ymc.lr import get_linear_scaled_lr
-from ytch.correctness import assert_shape
 from ytch.device import get_sensible_device
 from ytch.model import count_parameters
 
@@ -167,59 +165,19 @@ class ValIter:
         return imgs
 
 
-def init_scene_tokens(avp: AVPViT, embed_dim: int) -> None:
-    """Initialize scene_tokens to randn / sqrt(embed_dim)."""
-    with torch.no_grad():
-        avp.scene_tokens.data.normal_(0, 1.0 / (embed_dim**0.5))
-    log.info(f"scene_tokens initialized to randn / sqrt({embed_dim})")
-
-
-def make_glimpse_fn(
-    teacher: DINOv3Backbone,
-    teacher_img: Tensor,
-    viewpoints: list[Viewpoint],
-    glimpse_size: int,
-) -> Callable[[int, Tensor | None], tuple[Tensor, Tensor, Tensor]]:
-    """Create glimpse function for fixed viewpoints (ignores scene)."""
-    device_type = teacher_img.device.type
-
-    def glimpse_fn(
-        step_idx: int, scene: Tensor | None
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        vp = viewpoints[step_idx]
-        glimpse_img = extract_glimpse(teacher_img, vp, glimpse_size)
-        with torch.inference_mode(), torch.autocast(device_type):
-            tokens, _, _ = teacher.prepare_tokens(glimpse_img)
-        return tokens, vp.centers, vp.scales
-
-    return glimpse_fn
-
-
 def train_step(
     avp: AVPViT,
     teacher: DINOv3Backbone,
-    teacher_img: Tensor,
+    images: Tensor,
     viewpoints: list[Viewpoint],
-    cfg: Config,
 ) -> Tensor:
-    """Multi-step training: average MSE across viewpoints."""
-    B = teacher_img.shape[0]
-    S = cfg.scene_grid_size**2
-    D = teacher.embed_dim
-
-    # inference_mode avoids autograd overhead for transformer intermediates
-    with torch.inference_mode(), torch.autocast(teacher_img.device.type):
-        teacher_patches = teacher.forward_norm_patches(teacher_img)
-    teacher_patches = teacher_patches.clone()  # clone outside so target works in backward
-    assert_shape(teacher_patches, (B, S, D))
-
-    glimpse_fn = make_glimpse_fn(teacher, teacher_img, viewpoints, cfg.glimpse_size)
-
-    def loss_fn(scene_proj: Tensor) -> Tensor:
-        return nn.functional.mse_loss(scene_proj, teacher_patches)
-
-    _, avg_loss = avp.forward_sequence_with_loss(glimpse_fn, len(viewpoints), loss_fn)
-    return avg_loss
+    """Compute average MSE loss across viewpoints."""
+    with torch.inference_mode():
+        target = teacher.forward_norm_patches(images)
+    target = target.clone()
+    return avp.forward_with_loss(
+        images, viewpoints, lambda scene: nn.functional.mse_loss(scene, target)
+    )
 
 
 def fit_pca(features: Tensor) -> PCA:
@@ -255,15 +213,13 @@ class MultistepResult:
 def run_multistep_inference(
     avp: AVPViT,
     teacher: DINOv3Backbone,
-    teacher_img: Tensor,
+    images: Tensor,
     viewpoints: list[Viewpoint],
-    glimpse_size: int,
 ) -> MultistepResult:
     """Run multi-step inference, collecting intermediate scenes, locals, and MSEs."""
     n_prefix = teacher.n_prefix_tokens
-    device_type = teacher_img.device.type
-    with torch.inference_mode(), torch.autocast(device_type):
-        teacher_patches = teacher.forward_norm_patches(teacher_img)
+    with torch.inference_mode():
+        teacher_patches = teacher.forward_norm_patches(images)
         scene: Tensor | None = None
         scenes: list[Tensor] = []
         locals_list: list[Tensor] = []
@@ -271,10 +227,8 @@ def run_multistep_inference(
         mses: list[float] = []
 
         for vp in viewpoints:
-            glimpse_img = extract_glimpse(teacher_img, vp, glimpse_size)
-            tokens, _, _ = teacher.prepare_tokens(glimpse_img)
-            glimpse_imgs.append(glimpse_img)
-            local, scene = avp.forward_step(tokens, vp.centers, vp.scales, scene)
+            glimpse_imgs.append(extract_glimpse(images, vp, avp.glimpse_size))
+            local, scene = avp.forward_step(images, vp, scene)
             # Strip prefix tokens and apply teacher's output norm for fair comparison
             local_patches = teacher.output_norm(local[:, n_prefix:])
             locals_list.append(local_patches)
@@ -362,16 +316,14 @@ def log_train_pca(
     step: int,
     avp: AVPViT,
     teacher: DINOv3Backbone,
-    teacher_img: Tensor,
+    images: Tensor,
     viewpoints: list[Viewpoint],
     cfg: Config,
 ) -> None:
     """Log multi-row train PCA viz to Comet."""
-    result = run_multistep_inference(
-        avp, teacher, teacher_img, viewpoints, cfg.glimpse_size
-    )
+    result = run_multistep_inference(avp, teacher, images, viewpoints)
     fig = plot_multistep_pca(
-        result, teacher_img, cfg.scene_grid_size, cfg.glimpse_grid_size
+        result, images, cfg.scene_grid_size, cfg.glimpse_grid_size
     )
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
@@ -390,15 +342,13 @@ def eval_and_log(
 ) -> float:
     """Eval on one random val batch, log multi-row PCA plots to Comet."""
     imgs = val_iter.next_batch()
-    teacher_img = imgs.to(cfg.device)
-    viewpoints = make_viewpoints(teacher_img.shape[0], cfg.device)
+    images = imgs.to(cfg.device)
+    viewpoints = make_viewpoints(images.shape[0], cfg.device)
 
-    result = run_multistep_inference(
-        avp, teacher, teacher_img, viewpoints, cfg.glimpse_size
-    )
+    result = run_multistep_inference(avp, teacher, images, viewpoints)
 
     fig = plot_multistep_pca(
-        result, teacher_img, cfg.scene_grid_size, cfg.glimpse_grid_size
+        result, images, cfg.scene_grid_size, cfg.glimpse_grid_size
     )
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
@@ -442,7 +392,6 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     teacher = load_teacher(cfg.device)
     avp = create_avp(teacher, cfg)
-    init_scene_tokens(avp, teacher.embed_dim)
 
     train_loader = make_train_loader(cfg)
     val_iter = ValIter(make_val_loader(cfg))
@@ -498,7 +447,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         viewpoints = make_viewpoints(teacher_img.shape[0], cfg.device)
 
         optimizer.zero_grad()
-        loss = train_step(avp, teacher, teacher_img, viewpoints, cfg)
+        loss = train_step(avp, teacher, teacher_img, viewpoints)
         if not torch.isfinite(loss):
             log.warning(f"NaN/Inf loss at step {step}, pruning trial")
             exp.end()
