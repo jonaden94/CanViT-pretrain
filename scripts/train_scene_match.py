@@ -59,7 +59,7 @@ class Config:
     n_policy_viewpoints: int = (
         8  # Number of policy-selected viewpoints (after first imposed)
     )
-    policy_random_prob: float = 0.3  # Probability of random viewpoint instead of policy
+    epsilon: float = 0.3  # Epsilon-greedy: prob of random viewpoint instead of policy
     n_random_viewpoints: int = (
         2  # For non-policy mode: random viewpoints after full scene
     )
@@ -217,14 +217,15 @@ def train_step_policy(
     first_vp: Viewpoint,
     n_policy_steps: int,
     pol_scale: float,
-    random_prob: float,
+    epsilon: float,
     min_scale: float,
     max_scale: float,
 ) -> Tensor:
-    """Train with policy-selected viewpoints.
+    """Train with policy-selected viewpoints (epsilon-greedy exploration).
 
-    First viewpoint is imposed, subsequent viewpoints selected by policy or random.
-    At each step, with prob random_prob we use a random viewpoint instead of policy.
+    First viewpoint is imposed. For subsequent viewpoints:
+    - With prob epsilon: random viewpoint (explore)
+    - With prob 1-epsilon: policy viewpoint (exploit)
     """
     B = images.shape[0]
     device = images.device
@@ -241,13 +242,15 @@ def train_step_policy(
         scene = out.scene
         loss_sum = loss_sum + nn.functional.mse_loss(avp.output_proj(scene), target)
 
-        # Generate next viewpoint (except on last step)
+        # Generate next viewpoint (except on last step): epsilon-greedy per batch item
         if i < n_total - 1:
-            if torch.rand(1).item() < random_prob:
-                vp = random_viewpoint(B, device, min_scale, max_scale)
-            else:
-                assert out.pol_out is not None
-                vp = avp.policy_to_viewpoint(out.pol_out, pol_scale)
+            assert out.pol_out is not None
+            use_random = torch.rand(B, device=device) < epsilon
+            rand_vp = random_viewpoint(B, device, min_scale, max_scale)
+            pol_vp = avp.policy_to_viewpoint(out.pol_out, pol_scale)
+            centers = torch.where(use_random.unsqueeze(1), rand_vp.centers, pol_vp.centers)
+            scales = torch.where(use_random, rand_vp.scales, pol_vp.scales)
+            vp = Viewpoint(name="mixed", centers=centers, scales=scales)
 
     return loss_sum / n_total
 
@@ -783,7 +786,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 first_vp,
                 cfg.n_policy_viewpoints,
                 policy_scale(cfg),
-                cfg.policy_random_prob,
+                cfg.epsilon,
                 cfg.min_viewpoint_scale,
                 cfg.max_viewpoint_scale,
             )
