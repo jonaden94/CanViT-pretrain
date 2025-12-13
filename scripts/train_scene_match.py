@@ -10,6 +10,7 @@ from pathlib import Path
 import comet_ml
 import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 import torch
 import torch.nn as nn
 from dinov3.hub.backbones import dinov3_vits16
@@ -359,7 +360,7 @@ def run_multistep_inference(
 
 def plot_multistep_pca(
     result: MultistepResult, teacher_img: Tensor, scene_grid_size: int
-) -> plt.Figure:
+) -> Figure:
     """Create multi-row PCA visualization figure."""
     S = scene_grid_size
     B = teacher_img.shape[0]

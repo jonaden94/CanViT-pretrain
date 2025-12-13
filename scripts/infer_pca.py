@@ -32,7 +32,7 @@ def load_backbone(device: torch.device) -> DINOv3Backbone:
 def load_image(url: str, size: int = 448) -> tuple[Image.Image, torch.Tensor]:
     with urllib.request.urlopen(url) as f:
         img = Image.open(f).convert("RGB").resize((size, size))
-    x = TF.normalize(TF.to_tensor(img), mean=IMAGENET_MEAN, std=IMAGENET_STD)
+    x = TF.normalize(TF.to_tensor(img), mean=list(IMAGENET_MEAN), std=list(IMAGENET_STD))
     return img, x.unsqueeze(0)
 
 
