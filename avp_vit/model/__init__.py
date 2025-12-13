@@ -15,6 +15,7 @@ from avp_vit.rope import compute_rope, glimpse_positions, make_grid_positions
 class StepOutput(NamedTuple):
     """Output from a single AVPViT forward step."""
 
+    glimpse: Tensor  # [B, C, H, W] extracted glimpse image
     local: Tensor  # [B, N, D] local features (CLS + patches)
     scene: Tensor  # [B, G*G, D] updated scene representation
     pol_out: Tensor | None  # [B, 2] raw policy output, or None if policy disabled
@@ -152,6 +153,7 @@ class AVPViT(nn.Module):
 
     def _process_glimpse(
         self,
+        glimpse: Tensor,
         local: Tensor,
         centers: Tensor,
         scales: Tensor,
@@ -207,7 +209,7 @@ class AVPViT(nn.Module):
             local = local[:, 1:, :]  # Strip POL from local
 
         # Strip registers, return grid tokens only
-        return StepOutput(local, scene_t[:, n_reg:], pol_out)
+        return StepOutput(glimpse, local, scene_t[:, n_reg:], pol_out)
 
     def forward_step(
         self, images: Tensor, viewpoint: Viewpoint, scene: Tensor | None = None
@@ -221,13 +223,14 @@ class AVPViT(nn.Module):
         if self.cfg.gradient_checkpointing and self.training:
             return cast(StepOutput, checkpoint(
                 self._process_glimpse,
+                glimpse,
                 tokens,
                 viewpoint.centers,
                 viewpoint.scales,
                 scene,
                 use_reentrant=False,
             ))
-        return self._process_glimpse(tokens, viewpoint.centers, viewpoint.scales, scene)
+        return self._process_glimpse(glimpse, tokens, viewpoint.centers, viewpoint.scales, scene)
 
     @override
     def forward(self, images: Tensor, viewpoints: list[Viewpoint]) -> Tensor:

@@ -28,7 +28,7 @@ from ytch.model import count_parameters
 
 from avp_vit import AVPConfig, AVPViT
 from avp_vit.backbone.dinov3 import DINOv3Backbone
-from avp_vit.glimpse import Viewpoint, extract_glimpse
+from avp_vit.glimpse import Viewpoint
 
 matplotlib.use("Agg")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -396,8 +396,8 @@ def run_multistep_inference(
         mses: list[float] = []
 
         for vp in viewpoints:
-            glimpse_imgs.append(extract_glimpse(images, vp, avp.glimpse_size))
             out = avp.forward_step(images, vp, scene)
+            glimpse_imgs.append(out.glimpse)
             scene = out.scene
             # Strip prefix tokens and apply teacher's output norm for fair comparison
             local_patches = teacher.output_norm(out.local[:, n_prefix:])
@@ -445,8 +445,8 @@ def run_multistep_inference_policy(
         vp = first_vp
         for i in range(n_total):
             viewpoints.append(vp)
-            glimpse_imgs.append(extract_glimpse(images, vp, avp.glimpse_size))
             out = avp.forward_step(images, vp, scene)
+            glimpse_imgs.append(out.glimpse)
             scene = out.scene
             local_patches = teacher.output_norm(out.local[:, n_prefix:])
             locals_list.append(local_patches)

@@ -88,10 +88,10 @@ def run_experiment(
         images, target = make_gaussian_images(B, scene_size, dev)
 
         vp = Viewpoint.full_scene(B, dev)
-        _, scene, pol_out = avp.forward_step(images, vp, None)
+        out = avp.forward_step(images, vp, None)
 
-        assert pol_out is not None
-        pred = torch.tanh(pol_out)
+        assert out.pol_out is not None
+        pred = torch.tanh(out.pol_out)
         loss = F.mse_loss(pred, target)
 
         optimizer.zero_grad()
@@ -127,9 +127,9 @@ def run_experiment(
     with torch.no_grad():
         images, target = make_gaussian_images(8, scene_size, dev)
         vp = Viewpoint.full_scene(8, dev)
-        _, _, pol_out = avp.forward_step(images, vp, None)
-        assert pol_out is not None
-        pred = torch.tanh(pol_out)
+        out = avp.forward_step(images, vp, None)
+        assert out.pol_out is not None
+        pred = torch.tanh(out.pol_out)
 
     fig, axes = plt.subplots(2, 4, figsize=(12, 6))
     for i in range(8):
@@ -150,9 +150,9 @@ def run_experiment(
     with torch.no_grad():
         images, target = make_gaussian_images(256, scene_size, dev)
         vp = Viewpoint.full_scene(256, dev)
-        _, _, pol_out = avp.forward_step(images, vp, None)
-        assert pol_out is not None
-        pred = torch.tanh(pol_out)
+        out = avp.forward_step(images, vp, None)
+        assert out.pol_out is not None
+        pred = torch.tanh(out.pol_out)
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 5))
     axes[0].scatter(target[:, 0].cpu(), pred[:, 0].cpu(), alpha=0.3, s=10)
