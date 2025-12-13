@@ -11,10 +11,10 @@ import comet_ml
 import matplotlib
 import matplotlib.pyplot as plt
 import optuna
-from matplotlib.figure import Figure
 import torch
 import torch.nn as nn
 from dinov3.hub.backbones import dinov3_vits16
+from matplotlib.figure import Figure
 from sklearn.decomposition import PCA
 from torch import Tensor
 from torch.utils.data import DataLoader
@@ -46,9 +46,9 @@ class Config:
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
     # Model
-    scene_grid_size: int = 64
+    scene_grid_size: int = 14
     glimpse_grid_size: int = 7
-    gate_init: float = 1e-4
+    gate_init: float = 1e-5
     use_output_proj: bool = True
     use_scene_registers: bool = True
     freeze_inner_backbone: bool = False
@@ -56,9 +56,9 @@ class Config:
     n_steps: int = 50000
     batch_size: int = 32
     num_workers: int = 8
-    ref_lr: float = 1e-4
-    weight_decay: float = 1e-3
-    warmup_ratio: float = 0.04
+    ref_lr: float = 1e-5
+    weight_decay: float = 1e-4
+    warmup_ratio: float = 0.1
     grad_clip: float = 1.0
     # Logging
     log_every: int = 20
@@ -181,13 +181,15 @@ def make_glimpse_fn(
     glimpse_size: int,
 ) -> Callable[[int, Tensor | None], tuple[Tensor, Tensor, Tensor]]:
     """Create glimpse function for fixed viewpoints (ignores scene)."""
+    device_type = teacher_img.device.type
 
     def glimpse_fn(
         step_idx: int, scene: Tensor | None
     ) -> tuple[Tensor, Tensor, Tensor]:
         vp = viewpoints[step_idx]
         glimpse_img = extract_glimpse(teacher_img, vp, glimpse_size)
-        tokens, _, _ = teacher.prepare_tokens(glimpse_img)
+        with torch.inference_mode(), torch.autocast(device_type):
+            tokens, _, _ = teacher.prepare_tokens(glimpse_img)
         return tokens, vp.centers, vp.scales
 
     return glimpse_fn
@@ -205,7 +207,10 @@ def train_step(
     S = cfg.scene_grid_size**2
     D = teacher.embed_dim
 
-    teacher_patches = teacher.forward_norm_patches(teacher_img)
+    # inference_mode avoids autograd overhead for transformer intermediates
+    with torch.inference_mode(), torch.autocast(teacher_img.device.type):
+        teacher_patches = teacher.forward_norm_patches(teacher_img)
+    teacher_patches = teacher_patches.clone()  # clone outside so target works in backward
     assert_shape(teacher_patches, (B, S, D))
 
     glimpse_fn = make_glimpse_fn(teacher, teacher_img, viewpoints, cfg.glimpse_size)
@@ -254,12 +259,10 @@ def run_multistep_inference(
     viewpoints: list[Viewpoint],
     glimpse_size: int,
 ) -> MultistepResult:
-    """Run multi-step inference, collecting intermediate scenes, locals, and MSEs.
-
-    Uses the same glimpse extraction path as training (via extract_glimpse + tokenize_glimpse).
-    """
+    """Run multi-step inference, collecting intermediate scenes, locals, and MSEs."""
     n_prefix = teacher.n_prefix_tokens
-    with torch.inference_mode():
+    device_type = teacher_img.device.type
+    with torch.inference_mode(), torch.autocast(device_type):
         teacher_patches = teacher.forward_norm_patches(teacher_img)
         scene: Tensor | None = None
         scenes: list[Tensor] = []
@@ -280,11 +283,16 @@ def run_multistep_inference(
             mse = nn.functional.mse_loss(scene_proj, teacher_patches).item()
             mses.append(mse)
 
-    return MultistepResult(teacher_patches, scenes, locals_list, glimpse_imgs, mses, viewpoints)
+    return MultistepResult(
+        teacher_patches, scenes, locals_list, glimpse_imgs, mses, viewpoints
+    )
 
 
 def plot_multistep_pca(
-    result: MultistepResult, teacher_img: Tensor, scene_grid_size: int, glimpse_grid_size: int
+    result: MultistepResult,
+    teacher_img: Tensor,
+    scene_grid_size: int,
+    glimpse_grid_size: int,
 ) -> Figure:
     """Create multi-row PCA visualization figure.
 
@@ -359,8 +367,12 @@ def log_train_pca(
     cfg: Config,
 ) -> None:
     """Log multi-row train PCA viz to Comet."""
-    result = run_multistep_inference(avp, teacher, teacher_img, viewpoints, cfg.glimpse_size)
-    fig = plot_multistep_pca(result, teacher_img, cfg.scene_grid_size, cfg.glimpse_grid_size)
+    result = run_multistep_inference(
+        avp, teacher, teacher_img, viewpoints, cfg.glimpse_size
+    )
+    fig = plot_multistep_pca(
+        result, teacher_img, cfg.scene_grid_size, cfg.glimpse_grid_size
+    )
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
     buf.seek(0)
@@ -381,9 +393,13 @@ def eval_and_log(
     teacher_img = imgs.to(cfg.device)
     viewpoints = make_viewpoints(teacher_img.shape[0], cfg.device)
 
-    result = run_multistep_inference(avp, teacher, teacher_img, viewpoints, cfg.glimpse_size)
+    result = run_multistep_inference(
+        avp, teacher, teacher_img, viewpoints, cfg.glimpse_size
+    )
 
-    fig = plot_multistep_pca(result, teacher_img, cfg.scene_grid_size, cfg.glimpse_grid_size)
+    fig = plot_multistep_pca(
+        result, teacher_img, cfg.scene_grid_size, cfg.glimpse_grid_size
+    )
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
     buf.seek(0)
