@@ -44,19 +44,20 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 
 @dataclass
 class Config:
-    scene_grid_size: int = 8
+    scene_grid_size: int = 16
     glimpse_grid_size: int = 7
     gate_init: float = 1e-4
     use_output_proj: bool = True
-    freeze_inner_backbone: bool = False
+    freeze_inner_backbone: bool = True
     n_steps: int = 5000
     batch_size: int = 8
-    use_real_image: bool = False
-    ref_lr: float = 1e-4
+    mix_real_noise: bool = True
+    ref_lr: float = 1e-5
+    weight_decay: float = 0.1
     warmup_ratio: float = 0.5
     grad_clip: float = 1.0
-    log_every: int = 10
-    viz_every: int = 20
+    log_every: int = 20
+    viz_every: int = 50
     val_every: int = 50
     n_init_samples: int = 64
     device: torch.device = field(default_factory=get_sensible_device)
@@ -163,6 +164,51 @@ def spectrum_noise(B: int, H: int, W: int, device: torch.device) -> Tensor:
     out = out - out.mean(dim=(-2, -1), keepdim=True)
     out = out / (out.std(dim=(-2, -1), keepdim=True) + 1e-8)
     return out
+
+
+def load_base_image(url: str, device: torch.device) -> Tensor:
+    """Load image as normalized tensor [1, 3, H, W] at original size."""
+    img = Image.open(urllib.request.urlopen(url)).convert("RGB")
+    t = TF.normalize(TF.to_tensor(img), mean=IMAGENET_MEAN, std=IMAGENET_STD)
+    return t.unsqueeze(0).to(device)
+
+
+def mixed_sample(base_img: Tensor, cfg: Config) -> TrainSample:
+    """Create batch with 50% augmented real + 50% spectrum noise."""
+    from torchvision.transforms import v2
+
+    B = cfg.batch_size
+    B_real = B // 2
+    B_noise = B - B_real
+    scene_size = cfg.scene_grid_size * 16
+    glimpse_size = cfg.glimpse_grid_size * 16
+
+    # Batched augmentation: expand, crop, flip, then resize to both sizes
+    batch = base_img.expand(B_real, -1, -1, -1)
+    aug = v2.Compose(
+        [
+            v2.RandomResizedCrop(
+                (scene_size, scene_size), scale=(0.8, 1.0), antialias=True
+            ),
+            v2.RandomHorizontalFlip(),
+        ]
+    )
+    real_scene = aug(batch)
+    real_glimpse = torch.nn.functional.interpolate(
+        real_scene, (glimpse_size, glimpse_size), mode="bilinear"
+    )
+
+    # Noise samples
+    noise_scene = spectrum_noise(B_noise, scene_size, scene_size, cfg.device)
+    noise_glimpse = spectrum_noise(B_noise, glimpse_size, glimpse_size, cfg.device)
+
+    return TrainSample(
+        teacher_img=torch.cat([real_scene, noise_scene], dim=0),
+        glimpse_img=torch.cat([real_glimpse, noise_glimpse], dim=0),
+        centers=torch.zeros(B, 2, device=cfg.device),
+        scales=torch.ones(B, device=cfg.device),
+        img_pil=None,
+    )
 
 
 def random_sample(cfg: Config) -> TrainSample:
@@ -387,14 +433,11 @@ def main() -> None:
     # Initialize scene_tokens to average latents
     init_scene_tokens(avp, teacher, cfg)
 
-    # Load train samples (real images or will generate random)
-    train_samples: list[TrainSample] = []
-    if cfg.use_real_image:
-        for url in TRAIN_IMAGE_URLS:
-            sample = load_image_sample(
-                url, cfg.scene_grid_size, cfg.glimpse_grid_size, cfg.device
-            )
-            train_samples.append(sample)
+    # Load base image for mixed training
+    base_img: Tensor | None = None
+    if cfg.mix_real_noise:
+        base_img = load_base_image(TRAIN_IMAGE_URLS[0], cfg.device)
+        log.info(f"Loaded base image: {base_img.shape}")
 
     # Load val sample
     val_sample = load_image_sample(
@@ -411,7 +454,7 @@ def main() -> None:
 
     # Optimizer
     peak_lr = get_linear_scaled_lr(cfg.ref_lr, cfg.batch_size)
-    optimizer = torch.optim.AdamW(trainable, lr=peak_lr)
+    optimizer = torch.optim.AdamW(trainable, lr=peak_lr, weight_decay=cfg.weight_decay)
     warmup_steps = int(cfg.n_steps * cfg.warmup_ratio)
     scheduler = get_linear_warmup_scheduler(optimizer, warmup_steps)
 
@@ -422,8 +465,8 @@ def main() -> None:
     ema_loss, alpha = 0.0, 2 / (cfg.log_every + 1)
     pbar = tqdm(range(cfg.n_steps), desc="Training")
     for step in pbar:
-        if cfg.use_real_image:
-            sample = train_samples[step % len(train_samples)]
+        if cfg.mix_real_noise and base_img is not None:
+            sample = mixed_sample(base_img, cfg)
         else:
             sample = random_sample(cfg)
 
