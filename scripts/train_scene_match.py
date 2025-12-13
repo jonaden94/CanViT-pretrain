@@ -36,6 +36,7 @@ TRAIN_IMAGE_URL = "https://dl.fbaipublicfiles.com/dinov3/notebooks/pca/test_imag
 VAL_IMAGE_URL = "https://dl.fbaipublicfiles.com/dinov2/images/example.jpg"
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
+PATCH_SIZE = 16
 
 
 @dataclass
@@ -59,6 +60,14 @@ class Config:
     n_init_samples: int = 64
     ckpt_dir: Path = Path("checkpoints")
     device: torch.device = field(default_factory=get_sensible_device)
+
+    @property
+    def scene_size(self) -> int:
+        return self.scene_grid_size * PATCH_SIZE
+
+    @property
+    def glimpse_size(self) -> int:
+        return self.glimpse_grid_size * PATCH_SIZE
 
 
 class TrainSample:
@@ -108,33 +117,23 @@ def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
     return AVPViT(backbone_copy, avp_cfg).to(cfg.device)
 
 
-def load_image_sample(
-    url: str,
-    scene_grid: int,
-    glimpse_grid: int,
-    device: torch.device,
-) -> TrainSample:
+def load_image_sample(url: str, cfg: Config) -> TrainSample:
     """Load image and create teacher/glimpse image tensors."""
-    scene_size = scene_grid * 16
-    glimpse_size = glimpse_grid * 16
-
     img_pil = (
         Image.open(urllib.request.urlopen(url))
         .convert("RGB")
-        .resize((scene_size, scene_size))
+        .resize((cfg.scene_size, cfg.scene_size))
     )
-
     scene = (
         TF.normalize(TF.to_tensor(img_pil), mean=IMAGENET_MEAN, std=IMAGENET_STD)
         .unsqueeze(0)
-        .to(device)
+        .to(cfg.device)
     )
-
     return TrainSample(
         scene=scene,
-        glimpse_size=glimpse_size,
-        centers=torch.zeros(1, 2, device=device),
-        scales=torch.ones(1, device=device),
+        glimpse_size=cfg.glimpse_size,
+        centers=torch.zeros(1, 2, device=cfg.device),
+        scales=torch.ones(1, device=cfg.device),
         img_pil=img_pil,
     )
 
@@ -187,26 +186,23 @@ def mixed_sample(base_img: Tensor, cfg: Config) -> TrainSample:
     B = cfg.batch_size
     B_real = B // 2
     B_noise = B - B_real
-    scene_size = cfg.scene_grid_size * 16
-    glimpse_size = cfg.glimpse_grid_size * 16
 
-    # Batched augmentation: expand, crop, flip
     batch = base_img.expand(B_real, -1, -1, -1)
     aug = v2.Compose(
         [
             v2.RandomResizedCrop(
-                (scene_size, scene_size), scale=(0.8, 1.0), antialias=True
+                (cfg.scene_size, cfg.scene_size), scale=(0.8, 1.0), antialias=True
             ),
             v2.RandomHorizontalFlip(),
         ]
     )
     real_scene = aug(batch)
-    noise_scene = spectrum_noise(B_noise, scene_size, scene_size, cfg.device)
+    noise_scene = spectrum_noise(B_noise, cfg.scene_size, cfg.scene_size, cfg.device)
     scene = torch.cat([real_scene, noise_scene], dim=0)
 
     return TrainSample(
         scene=scene,
-        glimpse_size=glimpse_size,
+        glimpse_size=cfg.glimpse_size,
         centers=torch.zeros(B, 2, device=cfg.device),
         scales=torch.ones(B, device=cfg.device),
     )
@@ -214,15 +210,11 @@ def mixed_sample(base_img: Tensor, cfg: Config) -> TrainSample:
 
 def random_sample(cfg: Config) -> TrainSample:
     """Create random spectrum noise image tensors."""
-    B = cfg.batch_size
-    scene_size = cfg.scene_grid_size * 16
-    glimpse_size = cfg.glimpse_grid_size * 16
-
     return TrainSample(
-        scene=spectrum_noise(B, scene_size, scene_size, cfg.device),
-        glimpse_size=glimpse_size,
-        centers=torch.zeros(B, 2, device=cfg.device),
-        scales=torch.ones(B, device=cfg.device),
+        scene=spectrum_noise(cfg.batch_size, cfg.scene_size, cfg.scene_size, cfg.device),
+        glimpse_size=cfg.glimpse_size,
+        centers=torch.zeros(cfg.batch_size, 2, device=cfg.device),
+        scales=torch.ones(cfg.batch_size, device=cfg.device),
     )
 
 
@@ -243,14 +235,13 @@ def init_scene_tokens(avp: AVPViT, teacher: DINOv3Backbone, cfg: Config) -> None
     """Initialize scene_tokens to average latents from random images."""
     S = cfg.scene_grid_size**2
     D = teacher.embed_dim
-    scene_size = cfg.scene_grid_size * 16
 
     log.info(f"Initializing scene_tokens from {cfg.n_init_samples} random images...")
     all_patches = []
     batch_size = min(cfg.n_init_samples, 16)
     for i in range(0, cfg.n_init_samples, batch_size):
         B = min(batch_size, cfg.n_init_samples - i)
-        imgs = spectrum_noise(B, scene_size, scene_size, cfg.device)
+        imgs = spectrum_noise(B, cfg.scene_size, cfg.scene_size, cfg.device)
         patches = teacher_forward(teacher, imgs)
         all_patches.append(patches)
 
@@ -320,17 +311,18 @@ def log_train_pca(
     scene: Tensor,
     cfg: Config,
 ) -> None:
-    """Log train PCA viz to Comet (first sample only)."""
+    """Log train PCA viz to Comet (random sample from batch)."""
     S = cfg.scene_grid_size
     G = cfg.glimpse_grid_size
-    teacher_0, local_0, scene_0 = teacher_patches[0], local_patches[0], scene[0]
-    pca = fit_pca(teacher_0)
-    teacher_rgb = pca_rgb(pca, teacher_0, S, S)
-    local_rgb = pca_rgb(pca, local_0, G, G)
-    scene_rgb = pca_rgb(pca, scene_0, S, S)
+    idx = torch.randint(teacher_patches.shape[0], (1,)).item()
+    teacher_i, local_i, scene_i = teacher_patches[idx], local_patches[idx], scene[idx]
+    pca = fit_pca(teacher_i)
+    teacher_rgb = pca_rgb(pca, teacher_i, S, S)
+    local_rgb = pca_rgb(pca, local_i, G, G)
+    scene_rgb = pca_rgb(pca, scene_i, S, S)
 
     fig, axes = plt.subplots(1, 4, figsize=(16, 4))
-    axes[0].imshow(tensor_to_img(sample.teacher_img[0]).numpy())
+    axes[0].imshow(tensor_to_img(sample.teacher_img[idx]).numpy())
     axes[0].set_title("Input")
     axes[0].axis("off")
     axes[1].imshow(teacher_rgb.numpy())
@@ -452,9 +444,7 @@ def main() -> None:
         log.info(f"Loaded base image: {base_img.shape}")
 
     # Load val sample
-    val_sample = load_image_sample(
-        VAL_IMAGE_URL, cfg.scene_grid_size, cfg.glimpse_grid_size, cfg.device
-    )
+    val_sample = load_image_sample(VAL_IMAGE_URL, cfg)
 
     # Trainable params (backbone already has requires_grad set in create_avp)
     trainable = [p for p in avp.parameters() if p.requires_grad]
