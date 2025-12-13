@@ -128,6 +128,7 @@ class AVPViT(nn.Module):
             local = local + self.read_gate[i] * self.read_attn[i](
                 local, scene_t, local_rope, scene_rope
             )
+            # DINOv3 blocks handle prefix-aware RoPE internally (skip CLS/registers)
             local = self.backbone.forward_block(i, local, local_rope)
             scene_t = scene_t + self.write_gate[i] * self.write_attn[i](
                 scene_t, local, scene_rope, local_rope
@@ -176,15 +177,14 @@ class AVPViT(nn.Module):
         for step_idx in range(n_steps):
             tokens, centers, scales = glimpse_fn(step_idx, scene)
             _, scene = self.forward_step(tokens, centers, scales, scene)
-            proj = self.output_proj(scene)
             if loss_fn is not None:
-                step_loss = loss_fn(proj)
+                scene_proj = self.output_proj(scene)
+                step_loss = loss_fn(scene_proj)
                 loss_sum = step_loss if loss_sum is None else loss_sum + step_loss
 
-        # scene is guaranteed to be Tensor after at least one iteration
         assert scene is not None
-        scene_proj = self.output_proj(scene)
         if loss_fn is not None:
+            # scene_proj from last iteration is the final projection
             assert loss_sum is not None
             return scene_proj, loss_sum / n_steps
-        return scene_proj
+        return self.output_proj(scene)

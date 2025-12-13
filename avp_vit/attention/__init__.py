@@ -65,11 +65,18 @@ class RoPEReadCrossAttention(RoPECrossAttention):
 
 @final
 class RoPEWriteCrossAttention(RoPECrossAttention):
-    """For writing: K and V projected, Q and O unprojected."""
+    """For writing: K and V projected, Q and O unprojected.
+
+    V is identity-initialized so initial writes copy glimpse features directly.
+    As training progresses, V learns what content to actually write.
+    """
 
     def __init__(self, dim: int, num_heads: int) -> None:
         super().__init__(dim, num_heads)
         self.q_transform = nn.Identity()
         self.k_transform = nn.Linear(dim, dim)
-        self.v_transform = nn.Linear(dim, dim)
+        v_proj = nn.Linear(dim, dim)
+        nn.init.eye_(v_proj.weight)
+        nn.init.zeros_(v_proj.bias)
+        self.v_transform = v_proj
         self.out_transform = nn.Identity()
