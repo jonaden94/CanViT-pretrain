@@ -63,15 +63,30 @@ class Config:
     device: torch.device = field(default_factory=get_sensible_device)
 
 
-@dataclass
 class TrainSample:
-    """A training sample with images (not tokens - tokenization happens in forward)."""
+    """A training sample. Glimpse is always derived from scene via downsampling."""
 
     teacher_img: Tensor  # [B, 3, scene_size, scene_size]
     glimpse_img: Tensor  # [B, 3, glimpse_size, glimpse_size]
     centers: Tensor  # [B, 2]
     scales: Tensor  # [B]
-    img_pil: Image.Image | None = None  # for visualization
+    img_pil: Image.Image | None
+
+    def __init__(
+        self,
+        scene: Tensor,
+        glimpse_size: int,
+        centers: Tensor,
+        scales: Tensor,
+        img_pil: Image.Image | None = None,
+    ) -> None:
+        self.teacher_img = scene
+        self.glimpse_img = torch.nn.functional.interpolate(
+            scene, (glimpse_size, glimpse_size), mode="bilinear"
+        )
+        self.centers = centers
+        self.scales = scales
+        self.img_pil = img_pil
 
 
 def load_teacher(device: torch.device) -> DINOv3Backbone:
@@ -110,22 +125,16 @@ def load_image_sample(
         .convert("RGB")
         .resize((scene_size, scene_size))
     )
-    glimpse_pil = img_pil.resize((glimpse_size, glimpse_size), Image.BILINEAR)
 
-    teacher_img = (
+    scene = (
         TF.normalize(TF.to_tensor(img_pil), mean=IMAGENET_MEAN, std=IMAGENET_STD)
-        .unsqueeze(0)
-        .to(device)
-    )
-    glimpse_img = (
-        TF.normalize(TF.to_tensor(glimpse_pil), mean=IMAGENET_MEAN, std=IMAGENET_STD)
         .unsqueeze(0)
         .to(device)
     )
 
     return TrainSample(
-        teacher_img=teacher_img,
-        glimpse_img=glimpse_img,
+        scene=scene,
+        glimpse_size=glimpse_size,
         centers=torch.zeros(1, 2, device=device),
         scales=torch.ones(1, device=device),
         img_pil=img_pil,
@@ -183,7 +192,7 @@ def mixed_sample(base_img: Tensor, cfg: Config) -> TrainSample:
     scene_size = cfg.scene_grid_size * 16
     glimpse_size = cfg.glimpse_grid_size * 16
 
-    # Batched augmentation: expand, crop, flip, then resize to both sizes
+    # Batched augmentation: expand, crop, flip
     batch = base_img.expand(B_real, -1, -1, -1)
     aug = v2.Compose(
         [
@@ -194,22 +203,14 @@ def mixed_sample(base_img: Tensor, cfg: Config) -> TrainSample:
         ]
     )
     real_scene = aug(batch)
-    real_glimpse = torch.nn.functional.interpolate(
-        real_scene, (glimpse_size, glimpse_size), mode="bilinear"
-    )
-
-    # Noise samples (same content: generate at scene size, downsample for glimpse)
     noise_scene = spectrum_noise(B_noise, scene_size, scene_size, cfg.device)
-    noise_glimpse = torch.nn.functional.interpolate(
-        noise_scene, (glimpse_size, glimpse_size), mode="bilinear"
-    )
+    scene = torch.cat([real_scene, noise_scene], dim=0)
 
     return TrainSample(
-        teacher_img=torch.cat([real_scene, noise_scene], dim=0),
-        glimpse_img=torch.cat([real_glimpse, noise_glimpse], dim=0),
+        scene=scene,
+        glimpse_size=glimpse_size,
         centers=torch.zeros(B, 2, device=cfg.device),
         scales=torch.ones(B, device=cfg.device),
-        img_pil=None,
     )
 
 
@@ -219,16 +220,11 @@ def random_sample(cfg: Config) -> TrainSample:
     scene_size = cfg.scene_grid_size * 16
     glimpse_size = cfg.glimpse_grid_size * 16
 
-    scene = spectrum_noise(B, scene_size, scene_size, cfg.device)
-    glimpse = torch.nn.functional.interpolate(
-        scene, (glimpse_size, glimpse_size), mode="bilinear"
-    )
     return TrainSample(
-        teacher_img=scene,
-        glimpse_img=glimpse,
+        scene=spectrum_noise(B, scene_size, scene_size, cfg.device),
+        glimpse_size=glimpse_size,
         centers=torch.zeros(B, 2, device=cfg.device),
         scales=torch.ones(B, device=cfg.device),
-        img_pil=None,
     )
 
 
