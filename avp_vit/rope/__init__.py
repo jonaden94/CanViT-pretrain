@@ -26,6 +26,17 @@ def make_rope_periods(
     return base**exponents
 
 
+def _grid_offsets(
+    grid_h: int, grid_w: int, device: torch.device, dtype: torch.dtype
+) -> Tensor:
+    """Normalized grid offsets in [-1, 1]^2 (DINOv3 convention)."""
+    h = torch.arange(grid_h, device=device, dtype=dtype)
+    w = torch.arange(grid_w, device=device, dtype=dtype)
+    h = (h + 0.5) / grid_h * 2 - 1
+    w = (w + 0.5) / grid_w * 2 - 1
+    return torch.stack(torch.meshgrid(h, w, indexing="ij"), dim=-1).flatten(0, 1)
+
+
 def make_grid_positions(
     grid_h: int,
     grid_w: int,
@@ -33,12 +44,7 @@ def make_grid_positions(
     dtype: torch.dtype = torch.float32,
 ) -> Tensor:
     """Fixed grid positions in [-1, 1]^2 (DINOv3 convention)."""
-    h = torch.arange(grid_h, device=device, dtype=dtype)
-    w = torch.arange(grid_w, device=device, dtype=dtype)
-    h = (h + 0.5) / grid_h * 2 - 1
-    w = (w + 0.5) / grid_w * 2 - 1
-    grid = torch.stack(torch.meshgrid(h, w, indexing="ij"), dim=-1)
-    out = grid.flatten(0, 1)
+    out = _grid_offsets(grid_h, grid_w, device, dtype)
     assert_shape(out, (grid_h * grid_w, 2))
     return out
 
@@ -55,13 +61,7 @@ def glimpse_positions(
     device = centers.device
     scales = scales.view(B, 1, 1).to(dtype)
     centers = centers.to(dtype)
-
-    h = torch.arange(grid_h, device=device, dtype=dtype)
-    w = torch.arange(grid_w, device=device, dtype=dtype)
-    h = (h + 0.5) / grid_h * 2 - 1
-    w = (w + 0.5) / grid_w * 2 - 1
-    offsets = torch.stack(torch.meshgrid(h, w, indexing="ij"), dim=-1).flatten(0, 1)
-
+    offsets = _grid_offsets(grid_h, grid_w, device, dtype)
     positions = centers.unsqueeze(1) + scales * offsets.unsqueeze(0)
     assert_shape(positions, (B, grid_h * grid_w, 2))
     return positions
