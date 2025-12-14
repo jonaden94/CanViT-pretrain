@@ -112,7 +112,7 @@ def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
 
 def log_figure(exp: comet_ml.Experiment, fig: Figure, name: str, step: int) -> None:
     with io.BytesIO() as buf:
-        plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+        fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
         buf.seek(0)
         exp.log_image(buf, name=name, step=step)
     plt.close(fig)

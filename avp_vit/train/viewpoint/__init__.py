@@ -24,10 +24,10 @@ def random_viewpoint(
 
 
 def make_eval_viewpoints(B: int, device: torch.device) -> list[Viewpoint]:
-    """Full scene followed by 4 quadrants in random order.
+    """Full scene followed by 4 quadrants in shuffled order.
 
-    This provides a deterministic evaluation scheme: start with global view,
-    then visit all quadrants to assess local reconstruction quality.
+    Starts with global view, then visits all quadrants (shuffled to avoid
+    order bias). Final MSE reflects quality after seeing all viewpoints.
     """
     vps = [Viewpoint.full_scene(B, device)]
     quadrants = [(0, 0), (0, 1), (1, 0), (1, 1)]
