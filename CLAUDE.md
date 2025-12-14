@@ -1,0 +1,6 @@
+- Verify, don't assume.
+- Measure twice, cut once.
+- You can use `uv run pypatree` to get an overview of the codebase.
+- NEVER use `git add -A` or `git add -u`
+- DO use `avp_vit/mymodule/{__init__.py,test.py,my_nested_module/{__init__.py,test.py}}` structure
+  - Directories over flat files for modules; nest freely.
