@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import NamedTuple, TypeVar, cast, final, override
 
 import torch
@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
-from avp_vit.attention import RoPEReadCrossAttention, RoPEWriteCrossAttention
+from avp_vit.attention import AttentionConfig, RoPEReadCrossAttention, RoPEWriteCrossAttention
 from avp_vit.backbone import ViTBackbone
 from avp_vit.glimpse import Viewpoint, extract_glimpse
 from avp_vit.rope import compute_rope, glimpse_positions, make_grid_positions
@@ -50,6 +50,7 @@ class AVPConfig:
     use_output_proj: bool = False
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries to save VRAM
     use_local_temporal: bool = False  # Temporal gating on local stream across glimpses
+    attention: AttentionConfig = field(default_factory=AttentionConfig)
 
 
 @final
@@ -118,11 +119,12 @@ class AVPViT(nn.Module):
             torch.randn(1, cfg.scene_grid_size**2, embed_dim) / (embed_dim**0.5)
         )
 
+        attn_cfg = cfg.attention
         self.read_attn = nn.ModuleList(
-            [RoPEReadCrossAttention(embed_dim, num_heads) for _ in range(n_blocks)]
+            [RoPEReadCrossAttention(embed_dim, num_heads, attn_cfg) for _ in range(n_blocks)]
         )
         self.write_attn = nn.ModuleList(
-            [RoPEWriteCrossAttention(embed_dim, num_heads) for _ in range(n_blocks)]
+            [RoPEWriteCrossAttention(embed_dim, num_heads, attn_cfg) for _ in range(n_blocks)]
         )
 
         self.read_gate = nn.ParameterList(
