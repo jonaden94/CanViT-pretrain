@@ -85,6 +85,12 @@ def plot_trajectory(
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.imshow(img)
 
+    # Draw connecting lines between consecutive centers
+    if len(boxes) > 1:
+        xs = [b.center_x for b in boxes]
+        ys = [b.center_y for b in boxes]
+        ax.plot(xs, ys, "-", color="white", linewidth=1.5, alpha=0.7, zorder=1)
+
     for i, (box, name) in enumerate(zip(boxes, names, strict=True)):
         rect = Rectangle(
             (box.left, box.top),
@@ -96,7 +102,7 @@ def plot_trajectory(
             label=f"t={i} ({name}, s={box.width / img.shape[1]:.2f})",
         )
         ax.add_patch(rect)
-        ax.plot(box.center_x, box.center_y, "o", color=colors[i], markersize=6)
+        ax.plot(box.center_x, box.center_y, "o", color=colors[i], markersize=6, zorder=2)
 
     ax.set_title("Viewpoint Trajectory")
     ax.legend(loc="upper right", fontsize=8)
