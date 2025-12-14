@@ -132,16 +132,24 @@ class TestVisualSmokeTests:
     """Smoke tests that save example PNGs for visual inspection."""
 
     def test_trajectory_example(self) -> None:
-        """Save example trajectory plot for visual verification."""
+        """Save example trajectory plot for visual verification.
+
+        Expected output (verify visually):
+        - "start" (purple): large box near top-left, wider than tall
+        - "t1" (teal): small box upper-left, wider than tall
+        - "t2" (green): medium box right side, TALLER than wide
+        - "end" (yellow): small box bottom-left, wider than tall
+        - White line connects centers: start -> t1 -> t2 -> end
+        - Line goes: center -> up-left -> right-down -> left-down
+        """
         img = _make_gradient_image(256, 256)
         boxes = [
-            PixelBox(left=0, top=0, width=256, height=256, center_x=128, center_y=128),
-            PixelBox(left=0, top=0, width=128, height=128, center_x=64, center_y=64),
-            PixelBox(left=128, top=0, width=128, height=128, center_x=192, center_y=64),
-            PixelBox(left=0, top=128, width=128, height=128, center_x=64, center_y=192),
-            PixelBox(left=128, top=128, width=128, height=128, center_x=192, center_y=192),
+            PixelBox(left=20, top=10, width=200, height=180, center_x=120, center_y=100),
+            PixelBox(left=50, top=30, width=80, height=60, center_x=90, center_y=60),
+            PixelBox(left=140, top=80, width=100, height=120, center_x=190, center_y=140),
+            PixelBox(left=30, top=160, width=70, height=50, center_x=65, center_y=185),
         ]
-        names = ["full", "TL", "TR", "BL", "BR"]
+        names = ["start", "t1", "t2", "end"]
 
         fig = plot_trajectory(img, boxes, names)
         TEST_OUTPUTS.mkdir(exist_ok=True)
