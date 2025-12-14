@@ -133,20 +133,22 @@ def log_multistep_viz(
     teacher_np = teacher_patches.cpu().float().numpy()
     initial_np = initial_scene.cpu().float().numpy()
 
-    scenes_np = [out.scene[sample_idx].cpu().float().numpy() for out in outputs]
-    # CRITICAL: locals_avp uses AVP's TRAINABLE backbone, locals_teacher uses FROZEN teacher
-    # These will diverge as training progresses - comparing them shows representation drift
-    locals_avp_np = [
+    scenes = [out.scene[sample_idx].cpu().float().numpy() for out in outputs]
+    # locals_avp: AVP backbone output (uses viewpoint RoPE)
+    locals_avp = [
         avp_backbone.output_norm(out.local[sample_idx : sample_idx + 1, n_prefix:])
         .squeeze(0).cpu().float().numpy()
         for out in outputs
     ]
-    locals_teacher_np = [
-        teacher.output_norm(out.local[sample_idx : sample_idx + 1, n_prefix:])
+    # locals_teacher: Teacher run on glimpse crop (uses standard grid RoPE)
+    # This is the GROUND TRUTH for the glimpse region - comparing to locals_avp
+    # shows whether viewpoint RoPE produces different features than standard RoPE
+    locals_teacher = [
+        teacher.forward_norm_patches(out.glimpse[sample_idx : sample_idx + 1])
         .squeeze(0).cpu().float().numpy()
         for out in outputs
     ]
-    glimpses_np = [
+    glimpses = [
         imagenet_denormalize(out.glimpse[sample_idx].cpu()).numpy()
         for out in outputs
     ]
@@ -154,7 +156,7 @@ def log_multistep_viz(
     names = [vp.name for vp in viewpoints]
 
     fig_pca = plot_multistep_pca(
-        full_img, teacher_np, scenes_np, locals_avp_np, locals_teacher_np, glimpses_np,
+        full_img, teacher_np, scenes, locals_avp, locals_teacher, glimpses,
         boxes, names, avp.cfg.scene_grid_size, avp.cfg.glimpse_grid_size, initial_np,
     )
     log_figure(exp, fig_pca, f"{prefix}/pca", step)
