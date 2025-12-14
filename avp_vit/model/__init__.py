@@ -135,10 +135,7 @@ class AVPViT(nn.Module):
         self.scene_positions = pos
 
         if cfg.use_output_proj:
-            proj = nn.Linear(embed_dim, embed_dim)
-            nn.init.eye_(proj.weight)
-            nn.init.zeros_(proj.bias)
-            self.output_proj = proj
+            self.output_proj = nn.Linear(embed_dim, embed_dim)
         else:
             self.output_proj = nn.Identity()
 
