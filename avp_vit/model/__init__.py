@@ -110,7 +110,7 @@ class AVPViT(nn.Module):
 
     @property
     def n_local_tokens(self) -> int:
-        return 1 + self.backbone.n_register_tokens + self.cfg.glimpse_grid_size ** 2
+        return self.backbone.n_prefix_tokens + self.cfg.glimpse_grid_size ** 2
 
     def __init__(self, backbone: ViTBackbone, cfg: AVPConfig) -> None:
         super().__init__()
@@ -189,14 +189,15 @@ class AVPViT(nn.Module):
             self.output_proj = nn.Identity()
 
         # Local temporal stream: gated addition across timesteps
+        # Gate shape: (n_prefix + 1, D) - one gate per prefix token, one for all patches
         if cfg.use_local_temporal:
-            n_local = self.n_local_tokens
+            n_prefix = backbone.n_prefix_tokens
             self.local_init = nn.Parameter(
-                torch.randn(1, n_local, embed_dim) / (embed_dim**0.5)
+                torch.randn(1, self.n_local_tokens, embed_dim) / (embed_dim**0.5)
             )
             self.local_temporal_norm = nn.LayerNorm(embed_dim)
             self.local_temporal_gate = nn.Parameter(
-                torch.full((embed_dim,), cfg.gate_init)
+                torch.full((n_prefix + 1, embed_dim), cfg.gate_init)
             )
         else:
             self.local_init = None
@@ -271,11 +272,19 @@ class AVPViT(nn.Module):
         n_ephemeral = self.n_ephemeral_registers
 
         # Temporal gating on local stream: local = fresh + gate * LN(prev)
+        # Gate has shape (n_prefix + 1, D): one per prefix token, one broadcast for patches
         if self.cfg.use_local_temporal:
             assert local_prev is not None, "local_prev required when use_local_temporal=True"
             assert self.local_temporal_gate is not None
             assert self.local_temporal_norm is not None
-            local = local_fresh + self.local_temporal_gate * self.local_temporal_norm(local_prev)
+            n_prefix = self.backbone.n_prefix_tokens
+            normed = self.local_temporal_norm(local_prev)
+            gate_prefix = self.local_temporal_gate[:n_prefix]  # (n_prefix, D)
+            gate_patch = self.local_temporal_gate[n_prefix]  # (D,) broadcasts across patches
+            local = torch.cat([
+                local_fresh[:, :n_prefix] + gate_prefix * normed[:, :n_prefix],
+                local_fresh[:, n_prefix:] + gate_patch * normed[:, n_prefix:],
+            ], dim=1)
         else:
             local = local_fresh
 

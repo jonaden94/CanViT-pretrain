@@ -1,5 +1,6 @@
 from typing import override
 
+import pytest
 import torch
 from torch import Tensor, nn
 from ytch.nn.layer_scale import LayerScale
@@ -18,6 +19,7 @@ class MockBackbone(ViTBackbone, nn.Module):
     _n_blocks: int
     _n_register_tokens: int
     _patch_size: int
+    _has_cls: bool
     _rope_periods: Tensor
 
     def __init__(
@@ -27,6 +29,8 @@ class MockBackbone(ViTBackbone, nn.Module):
         n_blocks: int,
         n_register_tokens: int,
         patch_size: int,
+        *,
+        has_cls: bool = True,
     ) -> None:
         nn.Module.__init__(self)
         self._embed_dim = embed_dim
@@ -34,6 +38,7 @@ class MockBackbone(ViTBackbone, nn.Module):
         self._n_blocks = n_blocks
         self._n_register_tokens = n_register_tokens
         self._patch_size = patch_size
+        self._has_cls = has_cls
         head_dim = embed_dim // num_heads
         self.register_buffer("_rope_periods", make_rope_periods(head_dim, dtype=torch.float32))
 
@@ -50,7 +55,7 @@ class MockBackbone(ViTBackbone, nn.Module):
     @property
     @override
     def n_prefix_tokens(self) -> int:
-        return 1
+        return (1 if self._has_cls else 0) + self._n_register_tokens
 
     @property
     @override
@@ -89,8 +94,8 @@ class MockBackbone(ViTBackbone, nn.Module):
         n_patches_h = H // self._patch_size
         n_patches_w = W // self._patch_size
         n_patches = n_patches_h * n_patches_w
-        # Return [B, 1 + n_patches, embed_dim] (1 for CLS token)
-        tokens = torch.randn(B, 1 + n_patches, self._embed_dim, device=images.device)
+        n_tokens = self.n_prefix_tokens + n_patches
+        tokens = torch.randn(B, n_tokens, self._embed_dim, device=images.device)
         return tokens, n_patches_h, n_patches_w
 
 
@@ -579,8 +584,12 @@ def test_local_temporal_parameters_shapes():
     backbone = MockBackbone(embed_dim, 4, 2, n_registers, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
-    # N_local = 1 (CLS) + n_registers + glimpse_grid_size²
-    expected_n_local = 1 + n_registers + glimpse_grid_size**2
+    # n_prefix = 1 (CLS) + n_registers = 5
+    n_prefix = backbone.n_prefix_tokens
+    assert n_prefix == 1 + n_registers
+
+    # N_local = n_prefix + glimpse_grid_size²
+    expected_n_local = n_prefix + glimpse_grid_size**2
     assert avp.n_local_tokens == expected_n_local
 
     assert avp.local_init is not None
@@ -589,8 +598,9 @@ def test_local_temporal_parameters_shapes():
     assert avp.local_temporal_norm is not None
     assert isinstance(avp.local_temporal_norm, nn.LayerNorm)
 
+    # Gate shape: (n_prefix + 1, D) - one per prefix token, one for all patches
     assert avp.local_temporal_gate is not None
-    assert avp.local_temporal_gate.shape == (embed_dim,)
+    assert avp.local_temporal_gate.shape == (n_prefix + 1, embed_dim)
     assert (avp.local_temporal_gate == 1e-5).all()
 
 
@@ -681,3 +691,62 @@ def test_forward_step_local_prev_flows_through():
     # Output local can be used as next local_prev
     out3 = avp.forward_step(images, vp, out2.hidden, out2.local)
     assert out3.local.shape == (B, avp.n_local_tokens, embed_dim)
+
+
+@pytest.mark.parametrize("has_cls,n_registers", [
+    (True, 0),   # CLS only (like minimal DINOv3)
+    (True, 4),   # CLS + registers (like full DINOv3)
+    (False, 0),  # No prefix tokens (like IJEPA)
+    (False, 2),  # Registers without CLS (hypothetical)
+])
+def test_local_temporal_gate_shapes_parametrized(has_cls: bool, n_registers: int):
+    """Gate shape is (n_prefix + 1, D) across different backbone configs."""
+    embed_dim = 64
+    glimpse_grid_size = 3
+    cfg = AVPConfig(
+        scene_grid_size=4,
+        glimpse_grid_size=glimpse_grid_size,
+        use_local_temporal=True,
+        gate_init=0.1,
+    )
+    backbone = MockBackbone(embed_dim, 4, 2, n_registers, PATCH_SIZE, has_cls=has_cls)
+    avp = AVPViT(backbone, cfg)
+
+    n_prefix = backbone.n_prefix_tokens
+    assert n_prefix == (1 if has_cls else 0) + n_registers
+
+    assert avp.local_temporal_gate is not None
+    assert avp.local_temporal_gate.shape == (n_prefix + 1, embed_dim)
+
+
+@pytest.mark.parametrize("has_cls,n_registers", [
+    (True, 0),
+    (True, 4),
+    (False, 0),
+    (False, 2),
+])
+def test_local_temporal_forward_parametrized(has_cls: bool, n_registers: int):
+    """Forward pass works with local temporal across different backbone configs."""
+    embed_dim = 64
+    glimpse_grid_size = 3
+    cfg = AVPConfig(
+        scene_grid_size=4,
+        glimpse_grid_size=glimpse_grid_size,
+        use_local_temporal=True,
+        gate_init=0.1,
+    )
+    backbone = MockBackbone(embed_dim, 4, 2, n_registers, PATCH_SIZE, has_cls=has_cls)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    images = torch.randn(B, 3, 64, 64)
+    vp = Viewpoint.full_scene(B, images.device)
+
+    # Forward with local_prev=None
+    out1 = avp.forward_step(images, vp, None, None)
+    n_local = backbone.n_prefix_tokens + glimpse_grid_size ** 2
+    assert out1.local.shape == (B, n_local, embed_dim)
+
+    # Forward with local_prev from previous step
+    out2 = avp.forward_step(images, vp, out1.hidden, out1.local)
+    assert out2.local.shape == (B, n_local, embed_dim)
