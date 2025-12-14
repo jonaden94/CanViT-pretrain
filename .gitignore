@@ -12,3 +12,4 @@ wheels/
 # Model checkpoints
 *.pth
 outputs/
+avp_vit/train/viz/test_outputs/

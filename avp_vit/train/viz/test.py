@@ -1,5 +1,8 @@
 """Tests for visualization utilities."""
 
+from pathlib import Path
+
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from matplotlib.figure import Figure
@@ -13,6 +16,8 @@ from avp_vit.train.viz import (
     plot_trajectory,
     timestep_colors,
 )
+
+TEST_OUTPUTS = Path(__file__).parent / "test_outputs"
 
 
 class TestPCA:
@@ -108,3 +113,56 @@ class TestPlotPcaGrid:
         pca = fit_pca(reference)
         fig = plot_pca_grid(pca, reference, samples, grid_size=4, titles=["t=0"])
         assert isinstance(fig, Figure)
+
+
+# --- Visual smoke tests that save example outputs ---
+
+
+def _make_gradient_image(H: int, W: int) -> np.ndarray:
+    """Create a gradient image useful for visual verification."""
+    y = np.linspace(0, 1, H)[:, None]
+    x = np.linspace(0, 1, W)[None, :]
+    r = y * np.ones_like(x)
+    g = np.ones_like(y) * x
+    b = 0.5 * np.ones((H, W))
+    return np.stack([r, g, b], axis=-1).astype(np.float32)
+
+
+class TestVisualSmokeTests:
+    """Smoke tests that save example PNGs for visual inspection."""
+
+    def test_trajectory_example(self) -> None:
+        """Save example trajectory plot for visual verification."""
+        img = _make_gradient_image(256, 256)
+        boxes = [
+            PixelBox(left=0, top=0, width=256, height=256, center_x=128, center_y=128),
+            PixelBox(left=0, top=0, width=128, height=128, center_x=64, center_y=64),
+            PixelBox(left=128, top=0, width=128, height=128, center_x=192, center_y=64),
+            PixelBox(left=0, top=128, width=128, height=128, center_x=64, center_y=192),
+            PixelBox(left=128, top=128, width=128, height=128, center_x=192, center_y=192),
+        ]
+        names = ["full", "TL", "TR", "BL", "BR"]
+
+        fig = plot_trajectory(img, boxes, names)
+        TEST_OUTPUTS.mkdir(exist_ok=True)
+        fig.savefig(TEST_OUTPUTS / "example_trajectory.png", dpi=100, bbox_inches="tight")
+        plt.close(fig)
+
+    def test_pca_grid_example(self) -> None:
+        """Save example PCA grid plot for visual verification."""
+        np.random.seed(42)
+        G = 8
+        D = 64
+        reference = np.random.randn(G * G, D).astype(np.float32)
+        # Samples that gradually approach reference
+        samples = [
+            (reference + np.random.randn(G * G, D) * scale).astype(np.float32)
+            for scale in [2.0, 1.0, 0.5, 0.2]
+        ]
+        pca = fit_pca(reference)
+        titles = ["t=0 (far)", "t=1", "t=2", "t=3 (close)"]
+
+        fig = plot_pca_grid(pca, reference, samples, grid_size=G, titles=titles)
+        TEST_OUTPUTS.mkdir(exist_ok=True)
+        fig.savefig(TEST_OUTPUTS / "example_pca_grid.png", dpi=100, bbox_inches="tight")
+        plt.close(fig)
