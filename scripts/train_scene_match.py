@@ -19,7 +19,7 @@ from ymc.lr import get_linear_scaled_lr
 from ytch.device import get_sensible_device
 from ytch.model import count_parameters
 
-from avp_vit import AVPConfig, AVPViT, StepOutput
+from avp_vit import AVPConfig, AVPViT
 from avp_vit.backbone.dinov3 import DINOv3Backbone
 from avp_vit.glimpse import Viewpoint
 from avp_vit.train import (
@@ -126,51 +126,60 @@ def log_figure(exp: comet_ml.Experiment, fig: Figure, name: str, step: int) -> N
     plt.close(fig)
 
 
-def log_multistep_viz(
+def viz_and_log(
     exp: comet_ml.Experiment,
     step: int,
     prefix: str,
-    image: Tensor,
-    teacher_patches: Tensor,
-    outputs: list[StepOutput],
-    viewpoints: list[Viewpoint],
-    initial_scene: Tensor,
     avp: AVPViT,
     teacher: DINOv3Backbone,
-) -> None:
-    """Log full multi-row PCA visualization and trajectory to Comet."""
+    images: Tensor,
+    viewpoints: list[Viewpoint],
+    target: Tensor,
+    hidden: Tensor | None,
+) -> list[float]:
+    """Run forward trajectory and log visualization.
+
+    This is the core visualization function used by both validation and training viz.
+    Returns per-step MSEs (one per viewpoint).
+    """
     assert isinstance(avp.backbone, DINOv3Backbone)
     avp_backbone = avp.backbone
+    B = images.shape[0]
 
-    sample_idx = 0
-    n_prefix = teacher.n_prefix_tokens
-    H, W = avp.scene_size, avp.scene_size
+    with torch.inference_mode():
+        outputs, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
+        mses = [nn.functional.mse_loss(out.scene, target).item() for out in outputs]
 
-    full_img = imagenet_denormalize(image.cpu()).numpy()
-    teacher_np = teacher_patches.cpu().float().numpy()
-    initial_np = initial_scene.cpu().float().numpy()
+        # Initial scene from hidden or hidden_tokens
+        init_hidden = hidden if hidden is not None else avp.hidden_tokens.expand(B, -1, -1)
+        initial_scene = avp.output_proj(init_hidden[0:1])[0]
 
-    scenes = [out.scene[sample_idx].cpu().float().numpy() for out in outputs]
-    # locals_avp: AVP backbone output (uses viewpoint RoPE)
-    locals_avp = [
-        avp_backbone.output_norm(out.local[sample_idx : sample_idx + 1, n_prefix:])
-        .squeeze(0).cpu().float().numpy()
-        for out in outputs
-    ]
-    # locals_teacher: Teacher run on glimpse crop (uses standard grid RoPE)
-    # This is the GROUND TRUTH for the glimpse region - comparing to locals_avp
-    # shows whether viewpoint RoPE produces different features than standard RoPE
-    locals_teacher = [
-        teacher.forward_norm_patches(out.glimpse[sample_idx : sample_idx + 1])
-        .squeeze(0).cpu().float().numpy()
-        for out in outputs
-    ]
-    glimpses = [
-        imagenet_denormalize(out.glimpse[sample_idx].cpu()).numpy()
-        for out in outputs
-    ]
-    boxes = [vp.to_pixel_box(sample_idx, H, W) for vp in viewpoints]
-    names = [vp.name for vp in viewpoints]
+        # Prepare viz data for first sample
+        sample_idx = 0
+        n_prefix = teacher.n_prefix_tokens
+        H, W = avp.scene_size, avp.scene_size
+
+        full_img = imagenet_denormalize(images[sample_idx].cpu()).numpy()
+        teacher_np = target[sample_idx].cpu().float().numpy()
+        initial_np = initial_scene.cpu().float().numpy()
+
+        scenes = [out.scene[sample_idx].cpu().float().numpy() for out in outputs]
+        locals_avp = [
+            avp_backbone.output_norm(out.local[sample_idx : sample_idx + 1, n_prefix:])
+            .squeeze(0).cpu().float().numpy()
+            for out in outputs
+        ]
+        locals_teacher = [
+            teacher.forward_norm_patches(out.glimpse[sample_idx : sample_idx + 1])
+            .squeeze(0).cpu().float().numpy()
+            for out in outputs
+        ]
+        glimpses = [
+            imagenet_denormalize(out.glimpse[sample_idx].cpu()).numpy()
+            for out in outputs
+        ]
+        boxes = [vp.to_pixel_box(sample_idx, H, W) for vp in viewpoints]
+        names = [vp.name for vp in viewpoints]
 
     fig_pca = plot_multistep_pca(
         full_img, teacher_np, scenes, locals_avp, locals_teacher, glimpses,
@@ -181,6 +190,8 @@ def log_multistep_viz(
     fig_traj = plot_trajectory(full_img, boxes, names)
     log_figure(exp, fig_traj, f"{prefix}/trajectory", step)
 
+    return mses
+
 
 def eval_and_log(
     exp: comet_ml.Experiment,
@@ -189,24 +200,17 @@ def eval_and_log(
     teacher: DINOv3Backbone,
     images: Tensor,
 ) -> float:
-    """Evaluate on one batch and log to Comet. Returns final MSE."""
+    """Evaluate on one batch with fixed viewpoints. Returns final MSE."""
     B = images.shape[0]
     viewpoints = make_eval_viewpoints(B, images.device)
 
     with torch.inference_mode():
         target = teacher.forward_norm_patches(images)
-        outputs, _ = avp.forward_trajectory_full(images, viewpoints)
-        mses = [nn.functional.mse_loss(out.scene, target).item() for out in outputs]
-        initial_scene = avp.output_proj(avp.hidden_tokens.expand(1, -1, -1))[0]
+
+    mses = viz_and_log(exp, step, "val", avp, teacher, images, viewpoints, target, None)
 
     for t, mse in enumerate(mses):
         exp.log_metric(f"val/mse_t{t}", mse, step=step)
-
-    with torch.inference_mode():
-        log_multistep_viz(
-            exp, step, "val", images[0], target[0], outputs, viewpoints,
-            initial_scene, avp, teacher,
-        )
 
     val_loss = mses[-1]
     exp.log_metric("val/loss", val_loss, step=step)
@@ -315,9 +319,6 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         optimizer.step()
         scheduler.step()
 
-        # Bernoulli survival at optimizer step boundary
-        state = state.step(fresh_imgs, fresh_targets, final_hidden, cfg.survival_prob, avp.hidden_tokens)
-
         ema_loss_t = alpha * loss.detach() + (1 - alpha) * ema_loss_t if step > 0 else loss.detach()
 
         if step % cfg.log_every == 0:
@@ -328,6 +329,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             pbar.set_postfix_str(f"loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}")
 
         if step > 0 and step % cfg.val_every == 0:
+            # Training viz: actual state, viewpoints, targets (BEFORE state update)
+            viz_and_log(exp, step, "train", avp, teacher, state.images, viewpoints, state.targets, state.hidden)
+
+            # Validation viz: fresh batch, fixed viewpoints
             val_images = val_loader.next_batch().to(cfg.device)
             val_loss = eval_and_log(exp, step, avp, teacher, val_images)
             if val_loss < best_val_loss:
@@ -339,6 +344,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             if trial.should_prune():
                 exp.end()
                 raise optuna.TrialPruned()
+
+        # Bernoulli survival at optimizer step boundary (AFTER visualization)
+        state = state.step(fresh_imgs, fresh_targets, final_hidden, cfg.survival_prob, avp.hidden_tokens)
 
     val_images = val_loader.next_batch().to(cfg.device)
     val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, val_images)
