@@ -101,7 +101,10 @@ class AVPViT(nn.Module):
         else:
             self.scene_registers = None
 
-        # Learned initial hidden state, initialized with randn / sqrt(embed_dim)
+        # Learned initial hidden state: one learnable vector per spatial position.
+        # Shape [1, G*G, D] where G = scene_grid_size (square grid).
+        # The leading 1 is for batch broadcasting; each of the G*G positions has
+        # its own independent learnable D-dimensional vector.
         self.hidden_tokens = nn.Parameter(
             torch.randn(1, cfg.scene_grid_size**2, embed_dim) / (embed_dim**0.5)
         )
@@ -211,7 +214,10 @@ class AVPViT(nn.Module):
             - scene: Projected output (use this for LOSS/VIZ)
         """
         glimpse = extract_glimpse(images, viewpoint, self.glimpse_size)
-        tokens, _, _ = self.backbone.prepare_tokens(glimpse)
+        tokens, H, W = self.backbone.prepare_tokens(glimpse)
+        # Assert square grid matches config (catch H/W mismatches early)
+        G = self.cfg.glimpse_grid_size
+        assert H == W == G, f"backbone returned {H}x{W} but config expects {G}x{G}"
         if self.cfg.gradient_checkpointing and self.training:
             return cast(StepOutput, checkpoint(
                 self._process_glimpse,
