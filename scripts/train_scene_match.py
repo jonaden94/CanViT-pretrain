@@ -57,6 +57,7 @@ class Config:
     gradient_checkpointing: bool = True
     # Training
     survival_prob: float = 0.5
+    n_viewpoints_per_step: int = 2  # Inner loop: viewpoints per optimizer step (>=2 for length generalization)
     n_steps: int = 20000
     batch_size: int = 64
     num_workers: int = 8
@@ -225,11 +226,13 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         with torch.no_grad():
             fresh_targets = teacher.forward_norm_patches(fresh_imgs)
 
-        vp = random_viewpoint(cfg.batch_size, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale)
-        out = avp.forward_step(state.images, vp, state.hidden)
-        # out.scene = projected output for loss (no need to call output_proj)
-        # out.hidden = internal state for continuation
-        loss = nn.functional.mse_loss(out.scene, state.targets)
+        # Inner loop: multiple viewpoints per optimizer step (for length generalization)
+        viewpoints = [
+            random_viewpoint(cfg.batch_size, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale)
+            for _ in range(cfg.n_viewpoints_per_step)
+        ]
+        # forward_loss handles the inner loop, returns averaged MSE and final hidden
+        loss, final_hidden = avp.forward_loss(state.images, viewpoints, state.targets, state.hidden)
 
         if not torch.isfinite(loss):
             log.warning(f"NaN/Inf loss at step {step}, pruning trial")
@@ -242,8 +245,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         optimizer.step()
         scheduler.step()
 
-        # Use out.hidden for continuation, avp.hidden_tokens for reset
-        state = state.step(fresh_imgs, fresh_targets, out.hidden, cfg.survival_prob, avp.hidden_tokens)
+        # Bernoulli survival at optimizer step boundary
+        state = state.step(fresh_imgs, fresh_targets, final_hidden, cfg.survival_prob, avp.hidden_tokens)
 
         ema_loss_t = alpha * loss.detach() + (1 - alpha) * ema_loss_t if step > 0 else loss.detach()
 
