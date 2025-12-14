@@ -10,6 +10,7 @@ from torch.utils.checkpoint import checkpoint
 from ytch.nn.layer_scale import LayerScale
 
 from avp_vit.attention import AttentionConfig, RoPEReadCrossAttention, RoPEWriteCrossAttention
+from avp_vit.attention.convex import ConvexGatedAttention
 from avp_vit.backbone import ViTBackbone
 from avp_vit.glimpse import Viewpoint, extract_glimpse
 from avp_vit.rope import compute_rope, glimpse_positions, make_grid_positions
@@ -52,6 +53,7 @@ class AVPConfig:
     use_output_proj: bool = False
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries to save VRAM
     use_local_temporal: bool = False  # Temporal gating on local stream across glimpses
+    use_convex_gating: bool = False  # Dynamic per-token gating (vs static LayerScale)
     attention: AttentionConfig = field(default_factory=AttentionConfig)
 
 
@@ -67,10 +69,10 @@ class AVPViT(nn.Module):
     scene_registers: nn.Parameter | None
     hidden_tokens: nn.Parameter  # Learned initial hidden state [1, G*G, D]
     scene_positions: Tensor
-    read_attn: nn.ModuleList
+    read_attn: nn.ModuleList  # Raw attention (layerscale) or ConvexGatedAttention (convex)
     write_attn: nn.ModuleList
-    read_scale: nn.ModuleList
-    write_scale: nn.ModuleList
+    read_scale: nn.ModuleList | None  # LayerScale (layerscale mode) or None (convex)
+    write_scale: nn.ModuleList | None
     output_proj: nn.Module
     # Local temporal stream (when use_local_temporal=True)
     local_tokens: nn.Parameter | None  # Learned initial local state [1, N, D]
@@ -122,14 +124,34 @@ class AVPViT(nn.Module):
         )
 
         attn_cfg = cfg.attention
-        self.read_attn = nn.ModuleList([
-            RoPEReadCrossAttention(embed_dim, num_heads, attn_cfg) for _ in range(n_blocks)
-        ])
-        self.write_attn = nn.ModuleList([
-            RoPEWriteCrossAttention(embed_dim, num_heads, attn_cfg) for _ in range(n_blocks)
-        ])
-        self.read_scale = nn.ModuleList([LayerScale(embed_dim, cfg.gate_init) for _ in range(n_blocks)])
-        self.write_scale = nn.ModuleList([LayerScale(embed_dim, cfg.gate_init) for _ in range(n_blocks)])
+        if cfg.use_convex_gating:
+            self.read_attn = nn.ModuleList([
+                ConvexGatedAttention(
+                    RoPEReadCrossAttention(embed_dim, num_heads, attn_cfg),
+                    RoPEReadCrossAttention(embed_dim, num_heads, attn_cfg),
+                    cfg.gate_init,
+                )
+                for _ in range(n_blocks)
+            ])
+            self.write_attn = nn.ModuleList([
+                ConvexGatedAttention(
+                    RoPEWriteCrossAttention(embed_dim, num_heads, attn_cfg),
+                    RoPEWriteCrossAttention(embed_dim, num_heads, attn_cfg),
+                    cfg.gate_init,
+                )
+                for _ in range(n_blocks)
+            ])
+            self.read_scale = None
+            self.write_scale = None
+        else:
+            self.read_attn = nn.ModuleList([
+                RoPEReadCrossAttention(embed_dim, num_heads, attn_cfg) for _ in range(n_blocks)
+            ])
+            self.write_attn = nn.ModuleList([
+                RoPEWriteCrossAttention(embed_dim, num_heads, attn_cfg) for _ in range(n_blocks)
+            ])
+            self.read_scale = nn.ModuleList([LayerScale(embed_dim, cfg.gate_init) for _ in range(n_blocks)])
+            self.write_scale = nn.ModuleList([LayerScale(embed_dim, cfg.gate_init) for _ in range(n_blocks)])
 
         device = self.hidden_tokens.device
         assert isinstance(device, torch.device)
@@ -211,9 +233,17 @@ class AVPViT(nn.Module):
         scene_rope = compute_rope(scene_pos, periods)
 
         for i in range(self.backbone.n_blocks):
-            local = local + self.read_scale[i](self.read_attn[i](local, hidden_t, local_rope, scene_rope))
+            if self.cfg.use_convex_gating:
+                local = self.read_attn[i](local, hidden_t, local_rope, scene_rope)
+            else:
+                assert self.read_scale is not None
+                local = local + self.read_scale[i](self.read_attn[i](local, hidden_t, local_rope, scene_rope))
             local = self.backbone.forward_block(i, local, local_rope)
-            hidden_t = hidden_t + self.write_scale[i](self.write_attn[i](hidden_t, local, scene_rope, local_rope))
+            if self.cfg.use_convex_gating:
+                hidden_t = self.write_attn[i](hidden_t, local, scene_rope, local_rope)
+            else:
+                assert self.write_scale is not None
+                hidden_t = hidden_t + self.write_scale[i](self.write_attn[i](hidden_t, local, scene_rope, local_rope))
 
         # Strip registers, get grid tokens only
         hidden_out = hidden_t[:, n_reg:]

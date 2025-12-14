@@ -114,17 +114,39 @@ def test_forward_shapes():
     assert local is None  # use_local_temporal=False by default
 
 
-def test_gate_init():
+def test_gate_init_layerscale():
     cfg = AVPConfig(scene_grid_size=4, gate_init=0.5)
     backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
+    assert avp.read_scale is not None
+    assert avp.write_scale is not None
     for scale in avp.read_scale:
         assert isinstance(scale, LayerScale)
         assert (scale.scale == 0.5).all()
     for scale in avp.write_scale:
         assert isinstance(scale, LayerScale)
         assert (scale.scale == 0.5).all()
+
+
+def test_convex_gating_init():
+    import math
+
+    from avp_vit.attention.convex import ConvexGatedAttention
+
+    gate_init = 0.5
+    cfg = AVPConfig(scene_grid_size=4, gate_init=gate_init, use_convex_gating=True)
+    backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    assert avp.read_scale is None
+    assert avp.write_scale is None
+
+    expected_bias = math.log(gate_init / (1 - gate_init))
+    for cvx in avp.read_attn:
+        assert isinstance(cvx, ConvexGatedAttention)
+        assert torch.allclose(cvx.gate_bias, torch.full((64,), expected_bias))
+        assert torch.allclose(cvx.gate_scale, torch.zeros(64))
 
 
 def test_scene_registers_disabled_by_default():
