@@ -309,6 +309,41 @@ def test_scene_registers_continuity():
     assert out2.scene.shape == (B, 16, embed_dim)
 
 
+def test_get_spatial_extracts_correctly():
+    """get_spatial correctly extracts spatial tokens from hidden state."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_scene_registers=True)
+    backbone = MockBackbone(embed_dim, 4, 2, 4, PATCH_SIZE)  # 4 registers
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    n_persistent = avp.n_persistent_registers
+    n_spatial = 16  # 4x4 grid
+    hidden = torch.randn(B, n_persistent + n_spatial, embed_dim)
+
+    spatial = avp.get_spatial(hidden)
+    assert spatial.shape == (B, n_spatial, embed_dim)
+    assert torch.equal(spatial, hidden[:, n_persistent:])
+
+
+def test_compute_scene_matches_step_output():
+    """compute_scene produces same result as StepOutput.scene."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_scene_registers=True, use_output_proj=True)
+    backbone = MockBackbone(embed_dim, 4, 2, 4, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    images = torch.randn(B, 3, 64, 64)
+    vp = Viewpoint.full_scene(B, images.device)
+
+    out = avp.forward_step(images, vp, None)
+
+    # compute_scene on hidden should equal StepOutput.scene
+    scene_from_helper = avp.compute_scene(out.hidden)
+    assert torch.allclose(scene_from_helper, out.scene)
+
+
 def test_output_proj_is_always_module():
     """output_proj is always nn.Module (Identity or Linear), never None."""
     cfg_no_proj = AVPConfig(scene_grid_size=4, use_output_proj=False)

@@ -144,19 +144,16 @@ def viz_and_log(
     """
     assert isinstance(avp.backbone, DINOv3Backbone)
     avp_backbone = avp.backbone
-    B = images.shape[0]
 
     with torch.inference_mode():
         outputs, _, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
         mses = [nn.functional.mse_loss(out.scene, target).item() for out in outputs]
 
-        # Initial scene from spatial portion of hidden (or spatial_init if None)
-        n_persistent = avp.n_persistent_registers
+        # Initial scene from hidden (or spatial_init if None)
         if hidden is not None:
-            init_spatial = hidden[:, n_persistent:]
+            initial_scene = avp.compute_scene(hidden[0:1])[0]
         else:
-            init_spatial = avp.spatial_init.expand(B, -1, -1)
-        initial_scene = avp.output_proj(init_spatial[0:1])[0]
+            initial_scene = avp.output_proj(avp.spatial_init)[0]
 
         # Prepare viz data for first sample
         sample_idx = 0

@@ -39,8 +39,8 @@ class StepOutput(NamedTuple):
 
     glimpse: Tensor  # [B, C, H, W] extracted glimpse image
     local: Tensor  # [B, N, D] local features (CLS + patches)
-    hidden: Tensor  # [B, G*G, D] internal state for CONTINUATION between steps
-    scene: Tensor  # [B, G*G, D] projected output for LOSS and VISUALIZATION
+    hidden: Tensor  # [B, n_persistent + G*G, D] internal state for CONTINUATION
+    scene: Tensor  # [B, G*G, D] projected spatial for LOSS and VISUALIZATION
 
 
 @final
@@ -122,17 +122,18 @@ class AVPViT(nn.Module):
         n_blocks = backbone.n_blocks
 
         # Scene registers split into persistent (passed through) and ephemeral (reinit each step)
+        # Scale by 1/sqrt(D) for consistent initialization with spatial_init
         n_persistent = self.n_persistent_registers
         n_ephemeral = self.n_ephemeral_registers
         if n_persistent > 0:
             self.persistent_registers = nn.Parameter(
-                torch.randn(1, n_persistent, embed_dim)
+                torch.randn(1, n_persistent, embed_dim) / (embed_dim**0.5)
             )
         else:
             self.persistent_registers = None
         if n_ephemeral > 0:
             self.ephemeral_registers = nn.Parameter(
-                torch.randn(1, n_ephemeral, embed_dim)
+                torch.randn(1, n_ephemeral, embed_dim) / (embed_dim**0.5)
             )
         else:
             self.ephemeral_registers = None
@@ -217,6 +218,30 @@ class AVPViT(nn.Module):
                 hidden = spatial
         return hidden
 
+    def get_spatial(self, hidden: Tensor) -> Tensor:
+        """Extract spatial tokens from hidden state.
+
+        Args:
+            hidden: Full hidden state [B, n_persistent + G*G, D]
+
+        Returns:
+            Spatial tokens [B, G*G, D]
+        """
+        return hidden[:, self.n_persistent_registers:]
+
+    def compute_scene(self, hidden: Tensor) -> Tensor:
+        """Compute projected scene from hidden state.
+
+        Convenience method that extracts spatial and applies output_proj.
+
+        Args:
+            hidden: Full hidden state [B, n_persistent + G*G, D]
+
+        Returns:
+            Projected scene [B, G*G, D]
+        """
+        return self.output_proj(self.get_spatial(hidden))
+
     def _process_glimpse(
         self,
         glimpse: Tensor,
@@ -244,7 +269,6 @@ class AVPViT(nn.Module):
         rope_dtype = self.backbone.rope_dtype
         periods = self.backbone.rope_periods
         n_ephemeral = self.n_ephemeral_registers
-        n_persistent = self.n_persistent_registers
 
         # Temporal gating on local stream: local = fresh + gate * LN(prev)
         if self.cfg.use_local_temporal:
@@ -281,9 +305,8 @@ class AVPViT(nn.Module):
         # Strip ephemeral registers -> persistent + spatial
         hidden_out = hidden_t[:, n_ephemeral:]
 
-        # Scene output is spatial-only (exclude persistent registers too)
-        spatial = hidden_out[:, n_persistent:]
-        scene_out = self.output_proj(spatial)
+        # Scene output is spatial-only (exclude persistent registers)
+        scene_out = self.compute_scene(hidden_out)
 
         return StepOutput(glimpse, local, hidden_out, scene_out)
 
@@ -414,17 +437,12 @@ class AVPViT(nn.Module):
             - final_local: For CONTINUATION when use_local_temporal
         """
         B = images.shape[0]
-        n_persistent = self.n_persistent_registers
 
-        # Extract spatial-only hidden for computing initial scene
+        # Compute initial scene BEFORE any glimpses
         if hidden is None:
-            spatial = self.spatial_init.expand(B, -1, -1)
+            init_scene = self.output_proj(self.spatial_init.expand(B, -1, -1))
         else:
-            # hidden = [persistent, spatial], extract spatial portion
-            spatial = hidden[:, n_persistent:]
-
-        # Score initial scene BEFORE any glimpses
-        init_scene = self.output_proj(spatial)
+            init_scene = self.compute_scene(hidden)
         init_loss = F.mse_loss(init_scene, target)
 
         def reducer(acc: Tensor, out: StepOutput) -> Tensor:
