@@ -287,7 +287,8 @@ class AVPViT(nn.Module):
         reducer: Callable[[T, StepOutput], T],
         init: T,
         hidden: Tensor | None = None,
-    ) -> tuple[T, Tensor]:
+        local_prev: Tensor | None = None,
+    ) -> tuple[T, Tensor, Tensor | None]:
         """Process viewpoints sequentially, reducing with a custom function.
 
         This is the GENERAL PRIMITIVE that all other forward methods build on.
@@ -300,21 +301,28 @@ class AVPViT(nn.Module):
                      Receives full StepOutput with glimpse, local, hidden, scene.
             init: Initial accumulator value
             hidden: Initial hidden state [B, G*G, D] or None for fresh start
+            local_prev: Initial local state [B, N, D] or None (when use_local_temporal)
 
         Returns:
-            (final_accumulator, final_hidden) where:
+            (final_accumulator, final_hidden, final_local) where:
             - final_accumulator: Result of reducing all steps
             - final_hidden: Hidden state after last step (for CONTINUATION)
+            - final_local: Local state after last step (for CONTINUATION when use_local_temporal)
         """
+        B = images.shape[0]
         acc = init
         for vp in viewpoints:
-            out = self.forward_step(images, vp, hidden)
+            out = self.forward_step(images, vp, hidden, local_prev)
             hidden = out.hidden
+            local_prev = out.local if self.cfg.use_local_temporal else None
             acc = reducer(acc, out)
-        # If no viewpoints processed, return initial hidden
+        # If no viewpoints processed, return initial states
         if hidden is None:
-            hidden = self.hidden_tokens.expand(images.shape[0], -1, -1)
-        return acc, hidden
+            hidden = self.hidden_tokens.expand(B, -1, -1)
+        if self.cfg.use_local_temporal and local_prev is None:
+            assert self.local_tokens is not None
+            local_prev = self.local_tokens.expand(B, -1, -1)
+        return acc, hidden, local_prev
 
     # ==================== Standard Invocations ====================
     # These are the common patterns, centralized here to avoid errors.
@@ -325,7 +333,8 @@ class AVPViT(nn.Module):
         viewpoints: list[Viewpoint],
         target: Tensor,
         hidden: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor]:
+        local_prev: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor | None]:
         """Standard training: compute MSE loss against target at each step.
 
         Memory-efficient: does not store intermediate scenes.
@@ -340,11 +349,13 @@ class AVPViT(nn.Module):
             viewpoints: Sequence of viewpoints to process
             target: Target to compare against [B, G*G, D] (e.g., teacher patches)
             hidden: Initial hidden state or None
+            local_prev: Initial local state or None (when use_local_temporal)
 
         Returns:
-            (average_loss, final_hidden) where:
+            (average_loss, final_hidden, final_local) where:
             - average_loss: Mean MSE across initial + all viewpoints (scalar)
             - final_hidden: For CONTINUATION in Bernoulli survival
+            - final_local: For CONTINUATION when use_local_temporal
         """
         B = images.shape[0]
 
@@ -358,58 +369,65 @@ class AVPViT(nn.Module):
         def reducer(acc: Tensor, out: StepOutput) -> Tensor:
             return acc + F.mse_loss(out.scene, target)
 
-        total, final_hidden = self.forward_reduce(
+        total, final_hidden, final_local = self.forward_reduce(
             images, viewpoints, reducer,
             init=init_loss,
             hidden=init_hidden,  # Pass resolved hidden, not None
+            local_prev=local_prev,
         )
-        return total / (len(viewpoints) + 1), final_hidden
+        return total / (len(viewpoints) + 1), final_hidden, final_local
 
     def forward_trajectory(
         self,
         images: Tensor,
         viewpoints: list[Viewpoint],
         hidden: Tensor | None = None,
-    ) -> tuple[list[Tensor], Tensor]:
+        local_prev: Tensor | None = None,
+    ) -> tuple[list[Tensor], Tensor, Tensor | None]:
         """Standard visualization: collect projected scenes at each step.
 
         Args:
             images: Input images [B, C, H, W]
             viewpoints: Sequence of viewpoints to process
             hidden: Initial hidden state or None
+            local_prev: Initial local state or None (when use_local_temporal)
 
         Returns:
-            (scenes, final_hidden) where:
+            (scenes, final_hidden, final_local) where:
             - scenes: List of projected scenes [B, G*G, D] at each timestep
             - final_hidden: For CONTINUATION if needed
+            - final_local: For CONTINUATION when use_local_temporal
         """
         def reducer(acc: list[Tensor], out: StepOutput) -> list[Tensor]:
             return [*acc, out.scene]
 
-        return self.forward_reduce(images, viewpoints, reducer, init=[], hidden=hidden)
+        return self.forward_reduce(images, viewpoints, reducer, init=[], hidden=hidden, local_prev=local_prev)
 
     def forward_trajectory_full(
         self,
         images: Tensor,
         viewpoints: list[Viewpoint],
         hidden: Tensor | None = None,
-    ) -> tuple[list[StepOutput], Tensor]:
+        local_prev: Tensor | None = None,
+    ) -> tuple[list[StepOutput], Tensor, Tensor | None]:
         """Full visualization: collect complete StepOutput at each step.
 
         Args:
             images: Input images [B, C, H, W]
             viewpoints: Sequence of viewpoints to process
             hidden: Initial hidden state or None
+            local_prev: Initial local state or None (when use_local_temporal)
 
         Returns:
-            (outputs, final_hidden) where:
+            (outputs, final_hidden, final_local) where:
             - outputs: List of StepOutput (glimpse, local, hidden, scene) at each timestep
             - final_hidden: For CONTINUATION if needed
+            - final_local: For CONTINUATION when use_local_temporal
         """
         def reducer(acc: list[StepOutput], out: StepOutput) -> list[StepOutput]:
             return [*acc, out]
 
-        return self.forward_reduce(images, viewpoints, reducer, init=[], hidden=hidden)
+        return self.forward_reduce(images, viewpoints, reducer, init=[], hidden=hidden, local_prev=local_prev)
 
     @override
     def forward(
@@ -417,23 +435,28 @@ class AVPViT(nn.Module):
         images: Tensor,
         viewpoints: list[Viewpoint],
         hidden: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor]:
+        local_prev: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor | None]:
         """Standard inference: return final projected scene.
 
         Args:
             images: Input images [B, C, H, W]
             viewpoints: Sequence of viewpoints to process
             hidden: Initial hidden state or None
+            local_prev: Initial local state or None (when use_local_temporal)
 
         Returns:
-            (final_scene, final_hidden) where:
+            (final_scene, final_hidden, final_local) where:
             - final_scene: Projected output after all viewpoints [B, G*G, D]
             - final_hidden: For CONTINUATION if needed
+            - final_local: For CONTINUATION when use_local_temporal
         """
         def reducer(acc: Tensor, out: StepOutput) -> Tensor:
             return out.scene
 
         # Use a dummy initial tensor (will be overwritten by first step)
         dummy = torch.empty(0, device=images.device)
-        scene, final_hidden = self.forward_reduce(images, viewpoints, reducer, init=dummy, hidden=hidden)
-        return scene, final_hidden
+        scene, final_hidden, final_local = self.forward_reduce(
+            images, viewpoints, reducer, init=dummy, hidden=hidden, local_prev=local_prev
+        )
+        return scene, final_hidden, final_local

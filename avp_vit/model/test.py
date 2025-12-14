@@ -106,10 +106,11 @@ def test_forward_shapes():
     images = torch.randn(B, 3, 64, 64)  # scene_grid_size * patch_size = 4 * 16 = 64
     viewpoints = [Viewpoint.full_scene(B, images.device)]
 
-    scene, hidden = avp(images, viewpoints)
+    scene, hidden, local = avp(images, viewpoints)
 
     assert scene.shape == (B, 16, embed_dim)  # 4x4 grid
     assert hidden.shape == (B, 16, embed_dim)  # hidden same shape
+    assert local is None  # use_local_temporal=False by default
 
 
 def test_gate_init():
@@ -154,10 +155,11 @@ def test_scene_registers_output_shape_unchanged():
     images = torch.randn(B, 3, 64, 64)
     viewpoints = [Viewpoint.full_scene(B, images.device)]
 
-    scene, hidden = avp(images, viewpoints)
+    scene, hidden, local = avp(images, viewpoints)
 
     assert scene.shape == (B, 16, embed_dim)  # 4x4 grid, no registers
     assert hidden.shape == (B, 16, embed_dim)
+    assert local is None  # use_local_temporal=False
 
 
 def test_output_proj_is_always_module():
@@ -188,10 +190,11 @@ def test_multi_viewpoint_forward():
         Viewpoint.quadrant(B, images.device, 1, 1),
     ]
 
-    scene, hidden = avp(images, viewpoints)
+    scene, hidden, local = avp(images, viewpoints)
 
     assert scene.shape == (B, 16, embed_dim)
     assert hidden.shape == (B, 16, embed_dim)
+    assert local is None  # use_local_temporal=False
 
 
 def test_glimpse_size_from_backbone():
@@ -239,11 +242,12 @@ def test_forward_loss():
         Viewpoint.quadrant(B, images.device, 0, 0),
     ]
 
-    loss, final_hidden = avp.forward_loss(images, viewpoints, target)
+    loss, final_hidden, final_local = avp.forward_loss(images, viewpoints, target)
 
     assert loss.shape == ()  # scalar
     assert loss.item() >= 0  # MSE is non-negative
     assert final_hidden.shape == (B, 16, embed_dim)
+    assert final_local is None  # use_local_temporal=False
 
 
 def test_forward_trajectory():
@@ -261,12 +265,13 @@ def test_forward_trajectory():
         Viewpoint.quadrant(B, images.device, 1, 1),
     ]
 
-    scenes, final_hidden = avp.forward_trajectory(images, viewpoints)
+    scenes, final_hidden, final_local = avp.forward_trajectory(images, viewpoints)
 
     assert len(scenes) == 3  # one per viewpoint
     for s in scenes:
         assert s.shape == (B, 16, embed_dim)
     assert final_hidden.shape == (B, 16, embed_dim)
+    assert final_local is None  # use_local_temporal=False
 
 
 def test_forward_reduce_custom():
@@ -284,10 +289,11 @@ def test_forward_reduce_custom():
     def count_reducer(acc: int, out: StepOutput) -> int:
         return acc + 1
 
-    count, final_hidden = avp.forward_reduce(images, viewpoints, count_reducer, init=0)
+    count, final_hidden, final_local = avp.forward_reduce(images, viewpoints, count_reducer, init=0)
 
     assert count == 1
     assert final_hidden.shape == (B, 16, embed_dim)
+    assert final_local is None  # use_local_temporal=False
 
 
 def test_gradient_checkpointing_smoke():
@@ -302,7 +308,7 @@ def test_gradient_checkpointing_smoke():
     images = torch.randn(B, 3, 64, 64)
     viewpoints = [Viewpoint.full_scene(B, images.device)]
 
-    scene, _ = avp(images, viewpoints)
+    scene, _, _ = avp(images, viewpoints)
     loss = scene.sum()
     loss.backward()
 
@@ -321,7 +327,8 @@ def test_forward_loss_includes_initial_scene():
     target = torch.randn(B, 16, embed_dim)
 
     # Empty viewpoints: loss is purely from initial scene
-    loss, final_hidden = avp.forward_loss(images, [], target)
+    loss, final_hidden, final_local = avp.forward_loss(images, [], target)
+    assert final_local is None  # use_local_temporal=False
 
     assert loss.shape == ()
     assert loss.item() >= 0
@@ -353,7 +360,7 @@ def test_forward_loss_detached_hidden_no_grad():
     # Provide detached hidden state (simulates Bernoulli survivor)
     hidden = torch.randn(B, 16, embed_dim).detach()
 
-    loss, _ = avp.forward_loss(images, [], target, hidden=hidden)
+    loss, _, _ = avp.forward_loss(images, [], target, hidden=hidden)
     loss.backward()
 
     # hidden_tokens should have NO gradient (detached hidden was used)
