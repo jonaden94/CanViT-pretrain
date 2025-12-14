@@ -257,7 +257,9 @@ class AVPViT(nn.Module):
             out = self.forward_step(images, vp, hidden)
             hidden = out.hidden
             acc = reducer(acc, out)
-        assert hidden is not None
+        # If no viewpoints processed, return initial hidden
+        if hidden is None:
+            hidden = self.hidden_tokens.expand(images.shape[0], -1, -1)
         return acc, hidden
 
     # ==================== Standard Invocations ====================
@@ -274,6 +276,11 @@ class AVPViT(nn.Module):
 
         Memory-efficient: does not store intermediate scenes.
 
+        The initial scene (before any glimpses) is included in the loss. This trains
+        the hidden_tokens and output_proj to produce a good "baseline" prediction.
+        When hidden comes from Bernoulli survival (detached), no gradients flow for
+        survivors; for non-survivors, gradients flow to hidden_tokens.
+
         Args:
             images: Input images [B, C, H, W]
             viewpoints: Sequence of viewpoints to process
@@ -282,18 +289,27 @@ class AVPViT(nn.Module):
 
         Returns:
             (average_loss, final_hidden) where:
-            - average_loss: Mean MSE across all viewpoints (scalar)
+            - average_loss: Mean MSE across initial + all viewpoints (scalar)
             - final_hidden: For CONTINUATION in Bernoulli survival
         """
+        B = images.shape[0]
+
+        # Resolve hidden once: use passed value or expand hidden_tokens
+        init_hidden = hidden if hidden is not None else self.hidden_tokens.expand(B, -1, -1)
+
+        # Score initial scene BEFORE any glimpses
+        init_scene = self.output_proj(init_hidden)
+        init_loss = F.mse_loss(init_scene, target)
+
         def reducer(acc: Tensor, out: StepOutput) -> Tensor:
             return acc + F.mse_loss(out.scene, target)
 
         total, final_hidden = self.forward_reduce(
             images, viewpoints, reducer,
-            init=torch.tensor(0.0, device=images.device),
-            hidden=hidden,
+            init=init_loss,
+            hidden=init_hidden,  # Pass resolved hidden, not None
         )
-        return total / len(viewpoints), final_hidden
+        return total / (len(viewpoints) + 1), final_hidden
 
     def forward_trajectory(
         self,

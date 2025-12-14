@@ -307,3 +307,58 @@ def test_gradient_checkpointing_smoke():
     loss.backward()
 
     assert avp.hidden_tokens.grad is not None
+
+
+def test_forward_loss_includes_initial_scene():
+    """forward_loss includes initial scene in loss, even with empty viewpoints."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_output_proj=True)
+    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    images = torch.randn(B, 3, 64, 64)
+    target = torch.randn(B, 16, embed_dim)
+
+    # Empty viewpoints: loss is purely from initial scene
+    loss, final_hidden = avp.forward_loss(images, [], target)
+
+    assert loss.shape == ()
+    assert loss.item() >= 0
+    # final_hidden should be None since no viewpoints processed
+    # Actually forward_reduce returns hidden which could be the init or None
+    # Let's just check the gradient flow
+
+    loss.backward()
+
+    # Gradients should flow to hidden_tokens and output_proj
+    assert avp.hidden_tokens.grad is not None
+    assert avp.hidden_tokens.grad.abs().sum() > 0
+    assert isinstance(avp.output_proj, nn.Linear)
+    assert avp.output_proj.weight.grad is not None
+    assert avp.output_proj.weight.grad.abs().sum() > 0
+
+
+def test_forward_loss_detached_hidden_no_grad():
+    """When hidden is detached, no gradients flow to hidden_tokens for that component."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_output_proj=True)
+    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    images = torch.randn(B, 3, 64, 64)
+    target = torch.randn(B, 16, embed_dim)
+
+    # Provide detached hidden state (simulates Bernoulli survivor)
+    hidden = torch.randn(B, 16, embed_dim).detach()
+
+    loss, _ = avp.forward_loss(images, [], target, hidden=hidden)
+    loss.backward()
+
+    # hidden_tokens should have NO gradient (detached hidden was used)
+    assert avp.hidden_tokens.grad is None or avp.hidden_tokens.grad.abs().sum() == 0
+    # But output_proj should still have gradient
+    assert isinstance(avp.output_proj, nn.Linear)
+    assert avp.output_proj.weight.grad is not None
+    assert avp.output_proj.weight.grad.abs().sum() > 0
