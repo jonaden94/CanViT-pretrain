@@ -72,6 +72,8 @@ class Config:
     log_every: int = 20
     val_every: int = 50
     ckpt_every: int = 500
+    # Compilation
+    compile: bool = False
     # Optuna
     n_trials: int = 100
     # Runtime
@@ -99,6 +101,21 @@ def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
     for p in backbone_copy.parameters():
         p.requires_grad = not cfg.freeze_inner_backbone
     return AVPViT(backbone_copy, cfg.avp).to(cfg.device)
+
+
+def compile_avp(avp: AVPViT) -> None:
+    """Wrap DINOv3 blocks and cross-attention modules with torch.compile."""
+    n_blocks = avp.backbone.n_blocks
+    log.info(f"Wrapping {n_blocks} DINOv3 blocks + {n_blocks} read/write attention pairs for compilation")
+
+    assert isinstance(avp.backbone, DINOv3Backbone)
+    blocks = avp.backbone._backbone.blocks
+    for i in range(n_blocks):
+        blocks[i] = torch.compile(blocks[i])  # type: ignore[assignment]
+
+    for i in range(n_blocks):
+        avp.read_attn[i] = torch.compile(avp.read_attn[i])  # type: ignore[assignment]
+        avp.write_attn[i] = torch.compile(avp.write_attn[i])  # type: ignore[assignment]
 
 
 def log_figure(exp: comet_ml.Experiment, fig: Figure, name: str, step: int) -> None:
@@ -206,6 +223,9 @@ def save_checkpoint(avp: AVPViT, path: Path, exp: comet_ml.Experiment, step: int
 
 def train(cfg: Config, trial: optuna.Trial) -> float:
     """Train AVP model and return best val_loss for HP optimization."""
+    log.info(f"Starting trial {trial.number}")
+    log.info(f"Device: {cfg.device}")
+
     exp = comet_ml.Experiment(project_name="avp-vit-scene-match", auto_metric_logging=False)
     exp.log_parameters({
         k: str(v) if isinstance(v, (torch.device, Path)) else v
@@ -213,9 +233,16 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     })
     exp.log_parameters({"trial_number": trial.number})
 
+    log.info("Loading teacher...")
     teacher = load_teacher(cfg)
-    avp = create_avp(teacher, cfg)
+    log.info(f"Teacher params: {count_parameters(teacher):,}")
 
+    log.info("Creating AVP model...")
+    avp = create_avp(teacher, cfg)
+    if cfg.compile:
+        compile_avp(avp)
+
+    log.info("Setting up data loaders...")
     train_loader = InfiniteLoader(make_loader(
         cfg.train_dir,
         train_transform(avp.scene_size, (cfg.crop_scale_min, 1.0)),
@@ -229,21 +256,26 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     trainable = [p for p in avp.parameters() if p.requires_grad]
     n_trainable = sum(p.numel() for p in trainable)
-    log.info(f"Trainable: {n_trainable:,}, Teacher: {count_parameters(teacher):,}")
-    exp.log_parameters({"trainable_params": n_trainable})
+    n_total = count_parameters(avp)
+    log.info(f"AVP total: {n_total:,}, trainable: {n_trainable:,} ({100*n_trainable/n_total:.1f}%)")
+    exp.log_parameters({"trainable_params": n_trainable, "total_params": n_total})
 
     peak_lr = get_linear_scaled_lr(cfg.ref_lr, cfg.batch_size)
     optimizer = torch.optim.AdamW(trainable, lr=peak_lr, weight_decay=cfg.weight_decay)
     warmup_steps = int(cfg.n_steps * cfg.warmup_ratio)
     scheduler = warmup_cosine_scheduler(optimizer, cfg.n_steps, warmup_steps)
+    log.info(f"Optimizer: AdamW, peak_lr={peak_lr:.2e}, weight_decay={cfg.weight_decay:.2e}")
+    log.info(f"Schedule: {warmup_steps:,} warmup steps, {cfg.n_steps:,} total steps")
 
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}_best.pt"
     best_val_loss = float("inf")
     ckpt_val_loss = float("inf")  # val_loss at last checkpoint, save only when improved
 
     # Initial eval
+    log.info("Running initial validation...")
     val_images = val_loader.next_batch().to(cfg.device)
     val_loss = eval_and_log(exp, 0, avp, teacher, val_images)
+    log.info(f"Initial val_loss: {val_loss:.4f}")
     save_checkpoint(avp, ckpt_path, exp, 0, val_loss)
     best_val_loss = val_loss
     ckpt_val_loss = val_loss
@@ -256,6 +288,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     ema_loss_t = torch.tensor(0.0, device=cfg.device)
     alpha = 2 / (cfg.log_every + 1)
+
+    log.info("Starting training loop...")
     pbar = tqdm(range(cfg.n_steps), desc="Training", unit="step")
 
     for step in pbar:
