@@ -620,15 +620,13 @@ def test_local_temporal_gating_gradient_flow():
     B = 2
     n_local = avp.n_local_tokens
 
-    # Create inputs
+    # Create inputs - use forward_step which calls _process_glimpse internally
     glimpse = torch.randn(B, 3, glimpse_grid_size * PATCH_SIZE, glimpse_grid_size * PATCH_SIZE)
-    local_fresh = torch.randn(B, n_local, embed_dim)
     local_prev = torch.randn(B, n_local, embed_dim, requires_grad=True)
     centers = torch.zeros(B, 2)
     scales = torch.ones(B)
 
-    # Call _process_glimpse directly
-    out = avp._process_glimpse(glimpse, local_fresh, centers, scales, None, local_prev)
+    out = avp._process_glimpse(glimpse, centers, scales, None, local_prev)
 
     # Backward pass
     loss = out.scene.sum()

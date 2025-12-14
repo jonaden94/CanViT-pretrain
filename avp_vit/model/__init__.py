@@ -246,7 +246,6 @@ class AVPViT(nn.Module):
     def _process_glimpse(
         self,
         glimpse: Tensor,
-        local_fresh: Tensor,
         centers: Tensor,
         scales: Tensor,
         hidden: Tensor | None,
@@ -256,7 +255,6 @@ class AVPViT(nn.Module):
 
         Args:
             glimpse: Extracted glimpse image [B, C, H, W]
-            local_fresh: Tokenized glimpse features [B, N, D]
             centers: Viewpoint centers [B, 2]
             scales: Viewpoint scales [B]
             hidden: Previous hidden state [B, n_persistent + G*G, D] or None for fresh start
@@ -265,8 +263,12 @@ class AVPViT(nn.Module):
         Returns:
             StepOutput with both hidden (for continuation) and scene (for loss/viz)
         """
+        # Tokenize inside checkpoint so patch embedding activations aren't stored
+        local_fresh, H, W = self.backbone.prepare_tokens(glimpse)
+        G = self.cfg.glimpse_grid_size
+        assert H == W == G, f"backbone returned {H}x{W} but config expects {G}x{G}"
+
         B = local_fresh.shape[0]
-        H = W = self.cfg.glimpse_grid_size
         rope_dtype = self.backbone.rope_dtype
         periods = self.backbone.rope_periods
         n_ephemeral = self.n_ephemeral_registers
@@ -343,10 +345,6 @@ class AVPViT(nn.Module):
         """
         B = images.shape[0]
         glimpse = extract_glimpse(images, viewpoint, self.glimpse_size)
-        tokens, H, W = self.backbone.prepare_tokens(glimpse)
-        # Assert square grid matches config (catch H/W mismatches early)
-        G = self.cfg.glimpse_grid_size
-        assert H == W == G, f"backbone returned {H}x{W} but config expects {G}x{G}"
 
         # Initialize local_prev from local_init if needed
         if self.cfg.use_local_temporal and local_prev is None:
@@ -357,14 +355,13 @@ class AVPViT(nn.Module):
             return cast(StepOutput, checkpoint(
                 self._process_glimpse,
                 glimpse,
-                tokens,
                 viewpoint.centers,
                 viewpoint.scales,
                 hidden,
                 local_prev,
                 use_reentrant=False,
             ))
-        return self._process_glimpse(glimpse, tokens, viewpoint.centers, viewpoint.scales, hidden, local_prev)
+        return self._process_glimpse(glimpse, viewpoint.centers, viewpoint.scales, hidden, local_prev)
 
     # ==================== General Primitive ====================
 
