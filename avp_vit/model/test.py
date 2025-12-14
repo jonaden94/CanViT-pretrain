@@ -362,3 +362,44 @@ def test_forward_loss_detached_hidden_no_grad():
     assert isinstance(avp.output_proj, nn.Linear)
     assert avp.output_proj.weight.grad is not None
     assert avp.output_proj.weight.grad.abs().sum() > 0
+
+
+def test_local_temporal_disabled_by_default():
+    """Local temporal parameters are None when use_local_temporal=False."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3)
+    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    assert avp.local_tokens is None
+    assert avp.local_temporal_norm is None
+    assert avp.local_temporal_gate is None
+
+
+def test_local_temporal_parameters_shapes():
+    """Local temporal parameters have correct shapes when enabled."""
+    embed_dim = 64
+    n_registers = 4
+    glimpse_grid_size = 3
+    cfg = AVPConfig(
+        scene_grid_size=4,
+        glimpse_grid_size=glimpse_grid_size,
+        use_local_temporal=True,
+        gate_init=1e-5,
+    )
+    backbone = MockBackbone(embed_dim, 4, 2, n_registers, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    # N_local = 1 (CLS) + n_registers + glimpse_grid_size²
+    expected_n_local = 1 + n_registers + glimpse_grid_size**2
+    assert avp.n_local_tokens == expected_n_local
+
+    assert avp.local_tokens is not None
+    assert avp.local_tokens.shape == (1, expected_n_local, embed_dim)
+
+    assert avp.local_temporal_norm is not None
+    assert isinstance(avp.local_temporal_norm, nn.LayerNorm)
+
+    assert avp.local_temporal_gate is not None
+    assert avp.local_temporal_gate.shape == (embed_dim,)
+    assert (avp.local_temporal_gate == 1e-5).all()

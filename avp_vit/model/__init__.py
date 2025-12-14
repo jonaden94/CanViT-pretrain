@@ -49,6 +49,7 @@ class AVPConfig:
     gate_init: float = 0.0
     use_output_proj: bool = False
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries to save VRAM
+    use_local_temporal: bool = False  # Temporal gating on local stream across glimpses
 
 
 @final
@@ -68,6 +69,10 @@ class AVPViT(nn.Module):
     read_gate: nn.ParameterList
     write_gate: nn.ParameterList
     output_proj: nn.Module
+    # Local temporal stream (when use_local_temporal=True)
+    local_tokens: nn.Parameter | None  # Learned initial local state [1, N, D]
+    local_temporal_norm: nn.LayerNorm | None
+    local_temporal_gate: nn.Parameter | None
 
     @property
     def glimpse_size(self) -> int:
@@ -83,6 +88,10 @@ class AVPViT(nn.Module):
             return 0
         ratio = (self.cfg.scene_grid_size / self.cfg.glimpse_grid_size) ** 2
         return round(self.backbone.n_register_tokens * ratio)
+
+    @property
+    def n_local_tokens(self) -> int:
+        return 1 + self.backbone.n_register_tokens + self.cfg.glimpse_grid_size ** 2
 
     def __init__(self, backbone: ViTBackbone, cfg: AVPConfig) -> None:
         super().__init__()
@@ -141,6 +150,21 @@ class AVPViT(nn.Module):
             self.output_proj = nn.Linear(embed_dim, embed_dim)
         else:
             self.output_proj = nn.Identity()
+
+        # Local temporal stream: gated addition across timesteps
+        if cfg.use_local_temporal:
+            n_local = self.n_local_tokens
+            self.local_tokens = nn.Parameter(
+                torch.randn(1, n_local, embed_dim) / (embed_dim**0.5)
+            )
+            self.local_temporal_norm = nn.LayerNorm(embed_dim)
+            self.local_temporal_gate = nn.Parameter(
+                torch.full((embed_dim,), cfg.gate_init)
+            )
+        else:
+            self.local_tokens = None
+            self.local_temporal_norm = None
+            self.local_temporal_gate = None
 
     def _init_hidden(self, B: int, hidden: Tensor | None) -> Tensor:
         """Initialize hidden state: use provided or expand learned tokens, prepend registers."""
