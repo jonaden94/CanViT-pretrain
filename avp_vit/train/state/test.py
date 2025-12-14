@@ -29,8 +29,8 @@ class TestTrainState:
             next_hidden=torch.randn(B, G * G, D),
             next_local_prev=None,
             survival_prob=0.5,
-            hidden_tokens=torch.randn(1, G * G, D),
-            local_tokens=None,
+            hidden_init=torch.randn(B, G * G, D),
+            local_init=None,
         )
         assert new_state.images.shape == (B, C, H, W)
         assert new_state.targets.shape == (B, G * G, D)
@@ -47,21 +47,21 @@ class TestTrainState:
         fresh_images = torch.randn(B, C, H, W)
         fresh_targets = torch.randn(B, G * G, D)
         next_hidden = torch.randn(B, G * G, D)
-        hidden_tokens = torch.randn(1, G * G, D)
+        hidden_init = torch.randn(B, G * G, D)
 
         new_state = state.step(
             fresh_images, fresh_targets, next_hidden,
             next_local_prev=None,
             survival_prob=0.0,
-            hidden_tokens=hidden_tokens,
-            local_tokens=None,
+            hidden_init=hidden_init,
+            local_init=None,
         )
         # All items reset to fresh
         assert torch.equal(new_state.images, fresh_images)
         assert torch.equal(new_state.targets, fresh_targets)
-        # Hidden resets to hidden_tokens
+        # Hidden resets to hidden_init
         assert new_state.hidden is not None
-        assert torch.equal(new_state.hidden, hidden_tokens.expand(B, -1, -1))
+        assert torch.equal(new_state.hidden, hidden_init)
         assert new_state.local_prev is None
 
     def test_survival_one_keeps_all(self) -> None:
@@ -74,14 +74,14 @@ class TestTrainState:
         fresh_images = torch.randn(B, C, H, W)
         fresh_targets = torch.randn(B, G * G, D)
         next_hidden = torch.randn(B, G * G, D)
-        hidden_tokens = torch.randn(1, G * G, D)
+        hidden_init = torch.randn(B, G * G, D)
 
         new_state = state.step(
             fresh_images, fresh_targets, next_hidden,
             next_local_prev=None,
             survival_prob=1.0,
-            hidden_tokens=hidden_tokens,
-            local_tokens=None,
+            hidden_init=hidden_init,
+            local_init=None,
         )
         # All items kept
         assert torch.equal(new_state.images, old_images)
@@ -105,8 +105,8 @@ class TestTrainState:
             next_hidden,
             next_local_prev=None,
             survival_prob=1.0,
-            hidden_tokens=torch.randn(1, G * G, D),
-            local_tokens=None,
+            hidden_init=torch.randn(B, G * G, D),
+            local_init=None,
         )
         # Surviving items should be detached
         assert new_state.hidden is not None
@@ -122,7 +122,7 @@ class TestTrainState:
 
         next_hidden = torch.randn(B, G * G, D)
         next_local_prev = torch.randn(B, N, D, requires_grad=True)
-        local_tokens = torch.randn(1, N, D)
+        local_init = torch.randn(B, N, D)
 
         # survival_prob=1.0: all survive, use detached next_local_prev
         new_state = state.step(
@@ -131,8 +131,8 @@ class TestTrainState:
             next_hidden,
             next_local_prev=next_local_prev,
             survival_prob=1.0,
-            hidden_tokens=torch.randn(1, G * G, D),
-            local_tokens=local_tokens,
+            hidden_init=torch.randn(B, G * G, D),
+            local_init=local_init,
         )
         assert new_state.local_prev is not None
         assert new_state.local_prev.shape == (B, N, D)
@@ -140,7 +140,7 @@ class TestTrainState:
         assert torch.equal(new_state.local_prev, next_local_prev.detach())
 
     def test_local_prev_reset_on_non_survival(self) -> None:
-        """Non-survivors reset local_prev to local_tokens."""
+        """Non-survivors reset local_prev to local_init."""
         B, C, H, W, D, G, N = 4, 3, 64, 64, 128, 16, 10
         state = TrainState.init(
             torch.randn(B, C, H, W),
@@ -149,7 +149,7 @@ class TestTrainState:
 
         next_hidden = torch.randn(B, G * G, D)
         next_local_prev = torch.randn(B, N, D)
-        local_tokens = torch.randn(1, N, D)
+        local_init = torch.randn(B, N, D)
 
         # survival_prob=0.0: all reset
         new_state = state.step(
@@ -158,8 +158,51 @@ class TestTrainState:
             next_hidden,
             next_local_prev=next_local_prev,
             survival_prob=0.0,
-            hidden_tokens=torch.randn(1, G * G, D),
-            local_tokens=local_tokens,
+            hidden_init=torch.randn(B, G * G, D),
+            local_init=local_init,
         )
         assert new_state.local_prev is not None
-        assert torch.equal(new_state.local_prev, local_tokens.expand(B, -1, -1))
+        assert torch.equal(new_state.local_prev, local_init)
+
+    def test_shape_mismatch_hidden_raises(self) -> None:
+        """Catch shape mismatch between next_hidden and hidden_init (the original bug)."""
+        B, C, H, W, D, G = 4, 3, 64, 64, 128, 16
+        N_REGISTERS = 42  # Simulating persistent registers
+        state = TrainState.init(
+            torch.randn(B, C, H, W),
+            torch.randn(B, G * G, D),
+        )
+
+        # next_hidden includes registers: [B, n_registers + G*G, D]
+        next_hidden = torch.randn(B, N_REGISTERS + G * G, D)
+        # hidden_init MUST match: [B, n_registers + G*G, D]
+        hidden_init = torch.randn(B, N_REGISTERS + G * G, D)
+
+        # This should work (matching shapes)
+        new_state = state.step(
+            torch.randn(B, C, H, W),
+            torch.randn(B, G * G, D),
+            next_hidden,
+            next_local_prev=None,
+            survival_prob=0.5,
+            hidden_init=hidden_init,
+            local_init=None,
+        )
+        assert new_state.hidden is not None
+        assert new_state.hidden.shape == (B, N_REGISTERS + G * G, D)
+
+        # Mismatched shapes should fail
+        wrong_hidden_init = torch.randn(B, G * G, D)  # Missing registers!
+        try:
+            state.step(
+                torch.randn(B, C, H, W),
+                torch.randn(B, G * G, D),
+                next_hidden,
+                next_local_prev=None,
+                survival_prob=0.5,
+                hidden_init=wrong_hidden_init,
+                local_init=None,
+            )
+            assert False, "Should have raised RuntimeError for shape mismatch"
+        except RuntimeError as e:
+            assert "size" in str(e).lower() or "shape" in str(e).lower()

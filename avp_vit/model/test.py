@@ -176,7 +176,7 @@ def test_convex_init_passthrough():
         # AVPViT forward (same seed for prepare_tokens)
         torch.manual_seed(123)
         out = avp.forward_step(images, vp)
-        initial_scene = avp.output_proj(avp.hidden_tokens.expand(B, -1, -1))
+        initial_scene = avp.output_proj(avp.spatial_init.expand(B, -1, -1))
 
     # Scene: write gate ≈ 0 → scene ≈ initial
     scene_diff = (out.scene - initial_scene).abs().mean()
@@ -192,7 +192,7 @@ def test_convex_gate_value_affects_output():
     cfg_lo = AVPConfig(scene_grid_size=4, gate_init=1e-5, use_convex_gating=True)
     cfg_hi = AVPConfig(scene_grid_size=4, gate_init=0.5, use_convex_gating=True)
 
-    # Same seed for both → same hidden_tokens, attention weights
+    # Same seed for both → same spatial_init, attention weights
     torch.manual_seed(999)
     avp_lo = AVPViT(MockBackbone(64, 4, 2, 0, PATCH_SIZE), cfg_lo)
     torch.manual_seed(999)
@@ -208,7 +208,7 @@ def test_convex_gate_value_affects_output():
         out_lo = avp_lo.forward_step(images, vp)
         torch.manual_seed(123)
         out_hi = avp_hi.forward_step(images, vp)
-        initial = avp_lo.output_proj(avp_lo.hidden_tokens.expand(B, -1, -1))
+        initial = avp_lo.output_proj(avp_lo.spatial_init.expand(B, -1, -1))
 
     diff_lo = (out_lo.scene - initial).abs().mean()
     diff_hi = (out_hi.scene - initial).abs().mean()
@@ -459,7 +459,7 @@ def test_gradient_checkpointing_smoke():
     loss = scene.sum()
     loss.backward()
 
-    assert avp.hidden_tokens.grad is not None
+    assert avp.spatial_init.grad is not None
 
 
 def test_forward_loss_includes_initial_scene():
@@ -485,16 +485,16 @@ def test_forward_loss_includes_initial_scene():
 
     loss.backward()
 
-    # Gradients should flow to hidden_tokens and output_proj
-    assert avp.hidden_tokens.grad is not None
-    assert avp.hidden_tokens.grad.abs().sum() > 0
+    # Gradients should flow to spatial_init and output_proj
+    assert avp.spatial_init.grad is not None
+    assert avp.spatial_init.grad.abs().sum() > 0
     assert isinstance(avp.output_proj, nn.Linear)
     assert avp.output_proj.weight.grad is not None
     assert avp.output_proj.weight.grad.abs().sum() > 0
 
 
 def test_forward_loss_detached_hidden_no_grad():
-    """When hidden is detached, no gradients flow to hidden_tokens for that component."""
+    """When hidden is detached, no gradients flow to spatial_init for that component."""
     embed_dim = 64
     cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_output_proj=True)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
@@ -510,8 +510,8 @@ def test_forward_loss_detached_hidden_no_grad():
     loss, _, _ = avp.forward_loss(images, [], target, hidden=hidden)
     loss.backward()
 
-    # hidden_tokens should have NO gradient (detached hidden was used)
-    assert avp.hidden_tokens.grad is None or avp.hidden_tokens.grad.abs().sum() == 0
+    # spatial_init should have NO gradient (detached hidden was used)
+    assert avp.spatial_init.grad is None or avp.spatial_init.grad.abs().sum() == 0
     # But output_proj should still have gradient
     assert isinstance(avp.output_proj, nn.Linear)
     assert avp.output_proj.weight.grad is not None
@@ -525,7 +525,7 @@ def test_local_temporal_disabled_by_default():
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
-    assert avp.local_tokens is None
+    assert avp.local_init is None
     assert avp.local_temporal_norm is None
     assert avp.local_temporal_gate is None
 
@@ -548,8 +548,8 @@ def test_local_temporal_parameters_shapes():
     expected_n_local = 1 + n_registers + glimpse_grid_size**2
     assert avp.n_local_tokens == expected_n_local
 
-    assert avp.local_tokens is not None
-    assert avp.local_tokens.shape == (1, expected_n_local, embed_dim)
+    assert avp.local_init is not None
+    assert avp.local_init.shape == (1, expected_n_local, embed_dim)
 
     assert avp.local_temporal_norm is not None
     assert isinstance(avp.local_temporal_norm, nn.LayerNorm)
@@ -620,7 +620,7 @@ def test_local_temporal_disabled_no_effect_on_output():
 
 
 def test_forward_step_local_prev_flows_through():
-    """forward_step passes local_prev to _process_glimpse and uses local_tokens if None."""
+    """forward_step passes local_prev to _process_glimpse and uses local_init if None."""
     embed_dim = 64
     cfg = AVPConfig(
         scene_grid_size=4,
@@ -635,7 +635,7 @@ def test_forward_step_local_prev_flows_through():
     images = torch.randn(B, 3, 64, 64)
     vp = Viewpoint.full_scene(B, images.device)
 
-    # First call with local_prev=None should use local_tokens
+    # First call with local_prev=None should use local_init
     out1 = avp.forward_step(images, vp, None, None)
     assert out1.local.shape == (B, avp.n_local_tokens, embed_dim)
 

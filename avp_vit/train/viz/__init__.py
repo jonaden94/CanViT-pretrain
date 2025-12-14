@@ -167,7 +167,7 @@ def plot_multistep_pca(
 ) -> Figure:
     """Full multi-row visualization with all diagnostic columns.
 
-    Row 0 = "init": learned hidden_tokens projected through output_proj, BEFORE any glimpses
+    Row 0 = "init": learned spatial_init projected through output_proj, BEFORE any glimpses
     Row 1+ = "t=0, t=1, ...": scene state AFTER processing each glimpse
 
     Columns: Trajectory | Glimpse | Teacher | Scene | Local (AVP) | Local (Teacher) | Delta | Error

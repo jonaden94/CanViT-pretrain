@@ -150,9 +150,13 @@ def viz_and_log(
         outputs, _, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
         mses = [nn.functional.mse_loss(out.scene, target).item() for out in outputs]
 
-        # Initial scene from hidden or hidden_tokens
-        init_hidden = hidden if hidden is not None else avp.hidden_tokens.expand(B, -1, -1)
-        initial_scene = avp.output_proj(init_hidden[0:1])[0]
+        # Initial scene from spatial portion of hidden (or spatial_init if None)
+        n_persistent = avp.n_persistent_registers
+        if hidden is not None:
+            init_spatial = hidden[:, n_persistent:]
+        else:
+            init_spatial = avp.spatial_init.expand(B, -1, -1)
+        initial_scene = avp.output_proj(init_spatial[0:1])[0]
 
         # Prepare viz data for first sample
         sample_idx = 0
@@ -355,9 +359,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 raise optuna.TrialPruned()
 
         # Bernoulli survival at optimizer step boundary (AFTER visualization)
+        # Pass fully initialized hidden (with registers) not raw tokens
+        hidden_init = avp._init_hidden(cfg.batch_size, None)
+        local_init = avp.local_init.expand(cfg.batch_size, -1, -1) if avp.local_init is not None else None
         state = state.step(
             fresh_imgs, fresh_targets, final_hidden, final_local,
-            cfg.survival_prob, avp.hidden_tokens, avp.local_tokens,
+            cfg.survival_prob, hidden_init, local_init,
         )
 
     val_images = val_loader.next_batch().to(cfg.device)

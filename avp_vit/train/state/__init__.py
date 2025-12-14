@@ -14,7 +14,7 @@ class TrainState:
     lengths despite BPTT being restricted to short horizons. Each batch item has
     probability `survival_prob` of being "carried over" between optimizer steps:
     - Surviving items: same image/target, hidden state continues from previous step
-    - Non-surviving items: fresh image/target, hidden resets to learned hidden_tokens
+    - Non-surviving items: fresh image/target, hidden resets to learned spatial_init
 
     This creates a geometric distribution of effective sequence lengths.
 
@@ -41,19 +41,19 @@ class TrainState:
         next_hidden: Tensor,
         next_local_prev: Tensor | None,
         survival_prob: float,
-        hidden_tokens: Tensor,
-        local_tokens: Tensor | None,
+        hidden_init: Tensor,
+        local_init: Tensor | None,
     ) -> "TrainState":
         """Update state with Bernoulli survival.
 
         Args:
             fresh_images: New images from dataloader [B, C, H, W]
             fresh_targets: Teacher patches for fresh images [B, G*G, D]
-            next_hidden: Hidden state from forward step [B, G*G, D] (for CONTINUATION)
+            next_hidden: Hidden state from forward step [B, n_tokens, D] (for CONTINUATION)
             next_local_prev: Local state from forward step [B, N, D] (when use_local_temporal)
             survival_prob: Probability of keeping current item
-            hidden_tokens: Model's hidden_tokens parameter [1, G*G, D]
-            local_tokens: Model's local_tokens parameter [1, N, D] (when use_local_temporal)
+            hidden_init: Initialized hidden state [B, n_tokens, D] (from model._init_hidden)
+            local_init: Initialized local state [B, N, D] or None (when use_local_temporal)
 
         Returns:
             Updated TrainState for next iteration.
@@ -69,14 +69,12 @@ class TrainState:
         targets = torch.where(s_feat, self.targets, fresh_targets)
 
         # Survivors: detach to cut BPTT across optimizer steps
-        # Non-survivors: reset to hidden_tokens (gradients flow to hidden_tokens param)
-        hidden_init = hidden_tokens.expand(B, -1, -1)
+        # Non-survivors: reset to hidden_init (gradients flow through hidden_init)
         hidden = torch.where(s_feat, next_hidden.detach(), hidden_init)
 
         # Same pattern for local_prev when use_local_temporal enabled
         if next_local_prev is not None:
-            assert local_tokens is not None
-            local_init = local_tokens.expand(B, -1, -1)
+            assert local_init is not None
             local_prev = torch.where(s_feat, next_local_prev.detach(), local_init)
         else:
             local_prev = None

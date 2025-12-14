@@ -72,7 +72,7 @@ class AVPViT(nn.Module):
     cfg: AVPConfig
     persistent_registers: nn.Parameter | None  # Passed through between steps
     ephemeral_registers: nn.Parameter | None  # Reinitialized each step
-    hidden_tokens: nn.Parameter  # Learned initial hidden state [1, G*G, D]
+    spatial_init: nn.Parameter  # Learned initial spatial tokens [1, G*G, D]
     scene_positions: Tensor
     read_attn: nn.ModuleList  # Raw attention (layerscale) or ConvexGatedAttention (convex)
     write_attn: nn.ModuleList
@@ -80,7 +80,7 @@ class AVPViT(nn.Module):
     write_scale: nn.ModuleList | None
     output_proj: nn.Module
     # Local temporal stream (when use_local_temporal=True)
-    local_tokens: nn.Parameter | None  # Learned initial local state [1, N, D]
+    local_init: nn.Parameter | None  # Learned initial local state [1, N, D]
     local_temporal_norm: nn.LayerNorm | None
     local_temporal_gate: nn.Parameter | None
 
@@ -137,11 +137,10 @@ class AVPViT(nn.Module):
         else:
             self.ephemeral_registers = None
 
-        # Learned initial hidden state: one learnable vector per spatial position.
-        # Shape [1, G*G, D] where G = scene_grid_size (square grid).
-        # The leading 1 is for batch broadcasting; each of the G*G positions has
-        # its own independent learnable D-dimensional vector.
-        self.hidden_tokens = nn.Parameter(
+        # Learned initial spatial tokens: one learnable vector per grid position.
+        # Shape [1, G*G, D] where G = scene_grid_size.
+        # Full hidden state = [persistent_registers, spatial_init] (see _init_hidden).
+        self.spatial_init = nn.Parameter(
             torch.randn(1, cfg.scene_grid_size**2, embed_dim) / (embed_dim**0.5)
         )
 
@@ -175,7 +174,7 @@ class AVPViT(nn.Module):
             self.read_scale = nn.ModuleList([LayerScale(embed_dim, cfg.gate_init) for _ in range(n_blocks)])
             self.write_scale = nn.ModuleList([LayerScale(embed_dim, cfg.gate_init) for _ in range(n_blocks)])
 
-        device = self.hidden_tokens.device
+        device = self.spatial_init.device
         assert isinstance(device, torch.device)
         pos = make_grid_positions(
             cfg.scene_grid_size, cfg.scene_grid_size, device, dtype=backbone.rope_dtype
@@ -191,7 +190,7 @@ class AVPViT(nn.Module):
         # Local temporal stream: gated addition across timesteps
         if cfg.use_local_temporal:
             n_local = self.n_local_tokens
-            self.local_tokens = nn.Parameter(
+            self.local_init = nn.Parameter(
                 torch.randn(1, n_local, embed_dim) / (embed_dim**0.5)
             )
             self.local_temporal_norm = nn.LayerNorm(embed_dim)
@@ -199,21 +198,23 @@ class AVPViT(nn.Module):
                 torch.full((embed_dim,), cfg.gate_init)
             )
         else:
-            self.local_tokens = None
+            self.local_init = None
             self.local_temporal_norm = None
             self.local_temporal_gate = None
 
     def _init_hidden(self, B: int, hidden: Tensor | None) -> Tensor:
-        """Initialize hidden state: persistent_registers + spatial.
+        """Initialize hidden state: [persistent_registers, spatial_init].
 
         Hidden state shape: [B, n_persistent + G*G, D]
         - persistent_registers: passed through between timesteps
-        - spatial: the grid tokens
+        - spatial_init: the G*G grid tokens
         """
         if hidden is None:
-            hidden = self.hidden_tokens.expand(B, -1, -1)
+            spatial = self.spatial_init.expand(B, -1, -1)
             if self.persistent_registers is not None:
-                hidden = torch.cat([self.persistent_registers.expand(B, -1, -1), hidden], dim=1)
+                hidden = torch.cat([self.persistent_registers.expand(B, -1, -1), spatial], dim=1)
+            else:
+                hidden = spatial
         return hidden
 
     def _process_glimpse(
@@ -315,10 +316,10 @@ class AVPViT(nn.Module):
         G = self.cfg.glimpse_grid_size
         assert H == W == G, f"backbone returned {H}x{W} but config expects {G}x{G}"
 
-        # Initialize local_prev from local_tokens if needed
+        # Initialize local_prev from local_init if needed
         if self.cfg.use_local_temporal and local_prev is None:
-            assert self.local_tokens is not None
-            local_prev = self.local_tokens.expand(B, -1, -1)
+            assert self.local_init is not None
+            local_prev = self.local_init.expand(B, -1, -1)
 
         if self.cfg.gradient_checkpointing and self.training:
             return cast(StepOutput, checkpoint(
@@ -375,8 +376,8 @@ class AVPViT(nn.Module):
         if hidden is None:
             hidden = self._init_hidden(B, None)
         if self.cfg.use_local_temporal and local_prev is None:
-            assert self.local_tokens is not None
-            local_prev = self.local_tokens.expand(B, -1, -1)
+            assert self.local_init is not None
+            local_prev = self.local_init.expand(B, -1, -1)
         return acc, hidden, local_prev
 
     # ==================== Standard Invocations ====================
@@ -395,9 +396,9 @@ class AVPViT(nn.Module):
         Memory-efficient: does not store intermediate scenes.
 
         The initial scene (before any glimpses) is included in the loss. This trains
-        the hidden_tokens and output_proj to produce a good "baseline" prediction.
+        the spatial_init and output_proj to produce a good "baseline" prediction.
         When hidden comes from Bernoulli survival (detached), no gradients flow for
-        survivors; for non-survivors, gradients flow to hidden_tokens.
+        survivors; for non-survivors, gradients flow to spatial_init.
 
         Args:
             images: Input images [B, C, H, W]
@@ -417,13 +418,13 @@ class AVPViT(nn.Module):
 
         # Extract spatial-only hidden for computing initial scene
         if hidden is None:
-            spatial_init = self.hidden_tokens.expand(B, -1, -1)
+            spatial = self.spatial_init.expand(B, -1, -1)
         else:
-            # hidden = persistent + spatial, extract spatial
-            spatial_init = hidden[:, n_persistent:]
+            # hidden = [persistent, spatial], extract spatial portion
+            spatial = hidden[:, n_persistent:]
 
         # Score initial scene BEFORE any glimpses
-        init_scene = self.output_proj(spatial_init)
+        init_scene = self.output_proj(spatial)
         init_loss = F.mse_loss(init_scene, target)
 
         def reducer(acc: Tensor, out: StepOutput) -> Tensor:
