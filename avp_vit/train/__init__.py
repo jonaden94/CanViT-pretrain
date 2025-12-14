@@ -11,7 +11,14 @@ from avp_vit.train.data import (
 from avp_vit.train.scheduler import warmup_cosine_scheduler
 from avp_vit.train.state import TrainState
 from avp_vit.train.viewpoint import make_eval_viewpoints, random_viewpoint
-from avp_vit.train.viz import fit_pca, imagenet_denormalize, pca_rgb
+from avp_vit.train.viz import (
+    fit_pca,
+    imagenet_denormalize,
+    pca_rgb,
+    plot_pca_grid,
+    plot_trajectory,
+    timestep_colors,
+)
 
 __all__ = [
     "IMAGENET_MEAN",
@@ -23,7 +30,10 @@ __all__ = [
     "make_eval_viewpoints",
     "make_loader",
     "pca_rgb",
+    "plot_pca_grid",
+    "plot_trajectory",
     "random_viewpoint",
+    "timestep_colors",
     "train_transform",
     "val_transform",
     "warmup_cosine_scheduler",

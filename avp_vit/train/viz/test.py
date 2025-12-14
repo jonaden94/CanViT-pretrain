@@ -2,8 +2,17 @@
 
 import numpy as np
 import torch
+from matplotlib.figure import Figure
 
-from avp_vit.train.viz import fit_pca, imagenet_denormalize, pca_rgb
+from avp_vit.glimpse import PixelBox
+from avp_vit.train.viz import (
+    fit_pca,
+    imagenet_denormalize,
+    pca_rgb,
+    plot_pca_grid,
+    plot_trajectory,
+    timestep_colors,
+)
 
 
 class TestPCA:
@@ -50,3 +59,52 @@ class TestImagenetDenormalize:
         img = torch.randn(3, 32, 32)
         result = imagenet_denormalize(img)
         assert result.device == img.device
+
+
+class TestTimestepColors:
+    def test_returns_correct_count(self) -> None:
+        colors = timestep_colors(5)
+        assert len(colors) == 5
+
+    def test_single_color(self) -> None:
+        colors = timestep_colors(1)
+        assert len(colors) == 1
+
+    def test_rgba_tuples(self) -> None:
+        colors = timestep_colors(3)
+        for c in colors:
+            assert len(c) == 4  # RGBA
+
+
+class TestPlotTrajectory:
+    def test_returns_figure(self) -> None:
+        img = np.random.rand(64, 64, 3).astype(np.float32)
+        boxes = [
+            PixelBox(left=0, top=0, width=64, height=64, center_x=32, center_y=32),
+            PixelBox(left=16, top=16, width=32, height=32, center_x=32, center_y=32),
+        ]
+        names = ["full", "center"]
+        fig = plot_trajectory(img, boxes, names)
+        assert isinstance(fig, Figure)
+
+    def test_empty_boxes(self) -> None:
+        img = np.random.rand(64, 64, 3).astype(np.float32)
+        fig = plot_trajectory(img, [], [])
+        assert isinstance(fig, Figure)
+
+
+class TestPlotPcaGrid:
+    def test_returns_figure(self) -> None:
+        reference = np.random.randn(16, 64).astype(np.float32)
+        samples = [np.random.randn(16, 64).astype(np.float32) for _ in range(3)]
+        pca = fit_pca(reference)
+        titles = ["t=0", "t=1", "t=2"]
+        fig = plot_pca_grid(pca, reference, samples, grid_size=4, titles=titles)
+        assert isinstance(fig, Figure)
+
+    def test_single_sample(self) -> None:
+        reference = np.random.randn(16, 64).astype(np.float32)
+        samples = [np.random.randn(16, 64).astype(np.float32)]
+        pca = fit_pca(reference)
+        fig = plot_pca_grid(pca, reference, samples, grid_size=4, titles=["t=0"])
+        assert isinstance(fig, Figure)
