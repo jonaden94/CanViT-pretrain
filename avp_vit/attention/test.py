@@ -84,43 +84,51 @@ def test_flops_projection_placement_matters():
     assert write_f > read_f * 4
 
 
-def test_pre_affine_enabled():
-    """Pre-transform EWAs are ElementwiseAffine when use_pre_affine=True."""
+def test_ewa_transforms_enabled():
+    """Unprojected transforms are EWA when use_ewa_transforms=True."""
     from ytch.nn.elementwise_affine import ElementwiseAffine
 
     D = 64
-    cfg = AttentionConfig(use_pre_affine=True)
-    attn = RoPEReadCrossAttention(D, 4, cfg)
-    assert isinstance(attn.affine_q, ElementwiseAffine)
-    assert isinstance(attn.affine_k, ElementwiseAffine)
-    assert isinstance(attn.affine_v, ElementwiseAffine)
+    cfg = AttentionConfig(use_ewa_transforms=True)
+    read = RoPEReadCrossAttention(D, 4, cfg)
+    write = RoPEWriteCrossAttention(D, 4, cfg)
+    # Read: K and V unprojected
+    assert isinstance(read.k_transform, ElementwiseAffine)
+    assert isinstance(read.v_transform, ElementwiseAffine)
+    # Write: Q and O unprojected
+    assert isinstance(write.q_transform, ElementwiseAffine)
+    assert isinstance(write.out_transform, ElementwiseAffine)
 
 
-def test_pre_affine_disabled():
-    """Pre-transform EWAs are Identity when use_pre_affine=False."""
+def test_ewa_transforms_disabled():
+    """Unprojected transforms are Identity when use_ewa_transforms=False."""
     D = 64
-    cfg = AttentionConfig(use_pre_affine=False)
-    attn = RoPEReadCrossAttention(D, 4, cfg)
-    assert isinstance(attn.affine_q, nn.Identity)
-    assert isinstance(attn.affine_k, nn.Identity)
-    assert isinstance(attn.affine_v, nn.Identity)
+    cfg = AttentionConfig(use_ewa_transforms=False)
+    read = RoPEReadCrossAttention(D, 4, cfg)
+    write = RoPEWriteCrossAttention(D, 4, cfg)
+    # Read: K and V unprojected
+    assert isinstance(read.k_transform, nn.Identity)
+    assert isinstance(read.v_transform, nn.Identity)
+    # Write: Q and O unprojected
+    assert isinstance(write.q_transform, nn.Identity)
+    assert isinstance(write.out_transform, nn.Identity)
 
 
-def test_post_rope_affine_enabled():
-    """Post-RoPE EWAs are ElementwiseAffine when use_post_rope_affine=True."""
+def test_post_rope_ewa_enabled():
+    """Post-RoPE EWAs are ElementwiseAffine when use_post_rope_ewa=True."""
     from ytch.nn.elementwise_affine import ElementwiseAffine
 
     D, heads = 64, 4
-    cfg = AttentionConfig(use_post_rope_affine=True)
+    cfg = AttentionConfig(use_post_rope_ewa=True)
     attn = RoPEReadCrossAttention(D, heads, cfg)
     assert isinstance(attn.post_rope_q, ElementwiseAffine)
     assert isinstance(attn.post_rope_k, ElementwiseAffine)
 
 
-def test_post_rope_affine_disabled():
-    """Post-RoPE EWAs are Identity when use_post_rope_affine=False."""
+def test_post_rope_ewa_disabled():
+    """Post-RoPE EWAs are Identity when use_post_rope_ewa=False."""
     D = 64
-    cfg = AttentionConfig(use_post_rope_affine=False)
+    cfg = AttentionConfig(use_post_rope_ewa=False)
     attn = RoPEReadCrossAttention(D, 4, cfg)
     assert isinstance(attn.post_rope_q, nn.Identity)
     assert isinstance(attn.post_rope_k, nn.Identity)
