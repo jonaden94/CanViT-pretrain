@@ -29,7 +29,7 @@ from avp_vit.backbone.dinov3 import DINOv3Backbone
 from avp_vit.glimpse import Viewpoint
 from avp_vit.train import (
     InfiniteLoader,
-    TrainState,
+    SurvivalBatch,
     imagenet_denormalize,
     make_eval_viewpoints,
     make_loader,
@@ -501,7 +501,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         if avp.local_init is not None
         else None
     )
-    state = TrainState.init(init_imgs, init_targets, hidden_init_full, local_init_full)
+    state = SurvivalBatch.init(init_imgs, init_targets, hidden_init_full, local_init_full)
 
     ema_loss_t = torch.tensor(0.0, device=cfg.device)
     alpha = 2 / (cfg.log_every + 1)

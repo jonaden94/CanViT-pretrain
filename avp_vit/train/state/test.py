@@ -2,16 +2,16 @@
 
 import torch
 
-from avp_vit.train.state import TrainState
+from avp_vit.train.state import SurvivalBatch
 
 
-class TestTrainState:
+class TestSurvivalBatch:
     def test_init(self) -> None:
         B, C, H, W, D, G = 4, 3, 64, 64, 128, 16
         images = torch.randn(B, C, H, W)
         targets = torch.randn(B, G * G, D)
         hidden_init = torch.randn(B, G * G, D)
-        state = TrainState.init(images, targets, hidden_init, None)
+        state = SurvivalBatch.init(images, targets, hidden_init, None)
         assert state.images is images
         assert state.targets is targets
         assert state.hidden is hidden_init
@@ -19,7 +19,7 @@ class TestTrainState:
 
     def test_step_shapes(self) -> None:
         B, K, C, H, W, D, G = 4, 2, 3, 64, 64, 128, 16
-        state = TrainState.init(
+        state = SurvivalBatch.init(
             torch.randn(B, C, H, W),
             torch.randn(B, G * G, D),
             torch.randn(B, G * G, D),
@@ -45,7 +45,7 @@ class TestTrainState:
         B, C, H, W, D, G = 4, 3, 64, 64, 128, 16
         old_images = torch.randn(B, C, H, W)
         old_targets = torch.randn(B, G * G, D)
-        state = TrainState.init(old_images, old_targets, torch.randn(B, G * G, D), None)
+        state = SurvivalBatch.init(old_images, old_targets, torch.randn(B, G * G, D), None)
 
         fresh_images = torch.randn(B, C, H, W)
         fresh_targets = torch.randn(B, G * G, D)
@@ -67,7 +67,7 @@ class TestTrainState:
     def test_hidden_detached(self) -> None:
         """Surviving hidden states are detached to cut BPTT across optimizer steps."""
         B, K, C, H, W, D, G = 4, 1, 3, 64, 64, 128, 16
-        state = TrainState.init(
+        state = SurvivalBatch.init(
             torch.randn(B, C, H, W),
             torch.randn(B, G * G, D),
             torch.randn(B, G * G, D),
@@ -88,7 +88,7 @@ class TestTrainState:
     def test_local_prev_handled(self) -> None:
         """local_prev is properly handled when use_local_temporal=True."""
         B, K, C, H, W, D, G, N = 4, 2, 3, 64, 64, 128, 16, 10
-        state = TrainState.init(
+        state = SurvivalBatch.init(
             torch.randn(B, C, H, W),
             torch.randn(B, G * G, D),
             torch.randn(B, G * G, D),
@@ -114,7 +114,7 @@ class TestTrainState:
         """Different calls produce different permutations."""
         B, K, C, H, W, D, G = 8, 2, 3, 64, 64, 128, 16
         images = torch.arange(B).view(B, 1, 1, 1).expand(B, C, H, W).float()
-        state = TrainState.init(
+        state = SurvivalBatch.init(
             images,
             torch.randn(B, G * G, D),
             torch.randn(B, G * G, D),
@@ -142,7 +142,7 @@ class TestTrainState:
         """Catch shape mismatch between next_hidden and hidden_init."""
         B, K, C, H, W, D, G = 4, 2, 3, 64, 64, 128, 16
         N_REGISTERS = 42
-        state = TrainState.init(
+        state = SurvivalBatch.init(
             torch.randn(B, C, H, W),
             torch.randn(B, G * G, D),
             torch.randn(B, N_REGISTERS + G * G, D),
