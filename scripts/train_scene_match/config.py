@@ -29,7 +29,7 @@ class Config:
             use_output_proj_norm=False,
             n_scene_registers=32,
             gradient_checkpointing=True,
-            use_convex_gating=True,
+            use_convex_gating=False,
             use_local_temporal=True,
             attention=AttentionConfig(write_v_expansion=2),
         )
