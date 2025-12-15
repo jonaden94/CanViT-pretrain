@@ -83,7 +83,7 @@ class TargetNorm(torch.nn.Module):
         return (x - self.mean) / (self.var + self.eps).sqrt()
 
 
-LOSS_FN = mse_loss
+LOSS_FN = l1_loss
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
