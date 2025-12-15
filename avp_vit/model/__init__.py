@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
+from ytch.nn import ElementwiseAffine
 from ytch.nn.layer_scale import LayerScale
 
 from avp_vit.attention import AttentionConfig, RoPEReadCrossAttention, RoPEWriteCrossAttention
@@ -200,7 +201,7 @@ class AVPViT(nn.Module):
         if cfg.use_output_proj:
             self.output_proj = nn.Sequential(
                 nn.Linear(embed_dim, embed_dim),
-                nn.LayerNorm(embed_dim),
+                ElementwiseAffine(embed_dim),
             )
         else:
             self.output_proj = nn.Identity()
