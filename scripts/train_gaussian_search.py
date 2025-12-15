@@ -454,6 +454,7 @@ def plot_policy_scatter(
 
     ax.set_xlim(-1.1, 1.1)
     ax.set_ylim(-1.1, 1.1)
+    ax.invert_yaxis()  # match image coords (Y=0 at top)
     ax.set_aspect("equal")
     ax.axhline(0, color="gray", linewidth=0.5, alpha=0.5)
     ax.axvline(0, color="gray", linewidth=0.5, alpha=0.5)
