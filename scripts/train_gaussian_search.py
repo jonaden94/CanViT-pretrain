@@ -248,9 +248,9 @@ def generate_multi_blob_batch(
 
 
 class TransformerBlock(nn.Module):
-    """Simple transformer block with pre-norm."""
+    """Transformer block with pre-norm and LayerScale."""
 
-    def __init__(self, dim: int, n_heads: int = 4, mlp_ratio: float = 2.0) -> None:
+    def __init__(self, dim: int, n_heads: int = 4, mlp_ratio: float = 2.0, layerscale_init: float = 0.1) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.attn = nn.MultiheadAttention(dim, n_heads, batch_first=True)
@@ -261,10 +261,12 @@ class TransformerBlock(nn.Module):
             nn.GELU(),
             nn.Linear(mlp_dim, dim),
         )
+        self.ls1 = nn.Parameter(torch.ones(dim) * layerscale_init)
+        self.ls2 = nn.Parameter(torch.ones(dim) * layerscale_init)
 
     def forward(self, x: Tensor) -> Tensor:
-        x = x + self.attn(self.norm1(x), self.norm1(x), self.norm1(x), need_weights=False)[0]
-        x = x + self.mlp(self.norm2(x))
+        x = x + self.ls1 * self.attn(self.norm1(x), self.norm1(x), self.norm1(x), need_weights=False)[0]
+        x = x + self.ls2 * self.mlp(self.norm2(x))
         return x
 
 
