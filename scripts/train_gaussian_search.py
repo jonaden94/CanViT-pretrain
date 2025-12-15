@@ -231,10 +231,9 @@ def generate_multi_blob_batch(
 
 
 class ViewpointPolicy(nn.Module):
-    """Decode viewpoint from context token.
+    """Decode viewpoint from context token + spatial hidden mean.
 
-    The context token contains target color info and has attended to scene via AVP.
-    Architecture: LayerNorm → MLP → heads
+    Architecture: cat(ctx_norm, spatial_mean_norm) → MLP → heads
 
     Bounding: center first, then scale constrained by center.
     - centers = tanh(logits) * (1 - min_scale)
@@ -262,13 +261,17 @@ class ViewpointPolicy(nn.Module):
         # Context embedding: target_colors [B, 3] → [B, D]
         self.context_embed = nn.Linear(3, embed_dim)
 
-        # Learnable initial context for first viewpoint (before any scene info)
-        self.ctx_init = nn.Parameter(torch.randn(1, 1, embed_dim) / (embed_dim**0.5))
+        # Learnable inits for first viewpoint (before any scene info)
+        self.ctx_init = nn.Parameter(torch.randn(1, embed_dim) / (embed_dim**0.5))
+        self.spatial_init = nn.Parameter(torch.randn(1, embed_dim) / (embed_dim**0.5))
 
-        # Decode from context token
-        self.norm = nn.LayerNorm(embed_dim)
+        # Norms for ctx and spatial mean
+        self.ctx_norm = nn.LayerNorm(embed_dim)
+        self.spatial_norm = nn.LayerNorm(embed_dim)
+
+        # MLP takes concatenated ctx + spatial_mean
         self.mlp = nn.Sequential(
-            nn.Linear(embed_dim, mlp_hidden),
+            nn.Linear(embed_dim * 2, mlp_hidden),
             nn.LayerNorm(mlp_hidden),
             nn.SiLU(),
             nn.Linear(mlp_hidden, mlp_hidden),
@@ -292,18 +295,21 @@ class ViewpointPolicy(nn.Module):
         return self.context_embed(color_norm).unsqueeze(1)  # [B, 1, D]
 
     def forward(
-        self, ctx: Tensor, deterministic: bool = False
+        self, ctx: Tensor, spatial: Tensor, deterministic: bool = False
     ) -> tuple[Viewpoint, dict[str, Tensor]]:
-        """Decode viewpoint from context token.
+        """Decode viewpoint from context token + spatial hidden mean.
 
         Args:
-            ctx: Context token [B, D] or [B, 1, D] (raw embedding or context_out from AVP)
+            ctx: Context token [B, D] or [B, 1, D]
+            spatial: Spatial hidden tokens [B, N, D] or mean [B, D]
             deterministic: If True, no noise added
         """
         if ctx.ndim == 3:
             ctx = ctx.squeeze(1)  # [B, 1, D] → [B, D]
+        if spatial.ndim == 3:
+            spatial = spatial.mean(dim=1)  # [B, N, D] → [B, D]
 
-        x = self.norm(ctx)
+        x = torch.cat([self.ctx_norm(ctx), self.spatial_norm(spatial)], dim=-1)
         x = self.mlp(x)
 
         # Heads
@@ -886,7 +892,9 @@ def evaluate_policy(
         B = images.shape[0]
         hidden = avp._init_hidden(B, None)
         ctx_in = policy.embed_context(target_colors)  # [B, 1, D] fresh, passed to AVP
-        ctx_for_policy = policy.ctx_init.expand(B, -1, -1)  # first step: learnable init
+        # First step: learnable inits (before any scene info)
+        ctx_for_policy = policy.ctx_init.expand(B, -1)
+        spatial_for_policy = policy.spatial_init.expand(B, -1)
 
         # Run episode with deterministic policy - collect viewpoints and glimpses
         viewpoints: list[Viewpoint] = []
@@ -898,7 +906,7 @@ def evaluate_policy(
         hiddens_for_viz: list[Tensor] = [avp.get_spatial(avp.scene_input_norm(hidden.clone()))]
 
         for t in range(cfg.n_steps_per_episode):
-            vp, stats = policy(ctx_for_policy, deterministic=True)
+            vp, stats = policy(ctx_for_policy, spatial_for_policy, deterministic=True)
             viewpoints.append(vp)
             scales_det.append(stats["scale"])
             dists_t.append(torch.norm(vp.centers - target_centers, dim=-1).mean())
@@ -910,13 +918,14 @@ def evaluate_policy(
             out = avp.forward_step(images, vp, hidden, None, ctx_in)  # fresh ctx to AVP
             hidden = out.hidden
             ctx_for_policy = out.context_out  # transformed ctx for policy
+            spatial_for_policy = avp.get_spatial(hidden)  # spatial mean for policy
             hiddens_for_viz.append(avp.get_spatial(hidden.clone()))
 
         final_vp = viewpoints[-1]
         final_dist = dists_t[-1].item()
 
         # Also run stochastic to compare scales (using final context_out)
-        vp_noised, stats_noised = policy(ctx_for_policy, deterministic=False)
+        vp_noised, stats_noised = policy(ctx_for_policy, spatial_for_policy, deterministic=False)
         scales_noised = stats_noised["scale"]
 
         # Log per-timestep distance
@@ -1035,14 +1044,16 @@ def train(cfg: Config) -> None:
         B = images.shape[0]
         hidden = avp._init_hidden(B, None)
         ctx_in = policy.embed_context(target_colors)  # [B, 1, D] fresh, passed to AVP
-        ctx_for_policy = policy.ctx_init.expand(B, -1, -1)  # first step: learnable init
+        # First step: learnable inits (before any scene info)
+        ctx_for_policy = policy.ctx_init.expand(B, -1)
+        spatial_for_policy = policy.spatial_init.expand(B, -1)
         first_stats = None
         train_viewpoints: list[Viewpoint] = []
         train_glimpses: list[Tensor] = []
 
         timestep_losses = []
         for t in range(cfg.n_steps_per_episode):
-            vp, stats = policy(ctx_for_policy, deterministic=False)
+            vp, stats = policy(ctx_for_policy, spatial_for_policy, deterministic=False)
             if t == 0:
                 first_stats = stats
             train_viewpoints.append(vp)
@@ -1051,6 +1062,7 @@ def train(cfg: Config) -> None:
             out = avp.forward_step(images, vp, hidden, None, ctx_in)  # fresh ctx to AVP
             hidden = out.hidden
             ctx_for_policy = out.context_out  # transformed ctx for policy
+            spatial_for_policy = avp.get_spatial(hidden)  # spatial mean for policy
 
         loss = torch.stack(timestep_losses).mean()  # average over timesteps
 
