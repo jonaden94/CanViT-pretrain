@@ -131,8 +131,6 @@ def generate_multi_blob_batch(
     at full resolution (~0.4 patches) but visible when zoomed to min_scale (~1.7 patches).
     This forces active vision: model must zoom into blobs to identify colors.
 
-    Uses grid-based placement with jitter for guaranteed separation.
-
     Args:
         B: Batch size
         size: Canvas size (pixels)
@@ -154,27 +152,9 @@ def generate_multi_blob_batch(
     value = torch.ones(n_blobs, device=device) * 0.9
     colors = hsv_to_rgb(hues, saturation, value)  # [n_blobs, 3]
 
-    # Grid-based placement: arrange blobs on a grid with jitter
-    grid_size = int((n_blobs**0.5) + 0.999)  # ceil
+    # Independent random positions per blob per sample (overlaps allowed)
     valid_range = 1 - margin
-    cell_size = 2 * valid_range / grid_size
-
-    # Base grid positions (generate all, then shuffle and select)
-    base_positions = []
-    for gy in range(grid_size):
-        for gx in range(grid_size):
-            cy = -valid_range + cell_size * (gy + 0.5)
-            cx = -valid_range + cell_size * (gx + 0.5)
-            base_positions.append([cy, cx])
-    base_pos = torch.tensor(base_positions, device=device)  # [grid_size^2, 2]
-    # Shuffle grid positions so blob placement isn't biased to top-left
-    base_pos = base_pos[torch.randperm(base_pos.shape[0], device=device)[:n_blobs]]  # [n_blobs, 2]
-
-    # Add random jitter within cell
-    jitter_range = cell_size * 0.3
-    jitter = (torch.rand(B, n_blobs, 2, device=device) * 2 - 1) * jitter_range
-    all_centers = base_pos.unsqueeze(0) + jitter  # [B, n_blobs, 2]
-    all_centers = all_centers.clamp(-valid_range, valid_range)
+    all_centers = (torch.rand(B, n_blobs, 2, device=device) * 2 - 1) * valid_range
 
     # Random sigmas: [B, n_blobs]
     sigmas = (
