@@ -899,7 +899,8 @@ def evaluate_policy(
 
         B = images.shape[0]
         hidden = avp._init_hidden(B, None)
-        ctx = policy.embed_context(target_colors)  # [B, 1, D]
+        ctx_in = policy.embed_context(target_colors)  # [B, 1, D] fresh, passed to AVP
+        ctx_for_policy = ctx_in  # first step: raw; subsequent: context_out
 
         # Run episode with deterministic policy - collect viewpoints and glimpses
         viewpoints: list[Viewpoint] = []
@@ -910,7 +911,7 @@ def evaluate_policy(
         hiddens_for_viz: list[Tensor] = [avp.scene_input_norm(hidden.clone())]
 
         for t in range(cfg.n_steps_per_episode):
-            vp, stats = policy(ctx, deterministic=True)
+            vp, stats = policy(ctx_for_policy, deterministic=True)
             viewpoints.append(vp)
             scales_det.append(stats["scale"])
             dists_t.append(torch.norm(vp.centers - target_centers, dim=-1).mean())
@@ -919,8 +920,9 @@ def evaluate_policy(
             glimpse = extract_glimpse(images, vp, glimpse_size)
             glimpses.append(glimpse)
 
-            out = avp.forward_step(images, vp, hidden, None, ctx)
+            out = avp.forward_step(images, vp, hidden, None, ctx_in)  # fresh ctx to AVP
             hidden = out.hidden
+            ctx_for_policy = out.context_out  # transformed ctx for policy
             hiddens_for_viz.append(hidden.clone())
 
         final_vp = viewpoints[-1]
@@ -1046,21 +1048,23 @@ def train(cfg: Config) -> None:
         # Collect viewpoints/glimpses for trajectory viz at val_every
         B = images.shape[0]
         hidden = avp._init_hidden(B, None)
-        ctx = policy.embed_context(target_colors)  # [B, 1, D]
+        ctx_in = policy.embed_context(target_colors)  # [B, 1, D] fresh, passed to AVP
+        ctx_for_policy = ctx_in  # first step: raw; subsequent: context_out
         first_stats = None
         train_viewpoints: list[Viewpoint] = []
         train_glimpses: list[Tensor] = []
 
         timestep_losses = []
         for t in range(cfg.n_steps_per_episode):
-            vp, stats = policy(ctx, deterministic=False)
+            vp, stats = policy(ctx_for_policy, deterministic=False)
             if t == 0:
                 first_stats = stats
             train_viewpoints.append(vp)
             train_glimpses.append(extract_glimpse(images, vp, glimpse_size))
             timestep_losses.append(compute_distance_loss(vp, target_centers))
-            out = avp.forward_step(images, vp, hidden, None, ctx)
+            out = avp.forward_step(images, vp, hidden, None, ctx_in)  # fresh ctx to AVP
             hidden = out.hidden
+            ctx_for_policy = out.context_out  # transformed ctx for policy
 
         loss = torch.stack(timestep_losses).mean()  # average over timesteps
 
