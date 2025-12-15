@@ -38,19 +38,46 @@ class PositionAwareNorm(nn.Module):
         self.initialized = False
 
     def forward(self, x: Tensor) -> Tensor:
-        """Normalize x: [B, N, D] -> [B, N, D]. Updates stats only in train mode."""
+        """Normalize x: [B, N, D] -> [B, N, D]. Updates stats only in train mode.
+
+        Uses Chan's parallel variance algorithm adapted for EWMA. This handles any
+        batch size seamlessly - for B=1 it reduces to Welford's online algorithm,
+        for B>1 it combines within-batch and between-batch variance correctly.
+
+        Reference: Chan, Golub, LeVeque (1979) "Updating Formulae and a Pairwise
+        Algorithm for Computing Sample Variances"
+        """
         if self.training:
+            B = x.shape[0]
             with torch.no_grad():
                 batch_mean = x.mean(dim=0)
-                batch_var = x.var(dim=0, unbiased=True)
+                delta = batch_mean - self.mean
+
+                # Within-batch variance. unbiased=False gives 0 for B=1 (not NaN).
+                batch_var = x.var(dim=0, unbiased=False) if B > 1 else x.new_zeros(self.var.shape)
+
+                # Effective momentum: B sequential updates with rate α equals
+                # one batch update with rate m = 1 - (1-α)^B
+                m = 1 - (1 - self.momentum) ** B
 
                 if not self.initialized:
                     self.mean.copy_(batch_mean)
-                    self.var.copy_(batch_var)
+                    if B > 1:
+                        self.var.copy_(batch_var)
+                    # else: keep var=1 until we have enough samples
                     self.initialized = True
                 else:
-                    self.mean.lerp_(batch_mean, self.momentum)
-                    self.var.lerp_(batch_var, self.momentum)
+                    self.mean.lerp_(batch_mean, m)
+                    # Chan's formula: var = within-batch + between-batch variance
+                    #   var_new = (1-m)*var_old + m*batch_var + (1-m)*m*δ²
+                    #
+                    # The (1-m)*m*δ² term is the "between-group variance" - it captures
+                    # distribution shift. For B=1, batch_var=0 and this term provides
+                    # the entire variance signal, reducing to Welford's formula:
+                    #   var_new = (1-α)*(var_old + α*δ²)
+                    self.var.copy_(
+                        (1 - m) * self.var + m * batch_var + (1 - m) * m * delta**2
+                    )
 
         return (x - self.mean) / (self.var + self.eps).sqrt()
 
