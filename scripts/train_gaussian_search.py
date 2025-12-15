@@ -29,7 +29,6 @@ from dinov3.hub.backbones import dinov3_vits16
 from matplotlib.figure import Figure
 from torch import Tensor
 from tqdm import tqdm
-from ymc.lr import get_linear_scaled_lr
 from ytch.device import get_sensible_device
 from ytch.model import count_parameters
 
@@ -822,10 +821,13 @@ class Config:
     n_steps_per_episode: int = 4
     n_steps: int = 10000
     batch_size: int = 256
-    ref_lr: float = 1e-5
+    ref_lr: float = 4e-4
+    ref_batch_size: int = 64
     weight_decay: float = 0.0
-    warmup_ratio: float = 0.1
+    warmup_steps: int = 5000
     grad_clip: float = 1.0
+    adam_beta1: float = 0.85
+    adam_beta2: float = 0.995
     # Task
     n_blobs: int = 4
     blob_margin: float = 0.3
@@ -1024,13 +1026,15 @@ def train(cfg: Config) -> None:
     ).to(cfg.device)
     log.info(f"Policy params: {count_parameters(policy):,}")
 
-    peak_lr = get_linear_scaled_lr(cfg.ref_lr, cfg.batch_size)
+    peak_lr = cfg.ref_lr * (cfg.batch_size / cfg.ref_batch_size)
     optimizer = torch.optim.AdamW(
-        policy.parameters(), lr=peak_lr, weight_decay=cfg.weight_decay
+        policy.parameters(),
+        lr=peak_lr,
+        betas=(cfg.adam_beta1, cfg.adam_beta2),
+        weight_decay=cfg.weight_decay,
     )
-    warmup_steps = int(cfg.n_steps * cfg.warmup_ratio)
-    scheduler = warmup_cosine_scheduler(optimizer, cfg.n_steps, warmup_steps)
-    log.info(f"Optimizer: peak_lr={peak_lr:.2e}, warmup={warmup_steps}")
+    scheduler = warmup_cosine_scheduler(optimizer, cfg.n_steps, cfg.warmup_steps)
+    log.info(f"Optimizer: peak_lr={peak_lr:.2e}, warmup={cfg.warmup_steps}, betas=({cfg.adam_beta1}, {cfg.adam_beta2})")
 
     exp.log_parameters({"policy_params": count_parameters(policy), "peak_lr": peak_lr})
 
