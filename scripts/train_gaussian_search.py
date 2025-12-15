@@ -248,12 +248,15 @@ def generate_multi_blob_batch(
 
 
 # ============================================================================
-# Policy network: (hidden state, target color) → viewpoint
+# Policy network: context token → viewpoint
 # ============================================================================
 
 
 class ViewpointPolicy(nn.Module):
-    """Simple MLP policy: project → flatten → MLP → viewpoint.
+    """Decode viewpoint from context token.
+
+    The context token contains target color info and has attended to scene via AVP.
+    Architecture: LayerNorm → MLP → heads
 
     Bounding: center first, then scale constrained by center.
     - centers = tanh(logits) * (1 - min_scale)
@@ -264,9 +267,6 @@ class ViewpointPolicy(nn.Module):
     def __init__(
         self,
         embed_dim: int,
-        n_tokens: int,
-        proj_dim: int,
-        color_dim: int,
         mlp_hidden: int,
         min_scale: float,
         max_scale: float,
@@ -281,17 +281,13 @@ class ViewpointPolicy(nn.Module):
         self.noise_std = noise_std
         self.fixed_scale = fixed_scale
 
-        # Scene: norm → project to small dim
-        self.scene_norm = nn.LayerNorm(embed_dim)
-        self.scene_proj = nn.Linear(embed_dim, proj_dim)
+        # Context embedding: target_colors [B, 3] → [B, D]
+        self.context_embed = nn.Linear(3, embed_dim)
 
-        # Color: project to small dim
-        self.color_proj = nn.Linear(3, color_dim)
-
-        # MLP: [scene_flat, color] → hidden → viewpoint
-        scene_flat_dim = n_tokens * proj_dim
+        # Decode from context token
+        self.norm = nn.LayerNorm(embed_dim)
         self.mlp = nn.Sequential(
-            nn.Linear(scene_flat_dim + color_dim, mlp_hidden),
+            nn.Linear(embed_dim, mlp_hidden),
             nn.LayerNorm(mlp_hidden),
             nn.SiLU(),
             nn.Linear(mlp_hidden, mlp_hidden),
@@ -309,22 +305,24 @@ class ViewpointPolicy(nn.Module):
         nn.init.uniform_(self.scale_head.weight, -scale_init, scale_init)
         nn.init.zeros_(self.scale_head.bias)
 
+    def embed_context(self, target_colors: Tensor) -> Tensor:
+        """Embed target colors to context token [B, 1, D]."""
+        color_norm = (target_colors - 0.5) / 0.4  # normalize to ~N(0,1)
+        return self.context_embed(color_norm).unsqueeze(1)  # [B, 1, D]
+
     def forward(
-        self, hidden: Tensor, target_color: Tensor, deterministic: bool = False
+        self, ctx: Tensor, deterministic: bool = False
     ) -> tuple[Viewpoint, dict[str, Tensor]]:
-        B, N, D = hidden.shape
+        """Decode viewpoint from context token.
 
-        # Norm → project → flatten
-        scene = self.scene_norm(hidden)      # [B, N, D]
-        scene = self.scene_proj(scene)       # [B, N, proj_dim]
-        scene_flat = scene.flatten(1)        # [B, N*proj_dim]
+        Args:
+            ctx: Context token [B, D] or [B, 1, D] (raw embedding or context_out from AVP)
+            deterministic: If True, no noise added
+        """
+        if ctx.ndim == 3:
+            ctx = ctx.squeeze(1)  # [B, 1, D] → [B, D]
 
-        # Color: normalize to ~N(0,1) then project
-        color_norm = (target_color - 0.5) / 0.4
-        color = self.color_proj(color_norm)  # [B, 16]
-
-        # MLP
-        x = torch.cat([scene_flat, color], dim=-1)
+        x = self.norm(ctx)
         x = self.mlp(x)
 
         # Heads
@@ -737,8 +735,8 @@ def compute_policy_grad_norms(policy: ViewpointPolicy) -> dict[str, float]:
 
     return {
         "grad_policy_total": module_grad_norm(policy),
-        "grad_scene_proj": module_grad_norm(policy.scene_proj),
-        "grad_color_proj": module_grad_norm(policy.color_proj),
+        "grad_context_embed": module_grad_norm(policy.context_embed),
+        "grad_norm": module_grad_norm(policy.norm),
         "grad_mlp": module_grad_norm(policy.mlp),
         "grad_center_head": module_grad_norm(policy.center_head),
         "grad_scale_head": module_grad_norm(policy.scale_head),
@@ -795,7 +793,6 @@ class Config:
             gradient_checkpointing=False,
         )
     )
-    policy_proj_dim: int = 4
     policy_mlp_hidden: int = 256
     policy_noise_std: float = 0.1
     policy_center_head_init_scale: float = 0.1
@@ -902,6 +899,7 @@ def evaluate_policy(
 
         B = images.shape[0]
         hidden = avp._init_hidden(B, None)
+        ctx = policy.embed_context(target_colors)  # [B, 1, D]
 
         # Run episode with deterministic policy - collect viewpoints and glimpses
         viewpoints: list[Viewpoint] = []
@@ -912,7 +910,7 @@ def evaluate_policy(
         hiddens_for_viz: list[Tensor] = [avp.scene_input_norm(hidden.clone())]
 
         for t in range(cfg.n_steps_per_episode):
-            vp, stats = policy(hidden, target_colors, deterministic=True)
+            vp, stats = policy(ctx, deterministic=True)
             viewpoints.append(vp)
             scales_det.append(stats["scale"])
             dists_t.append(torch.norm(vp.centers - target_centers, dim=-1).mean())
@@ -921,18 +919,16 @@ def evaluate_policy(
             glimpse = extract_glimpse(images, vp, glimpse_size)
             glimpses.append(glimpse)
 
-            out = avp.forward_step(images, vp, hidden, None)
+            out = avp.forward_step(images, vp, hidden, None, ctx)
             hidden = out.hidden
             hiddens_for_viz.append(hidden.clone())
 
         final_vp = viewpoints[-1]
         final_dist = dists_t[-1].item()
 
-        # Also run stochastic to compare scales
-        hidden_fresh = avp._init_hidden(B, None)
-        vp_noised, stats_noised = policy(
-            hidden_fresh, target_colors, deterministic=False
-        )
+        # Also run stochastic to compare scales (using fresh context)
+        ctx_fresh = policy.embed_context(target_colors)
+        vp_noised, stats_noised = policy(ctx_fresh, deterministic=False)
         scales_noised = stats_noised["scale"]
 
         # Log per-timestep distance
@@ -992,14 +988,8 @@ def train(cfg: Config) -> None:
         compile_model(avp)
 
     log.info("Creating policy...")
-    n_scene_tokens = cfg.avp.scene_grid_size ** 2
-    scene_flat_dim = n_scene_tokens * cfg.policy_proj_dim
-    log.info(f"Policy: n_scene_tokens={n_scene_tokens}, proj_dim={cfg.policy_proj_dim}, scene_flat_dim={scene_flat_dim}")
     policy = ViewpointPolicy(
         embed_dim=backbone.embed_dim,
-        n_tokens=n_scene_tokens,
-        proj_dim=cfg.policy_proj_dim,
-        color_dim=scene_flat_dim,  # balanced: scene and color each contribute half to MLP input
         mlp_hidden=cfg.policy_mlp_hidden,
         min_scale=cfg.min_viewpoint_scale,
         max_scale=cfg.max_viewpoint_scale,
@@ -1056,19 +1046,20 @@ def train(cfg: Config) -> None:
         # Collect viewpoints/glimpses for trajectory viz at val_every
         B = images.shape[0]
         hidden = avp._init_hidden(B, None)
+        ctx = policy.embed_context(target_colors)  # [B, 1, D]
         first_stats = None
         train_viewpoints: list[Viewpoint] = []
         train_glimpses: list[Tensor] = []
 
         timestep_losses = []
         for t in range(cfg.n_steps_per_episode):
-            vp, stats = policy(hidden, target_colors, deterministic=False)
+            vp, stats = policy(ctx, deterministic=False)
             if t == 0:
                 first_stats = stats
             train_viewpoints.append(vp)
             train_glimpses.append(extract_glimpse(images, vp, glimpse_size))
             timestep_losses.append(compute_distance_loss(vp, target_centers))
-            out = avp.forward_step(images, vp, hidden, None)
+            out = avp.forward_step(images, vp, hidden, None, ctx)
             hidden = out.hidden
 
         loss = torch.stack(timestep_losses).mean()  # average over timesteps
