@@ -820,9 +820,8 @@ class Config:
     # Training
     n_steps_per_episode: int = 4
     n_steps: int = 10000
-    batch_size: int = 256
-    ref_lr: float = 4e-4
-    ref_batch_size: int = 64
+    batch_size: int = 64
+    ref_lr: float = 4e-4  # at batch_size=64
     weight_decay: float = 0.0
     warmup_steps: int = 5000
     grad_clip: float = 1.0
@@ -1026,7 +1025,7 @@ def train(cfg: Config) -> None:
     ).to(cfg.device)
     log.info(f"Policy params: {count_parameters(policy):,}")
 
-    peak_lr = cfg.ref_lr * (cfg.batch_size / cfg.ref_batch_size)
+    peak_lr = cfg.ref_lr * (cfg.batch_size / 64)  # linear scaling from ref_lr @ BS=64
     optimizer = torch.optim.AdamW(
         policy.parameters(),
         lr=peak_lr,
