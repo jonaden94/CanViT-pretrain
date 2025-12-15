@@ -77,7 +77,7 @@ class AVPViT(nn.Module):
     cfg: AVPConfig
     persistent_registers: nn.Parameter | None  # Passed through between steps
     ephemeral_registers: nn.Parameter | None  # Reinitialized each step
-    spatial_init: nn.Parameter  # Learned initial spatial tokens [1, G*G, D]
+    spatial_init: nn.Parameter  # Learned initial spatial token [1, 1, D], broadcasted
     scene_positions: Tensor
     scene_input_norm: nn.Module  # LayerNorm or Identity
     read_attn: nn.ModuleList  # Raw attention (layerscale) or ConvexGatedAttention (convex)
@@ -146,11 +146,10 @@ class AVPViT(nn.Module):
         else:
             self.ephemeral_registers = None
 
-        # Learned initial spatial tokens: one learnable vector per grid position.
-        # Shape [1, G*G, D] where G = scene_grid_size.
-        # Full hidden state = [persistent_registers, spatial_init] (see _init_hidden).
+        # Learned initial spatial token: single vector broadcasted to all grid positions.
+        # Shape [1, 1, D], expanded to [B, G*G, D] at runtime. Enables multi-resolution.
         self.spatial_init = nn.Parameter(
-            torch.randn(1, cfg.scene_grid_size**2, embed_dim) / (embed_dim**0.5)
+            torch.randn(1, 1, embed_dim) / (embed_dim**0.5)
         )
 
         attn_cfg = cfg.attention
@@ -231,7 +230,8 @@ class AVPViT(nn.Module):
 
     def _get_base_hidden(self, B: int) -> Tensor:
         """Get base hidden state (learnable inits expanded to batch size)."""
-        spatial = self.spatial_init.expand(B, -1, -1)
+        n_spatial = self.cfg.scene_grid_size ** 2
+        spatial = self.spatial_init.expand(B, n_spatial, -1)
         if self.persistent_registers is not None:
             return torch.cat([self.persistent_registers.expand(B, -1, -1), spatial], dim=1)
         return spatial

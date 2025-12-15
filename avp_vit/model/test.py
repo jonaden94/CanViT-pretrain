@@ -182,7 +182,7 @@ def test_convex_init_passthrough():
         torch.manual_seed(123)
         out = avp.forward_step(images, vp)
         # Initial scene goes through scene_input_norm before processing
-        normed_init = avp.scene_input_norm(avp.spatial_init.expand(B, -1, -1))
+        normed_init = avp.scene_input_norm(avp._get_base_hidden(B))
         initial_scene = avp.output_proj(normed_init)
 
     # Scene: write gate ≈ 0 → scene ≈ initial (after norm)
@@ -216,7 +216,7 @@ def test_convex_gate_value_affects_output():
         torch.manual_seed(123)
         out_hi = avp_hi.forward_step(images, vp)
         # Initial scene goes through scene_input_norm before processing
-        normed_init = avp_lo.scene_input_norm(avp_lo.spatial_init.expand(B, -1, -1))
+        normed_init = avp_lo.scene_input_norm(avp_lo._get_base_hidden(B))
         initial = avp_lo.output_proj(normed_init)
 
     diff_lo = (out_lo.scene - initial).abs().mean()

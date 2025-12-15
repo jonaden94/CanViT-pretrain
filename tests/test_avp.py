@@ -52,8 +52,8 @@ def test_hidden_unchanged_at_init(backbone: ViTBackbone) -> None:
     _, hidden, _ = avp(images, viewpoints)
 
     # With gates=0, write attention has no effect
-    # hidden = scene_input_norm(spatial_init) because norm is applied at start of each step
-    expected = avp.scene_input_norm(avp.spatial_init.expand(B, -1, -1))
+    # hidden = scene_input_norm(base_hidden) because norm is applied at start of each step
+    expected = avp.scene_input_norm(avp._get_base_hidden(B))
     assert torch.allclose(hidden, expected, atol=1e-5)
 
 

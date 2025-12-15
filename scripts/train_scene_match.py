@@ -269,11 +269,11 @@ def viz_and_log(
         l1_losses = [l1_loss(out.scene, target).item() for out in outputs]
         mse_losses = [mse_loss(out.scene, target).item() for out in outputs]
 
-        # Initial scene from hidden (or spatial_init if None)
+        # Initial scene from hidden (or base hidden if None)
         if hidden is not None:
             initial_scene = avp.compute_scene(hidden[0:1])[0]
         else:
-            initial_scene = avp.output_proj(avp.spatial_init)[0]
+            initial_scene = avp.compute_scene(avp._get_base_hidden(1))[0]
 
         # Prepare viz data for first sample
         sample_idx = 0
