@@ -78,7 +78,7 @@ class Config:
             gradient_checkpointing=False,
         )
     )
-    freeze_backbone: bool = True
+    freeze_backbone: bool = False  # Train backbone by default for better recon
     # Training
     n_viewpoints_per_step: int = 2
     n_steps: int = 10000

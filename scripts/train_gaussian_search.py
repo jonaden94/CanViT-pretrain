@@ -243,6 +243,7 @@ class Config:
     teacher_ckpt: Path = Path("dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
     avp_ckpt: Path | None = None  # Pretrained AVP (e.g., from train_gaussian_recon)
     # Model
+    freeze_backbone: bool = False  # Train backbone by default
     # scene_size = scene_grid_size * patch_size (14), glimpse similarly
     # min_scale = glimpse_grid_size / scene_grid_size
     avp: AVPConfig = field(
@@ -308,7 +309,7 @@ def load_backbone(cfg: Config) -> DINOv3Backbone:
 def create_avp(backbone: DINOv3Backbone, cfg: Config) -> AVPViT:
     backbone_copy = copy.deepcopy(backbone)
     for p in backbone_copy.parameters():
-        p.requires_grad = False
+        p.requires_grad = not cfg.freeze_backbone
     return AVPViT(backbone_copy, cfg.avp).to(cfg.device)
 
 
