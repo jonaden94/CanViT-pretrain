@@ -506,8 +506,8 @@ def test_gradient_checkpointing_smoke():
     assert avp.spatial_init.grad is not None
 
 
-def test_forward_loss_includes_initial_scene():
-    """forward_loss includes initial scene in loss, even with empty viewpoints."""
+def test_forward_loss_requires_viewpoints():
+    """forward_loss requires at least one viewpoint."""
     embed_dim = 64
     cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_output_proj=True)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
@@ -517,49 +517,9 @@ def test_forward_loss_includes_initial_scene():
     images = torch.randn(B, 3, 64, 64)
     target = torch.randn(B, 16, embed_dim)
 
-    # Empty viewpoints: loss is purely from initial scene
-    loss, final_hidden, final_local = avp.forward_loss(images, [], target)
-    assert final_local is None  # use_local_temporal=False
-
-    assert loss.shape == ()
-    assert loss.item() >= 0
-    # final_hidden should be None since no viewpoints processed
-    # Actually forward_reduce returns hidden which could be the init or None
-    # Let's just check the gradient flow
-
-    loss.backward()
-
-    # Gradients should flow to spatial_init and output_proj
-    assert avp.spatial_init.grad is not None
-    assert avp.spatial_init.grad.abs().sum() > 0
-    assert isinstance(avp.output_proj, nn.Linear)
-    assert avp.output_proj.weight.grad is not None
-    assert avp.output_proj.weight.grad.abs().sum() > 0
-
-
-def test_forward_loss_detached_hidden_no_grad():
-    """When hidden is detached, no gradients flow to spatial_init for that component."""
-    embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_output_proj=True)
-    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
-    avp = AVPViT(backbone, cfg)
-
-    B = 2
-    images = torch.randn(B, 3, 64, 64)
-    target = torch.randn(B, 16, embed_dim)
-
-    # Provide detached hidden state (simulates Bernoulli survivor)
-    hidden = torch.randn(B, 16, embed_dim).detach()
-
-    loss, _, _ = avp.forward_loss(images, [], target, hidden=hidden)
-    loss.backward()
-
-    # spatial_init should have NO gradient (detached hidden was used)
-    assert avp.spatial_init.grad is None or avp.spatial_init.grad.abs().sum() == 0
-    # But output_proj should still have gradient
-    assert isinstance(avp.output_proj, nn.Linear)
-    assert avp.output_proj.weight.grad is not None
-    assert avp.output_proj.weight.grad.abs().sum() > 0
+    # Empty viewpoints should raise
+    with pytest.raises(AssertionError, match="Need at least one viewpoint"):
+        avp.forward_loss(images, [], target)
 
 
 def test_local_temporal_disabled_by_default():

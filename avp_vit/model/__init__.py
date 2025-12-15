@@ -502,15 +502,12 @@ class AVPViT(nn.Module):
         hidden: Tensor | None = None,
         local_prev: Tensor | None = None,
         context: Tensor | None = None,
+        loss_fn: Callable[[Tensor, Tensor], Tensor] = F.mse_loss,
     ) -> tuple[Tensor, Tensor, Tensor | None]:
-        """Standard training: compute MSE loss against target at each step.
+        """Standard training: compute loss against target at each step.
 
         Memory-efficient: does not store intermediate scenes.
-
-        The initial scene (before any glimpses) is included in the loss. This trains
-        the spatial_init and output_proj to produce a good "baseline" prediction.
-        When hidden comes from Bernoulli survival (detached), no gradients flow for
-        survivors; for non-survivors, gradients flow to spatial_init.
+        Loss is computed only for viewpoint outputs, NOT for the initial scene.
 
         Args:
             images: Input images [B, C, H, W]
@@ -522,30 +519,23 @@ class AVPViT(nn.Module):
 
         Returns:
             (average_loss, final_hidden, final_local) where:
-            - average_loss: Mean MSE across initial + all viewpoints (scalar)
+            - average_loss: Mean loss across all viewpoints (scalar)
             - final_hidden: For CONTINUATION in Bernoulli survival
             - final_local: For CONTINUATION when use_local_temporal
         """
-        B = images.shape[0]
-
-        # Compute initial scene BEFORE any glimpses
-        if hidden is None:
-            init_scene = self.output_proj(self.spatial_init.expand(B, -1, -1))
-        else:
-            init_scene = self.compute_scene(hidden)
-        init_loss = F.mse_loss(init_scene, target)
+        assert len(viewpoints) > 0, "Need at least one viewpoint for loss"
 
         def reducer(acc: Tensor, out: StepOutput) -> Tensor:
-            return acc + F.mse_loss(out.scene, target)
+            return acc + loss_fn(out.scene, target)
 
         total, final_hidden, final_local = self.forward_reduce(
             images, viewpoints, reducer,
-            init=init_loss,
+            init=torch.tensor(0.0, device=images.device),
             hidden=hidden,
             local_prev=local_prev,
             context=context,
         )
-        return total / (len(viewpoints) + 1), final_hidden, final_local
+        return total / len(viewpoints), final_hidden, final_local
 
     def forward_trajectory(
         self,
