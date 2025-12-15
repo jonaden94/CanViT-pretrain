@@ -292,7 +292,8 @@ class ViewpointPolicy(nn.Module):
         min_scale: float = 0.25,
         max_scale: float = 1.0,
         noise_std: float = 0.1,
-        head_init_scale: float = 0.1,
+        center_head_init_scale: float = 0.1,
+        scale_head_init_scale: float = 0.01,
     ) -> None:
         super().__init__()
         self.min_scale = min_scale
@@ -323,9 +324,9 @@ class ViewpointPolicy(nn.Module):
         self.scale_head = nn.Linear(hidden_dim, 1)
 
         # Init
-        self._init_weights(head_init_scale)
+        self._init_weights(center_head_init_scale, scale_head_init_scale)
 
-    def _init_weights(self, head_init_scale: float) -> None:
+    def _init_weights(self, center_head_init_scale: float, scale_head_init_scale: float) -> None:
         # Orthogonal init for projections
         nn.init.orthogonal_(self.scene_proj.weight, gain=1.0)
         nn.init.zeros_(self.scene_proj.bias)
@@ -338,10 +339,10 @@ class ViewpointPolicy(nn.Module):
                 nn.init.orthogonal_(m.weight, gain=2**0.5)
                 nn.init.zeros_(m.bias)
 
-        # Small uniform init on final heads only
-        nn.init.uniform_(self.center_head.weight, -head_init_scale, head_init_scale)
+        # Small uniform init on final heads
+        nn.init.uniform_(self.center_head.weight, -center_head_init_scale, center_head_init_scale)
         nn.init.zeros_(self.center_head.bias)
-        nn.init.uniform_(self.scale_head.weight, -head_init_scale, head_init_scale)
+        nn.init.uniform_(self.scale_head.weight, -scale_head_init_scale, scale_head_init_scale)
         nn.init.zeros_(self.scale_head.bias)
 
     def forward(
@@ -734,7 +735,8 @@ class Config:
     policy_n_heads: int = 4
     policy_pool_size: int = 4
     policy_noise_std: float = 0.1
-    policy_head_init_scale: float = 0.1
+    policy_center_head_init_scale: float = 0.1
+    policy_scale_head_init_scale: float = 0.01  # 10x smaller - sigmoid more sensitive
     # Training
     n_steps_per_episode: int = 4
     n_steps: int = 10000
@@ -929,7 +931,8 @@ def train(cfg: Config) -> None:
         min_scale=cfg.min_viewpoint_scale,
         max_scale=cfg.max_viewpoint_scale,
         noise_std=cfg.policy_noise_std,
-        head_init_scale=cfg.policy_head_init_scale,
+        center_head_init_scale=cfg.policy_center_head_init_scale,
+        scale_head_init_scale=cfg.policy_scale_head_init_scale,
     ).to(cfg.device)
     log.info(f"Policy params: {count_parameters(policy):,}")
 
