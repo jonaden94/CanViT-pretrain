@@ -796,7 +796,6 @@ class Config:
         )
     )
     policy_proj_dim: int = 4
-    policy_color_dim: int = 16
     policy_mlp_hidden: int = 256
     policy_noise_std: float = 0.1
     policy_center_head_init_scale: float = 0.1
@@ -806,8 +805,7 @@ class Config:
     n_steps_per_episode: int = 4
     n_steps: int = 10000
     batch_size: int = 64
-    ref_batch_size: int = 64  # reference batch size for LR scaling
-    ref_lr: float = 4e-4  # LR at ref_batch_size
+    ref_lr: float = 6.25e-6  # per-sample LR, peak_lr = ref_lr * batch_size
     weight_decay: float = 0.0
     warmup_steps: int = 5000
     grad_clip: float = 1.0
@@ -995,11 +993,13 @@ def train(cfg: Config) -> None:
 
     log.info("Creating policy...")
     n_scene_tokens = cfg.avp.scene_grid_size ** 2
+    scene_flat_dim = n_scene_tokens * cfg.policy_proj_dim
+    log.info(f"Policy: n_scene_tokens={n_scene_tokens}, proj_dim={cfg.policy_proj_dim}, scene_flat_dim={scene_flat_dim}")
     policy = ViewpointPolicy(
         embed_dim=backbone.embed_dim,
         n_tokens=n_scene_tokens,
         proj_dim=cfg.policy_proj_dim,
-        color_dim=cfg.policy_color_dim,
+        color_dim=scene_flat_dim,  # balanced: scene and color each contribute half to MLP input
         mlp_hidden=cfg.policy_mlp_hidden,
         min_scale=cfg.min_viewpoint_scale,
         max_scale=cfg.max_viewpoint_scale,
@@ -1010,7 +1010,7 @@ def train(cfg: Config) -> None:
     ).to(cfg.device)
     log.info(f"Policy params: {count_parameters(policy):,}")
 
-    peak_lr = cfg.ref_lr * (cfg.batch_size / cfg.ref_batch_size)
+    peak_lr = cfg.ref_lr * cfg.batch_size
     all_params = list(avp.parameters()) + list(policy.parameters())
     optimizer = torch.optim.AdamW(
         all_params,
