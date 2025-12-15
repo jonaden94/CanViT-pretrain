@@ -293,7 +293,11 @@ class ViewpointPolicy(nn.Module):
     4. Run through N transformer blocks
     5. Read from query token to predict viewpoint
 
-    Outputs tanh-bounded center + sigmoid-bounded scale.
+    Bounding: center first, then scale constrained by center.
+    - centers = tanh(logits) * (1 - min_scale)  # independent of scale
+    - max_valid_scale = 1 - max(|x|, |y|)       # constrained by center
+    - scale = sigmoid(logit) * (max_valid_scale - min_scale) + min_scale
+
     Fixed gaussian noise for exploration (no learned std).
     """
 
@@ -438,17 +442,26 @@ class ViewpointPolicy(nn.Module):
                 scale_logit + torch.randn_like(scale_logit) * self.noise_std
             )
 
-        # Sigmoid bounds scale to [min_scale, max_scale], or use fixed scale
+        # Center: tanh bounds to valid range (independent of scale)
+        # Max center offset is 1 - min_scale (so at least min_scale glimpse fits)
+        max_center_offset = 1 - self.min_scale
+        centers = torch.tanh(noisy_center) * max_center_offset
+
+        # Max valid scale is constrained by center position
+        # glimpse must stay in [-1, 1], so: scale <= 1 - max(|x|, |y|)
+        max_valid_scale = 1 - torch.max(torch.abs(centers), dim=-1).values  # [B]
+
+        # Scale: sigmoid bounds to [min_scale, max_valid_scale], or fixed scale
         if self.fixed_scale is not None:
-            scale = torch.full_like(scale_logit, self.fixed_scale)
+            scale = torch.minimum(
+                torch.full_like(scale_logit, self.fixed_scale),
+                max_valid_scale,
+            )
         else:
             scale = (
-                torch.sigmoid(noisy_scale_logit) * (self.max_scale - self.min_scale)
+                torch.sigmoid(noisy_scale_logit) * (max_valid_scale - self.min_scale)
                 + self.min_scale
             )
-        # tanh bounds center, scaled by valid offset given scale
-        max_offset = 1 - scale  # Valid center range: [-max_offset, max_offset]
-        centers = torch.tanh(noisy_center) * max_offset.unsqueeze(-1)
 
         stats = {
             "center_logits_y": center_logits[:, 0],
@@ -457,6 +470,7 @@ class ViewpointPolicy(nn.Module):
             "center_y": centers[:, 0],
             "center_x": centers[:, 1],
             "scale": scale,
+            "max_valid_scale": max_valid_scale,
         }
 
         viewpoint = Viewpoint(name="policy", centers=centers, scales=scale)
