@@ -119,8 +119,8 @@ def test_forward_shapes():
     assert local is None  # use_local_temporal=False by default
 
 
-def test_gate_init_layerscale():
-    cfg = AVPConfig(scene_grid_size=4, gate_init=0.5)
+def test_layer_scale_init():
+    cfg = AVPConfig(scene_grid_size=4, layer_scale_init=0.5)
     backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
@@ -140,7 +140,7 @@ def test_convex_gating_init():
     from avp_vit.attention.convex import ConvexGatedAttention
 
     gate_init = 0.5
-    cfg = AVPConfig(scene_grid_size=4, gate_init=gate_init, use_convex_gating=True)
+    cfg = AVPConfig(scene_grid_size=4, layer_scale_init=gate_init, use_convex_gating=True)
     backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
@@ -160,7 +160,7 @@ def test_convex_init_passthrough():
 
     n_blocks = 2
     gate_init = 1e-5
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, gate_init=gate_init, use_convex_gating=True)
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, layer_scale_init=gate_init, use_convex_gating=True)
     backbone = MockBackbone(64, 4, n_blocks, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
@@ -196,8 +196,8 @@ def test_convex_init_passthrough():
 
 def test_convex_gate_value_affects_output():
     """High gate breaks passthrough; low gate preserves it."""
-    cfg_lo = AVPConfig(scene_grid_size=4, gate_init=1e-5, use_convex_gating=True)
-    cfg_hi = AVPConfig(scene_grid_size=4, gate_init=0.5, use_convex_gating=True)
+    cfg_lo = AVPConfig(scene_grid_size=4, layer_scale_init=1e-5, use_convex_gating=True)
+    cfg_hi = AVPConfig(scene_grid_size=4, layer_scale_init=0.5, use_convex_gating=True)
 
     # Same seed for both → same spatial_init, attention weights
     torch.manual_seed(999)
@@ -583,7 +583,7 @@ def test_local_temporal_parameters_shapes():
         scene_grid_size=4,
         glimpse_grid_size=glimpse_grid_size,
         use_local_temporal=True,
-        gate_init=1e-5,
+        temporal_gate_init=1e-5,
     )
     backbone = MockBackbone(embed_dim, 4, 2, n_registers, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
@@ -616,7 +616,8 @@ def test_local_temporal_gating_gradient_flow():
         scene_grid_size=4,
         glimpse_grid_size=glimpse_grid_size,
         use_local_temporal=True,
-        gate_init=0.1,  # Nonzero so gradient is meaningful
+        layer_scale_init=0.1,  # Nonzero so gradient flows through cross-attention
+        temporal_gate_init=0.1,  # Nonzero so gradient is meaningful
     )
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
@@ -673,7 +674,7 @@ def test_forward_step_local_prev_flows_through():
         scene_grid_size=4,
         glimpse_grid_size=3,
         use_local_temporal=True,
-        gate_init=0.1,
+        layer_scale_init=0.1,
     )
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
@@ -709,7 +710,7 @@ def test_local_temporal_gate_shapes_parametrized(has_cls: bool, n_registers: int
         scene_grid_size=4,
         glimpse_grid_size=glimpse_grid_size,
         use_local_temporal=True,
-        gate_init=0.1,
+        layer_scale_init=0.1,
     )
     backbone = MockBackbone(embed_dim, 4, 2, n_registers, PATCH_SIZE, has_cls=has_cls)
     avp = AVPViT(backbone, cfg)
@@ -735,7 +736,7 @@ def test_local_temporal_forward_parametrized(has_cls: bool, n_registers: int):
         scene_grid_size=4,
         glimpse_grid_size=glimpse_grid_size,
         use_local_temporal=True,
-        gate_init=0.1,
+        layer_scale_init=0.1,
     )
     backbone = MockBackbone(embed_dim, 4, 2, n_registers, PATCH_SIZE, has_cls=has_cls)
     avp = AVPViT(backbone, cfg)
@@ -796,7 +797,7 @@ def test_context_shapes():
 def test_context_gradient_flow():
     """Gradients flow through context tokens."""
     embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, gate_init=1.0)
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, layer_scale_init=1.0)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
@@ -819,7 +820,7 @@ def test_context_gradient_flow():
 def test_context_influences_scene():
     """Different context produces different scene output."""
     embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, gate_init=1.0)
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, layer_scale_init=1.0)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 

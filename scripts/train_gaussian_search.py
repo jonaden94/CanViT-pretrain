@@ -250,7 +250,7 @@ class Config:
         default_factory=lambda: AVPConfig(
             scene_grid_size=16,  # 16*14=224px scene
             glimpse_grid_size=4,  # 4*14=56px glimpse, min_scale=0.25
-            gate_init=1e-4,
+            layer_scale_init=1e-4,
             use_output_proj=True,
             use_scene_registers=True,
             gradient_checkpointing=False,

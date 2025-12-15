@@ -42,7 +42,7 @@ def test_avp_forward_shapes(backbone: ViTBackbone) -> None:
 
 def test_hidden_unchanged_at_init(backbone: ViTBackbone) -> None:
     """With γ=0, hidden should equal normalized spatial_init (write has no effect)."""
-    cfg = AVPConfig(scene_grid_size=8, glimpse_grid_size=7, gate_init=0.0)
+    cfg = AVPConfig(scene_grid_size=8, glimpse_grid_size=7, layer_scale_init=0.0)
     avp = AVPViT(backbone, cfg)
 
     B = 2

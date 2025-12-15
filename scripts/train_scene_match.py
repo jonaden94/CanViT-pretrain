@@ -52,7 +52,7 @@ class Config:
         default_factory=lambda: AVPConfig(
             scene_grid_size=32,
             glimpse_grid_size=7,
-            gate_init=1e-5,
+            layer_scale_init=1e-5,
             use_output_proj=True,
             use_scene_registers=True,
             gradient_checkpointing=True,

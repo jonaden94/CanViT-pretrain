@@ -50,14 +50,14 @@ class AVPConfig:
     scene_grid_size: int
     glimpse_grid_size: int = 7
     use_scene_registers: bool = False
-    gate_init: float = 0.0
+    layer_scale_init: float = 0.0  # Init for intra-step LayerScales (cross-attention)
+    temporal_gate_init: float = 0.0  # Init for inter-step gates (scene/local temporal)
     use_output_proj: bool = False
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries to save VRAM
     use_local_temporal: bool = False  # Temporal gating on local stream across glimpses
     use_convex_gating: bool = False  # Dynamic per-token gating (vs static LayerScale)
     use_scene_input_norm: bool = False  # LayerNorm on hidden at start of each timestep
     use_scene_temporal_gate: bool = False  # Gated residual for recurrence stability
-    temporal_gate_init: float = 0.0  # Init for inter-step gate (separate from gate_init)
     attention: AttentionConfig = field(default_factory=AttentionConfig)
 
 
@@ -158,7 +158,7 @@ class AVPViT(nn.Module):
                 ConvexGatedAttention(
                     RoPEReadCrossAttention(embed_dim, num_heads, attn_cfg),
                     RoPEReadCrossAttention(embed_dim, num_heads, attn_cfg),
-                    cfg.gate_init,
+                    cfg.layer_scale_init,
                 )
                 for _ in range(n_blocks)
             ])
@@ -166,7 +166,7 @@ class AVPViT(nn.Module):
                 ConvexGatedAttention(
                     RoPEWriteCrossAttention(embed_dim, num_heads, attn_cfg),
                     RoPEWriteCrossAttention(embed_dim, num_heads, attn_cfg),
-                    cfg.gate_init,
+                    cfg.layer_scale_init,
                 )
                 for _ in range(n_blocks)
             ])
@@ -179,8 +179,8 @@ class AVPViT(nn.Module):
             self.write_attn = nn.ModuleList([
                 RoPEWriteCrossAttention(embed_dim, num_heads, attn_cfg) for _ in range(n_blocks)
             ])
-            self.read_scale = nn.ModuleList([LayerScale(embed_dim, cfg.gate_init) for _ in range(n_blocks)])
-            self.write_scale = nn.ModuleList([LayerScale(embed_dim, cfg.gate_init) for _ in range(n_blocks)])
+            self.read_scale = nn.ModuleList([LayerScale(embed_dim, cfg.layer_scale_init) for _ in range(n_blocks)])
+            self.write_scale = nn.ModuleList([LayerScale(embed_dim, cfg.layer_scale_init) for _ in range(n_blocks)])
 
         device = self.spatial_init.device
         assert isinstance(device, torch.device)
@@ -211,7 +211,7 @@ class AVPViT(nn.Module):
             )
             self.local_temporal_norm = nn.LayerNorm(embed_dim)
             self.local_temporal_gate = nn.Parameter(
-                torch.full((n_prefix + 1, embed_dim), cfg.gate_init)
+                torch.full((n_prefix + 1, embed_dim), cfg.temporal_gate_init)
             )
         else:
             self.local_init = None
@@ -220,7 +220,6 @@ class AVPViT(nn.Module):
 
         # Scene temporal gating: hidden = base + gate * (prev_hidden - base)
         # At init (gate≈0), each timestep starts from base, enabling stable single-step learning
-        # Uses temporal_gate_init (not gate_init) so intra-step gates can be high while this stays low
         if cfg.use_scene_temporal_gate:
             self.scene_temporal_gate = nn.Parameter(torch.full((embed_dim,), cfg.temporal_gate_init))
         else:
