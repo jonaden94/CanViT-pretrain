@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import NamedTuple, TypeVar, cast, final, override
 
 import torch
@@ -50,7 +50,7 @@ class StepOutput(NamedTuple):
 class AVPConfig:
     scene_grid_size: int
     glimpse_grid_size: int = 7
-    use_scene_registers: bool = False
+    n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
     layer_scale_init: float = 0.0  # Init for intra-step LayerScales (cross-attention)
     temporal_gate_init: float = 0.0  # Init for inter-step gates (scene/local temporal)
     use_output_proj: bool = False
@@ -102,11 +102,8 @@ class AVPViT(nn.Module):
 
     @property
     def n_scene_registers(self) -> int:
-        """Total scene registers (persistent + glimpse)."""
-        if not self.cfg.use_scene_registers or self.backbone.n_register_tokens == 0:
-            return 0
-        ratio = (self.cfg.scene_grid_size / self.cfg.glimpse_grid_size) ** 2
-        return round(self.backbone.n_register_tokens * ratio)
+        """Total scene registers (persistent + ephemeral). Fixed count from config."""
+        return self.cfg.n_scene_registers
 
     @property
     def n_persistent_registers(self) -> int:
@@ -227,6 +224,18 @@ class AVPViT(nn.Module):
             self.scene_temporal_gate = nn.Parameter(torch.full((embed_dim,), cfg.temporal_gate_init))
         else:
             self.scene_temporal_gate = None
+
+    def set_scene_grid_size(self, new_size: int) -> None:
+        """Update scene grid size for curriculum. Recomputes scene_positions buffer."""
+        assert new_size >= self.cfg.glimpse_grid_size, \
+            f"scene_grid_size {new_size} must be >= glimpse_grid_size {self.cfg.glimpse_grid_size}"
+        self.cfg = replace(self.cfg, scene_grid_size=new_size)
+        pos = make_grid_positions(
+            new_size, new_size,
+            self.scene_positions.device,
+            dtype=self.backbone.rope_dtype,
+        )
+        self.scene_positions = pos
 
     def _get_base_hidden(self, B: int) -> Tensor:
         """Get base hidden state (learnable inits expanded to batch size)."""
@@ -387,6 +396,7 @@ class AVPViT(nn.Module):
         if n_ctx > 0:
             context_out = hidden_t[:, :n_ctx]
             hidden_t = hidden_t[:, n_ctx:]
+            assert isinstance(context_out, Tensor)
             assert context_out.shape == (B, n_ctx, D), \
                 f"context_out {context_out.shape} != expected ({B}, {n_ctx}, {D})"
 

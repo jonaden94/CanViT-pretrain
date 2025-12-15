@@ -158,7 +158,7 @@ class Config:
             glimpse_grid_size=7,
             layer_scale_init=1e-2,
             use_output_proj=True,
-            use_scene_registers=True,
+            n_scene_registers=32,
             gradient_checkpointing=True,
             use_convex_gating=True,
             use_local_temporal=True,
