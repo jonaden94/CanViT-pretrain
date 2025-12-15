@@ -230,7 +230,9 @@ def generate_multi_blob_batch(
     target_idx = torch.randint(n_blobs, (B,), device=device)
 
     # Gather target colors and centers
-    target_colors = colors_shuffled[torch.arange(B, device=device), target_idx]  # [B, 3]
+    target_colors = colors_shuffled[
+        torch.arange(B, device=device), target_idx
+    ]  # [B, 3]
     target_centers = all_centers[torch.arange(B, device=device), target_idx]  # [B, 2]
 
     # Apply ImageNet normalization
@@ -249,7 +251,13 @@ def generate_multi_blob_batch(
 class TransformerBlock(nn.Module):
     """Transformer block with pre-norm and LayerScale."""
 
-    def __init__(self, dim: int, n_heads: int = 4, mlp_ratio: float = 2.0, layerscale_init: float = 1e-3) -> None:
+    def __init__(
+        self,
+        dim: int,
+        n_heads: int = 4,
+        mlp_ratio: float = 2.0,
+        layerscale_init: float = 1e-3,
+    ) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.attn = nn.MultiheadAttention(dim, n_heads, batch_first=True)
@@ -264,7 +272,13 @@ class TransformerBlock(nn.Module):
         self.ls2 = nn.Parameter(torch.ones(dim) * layerscale_init)
 
     def forward(self, x: Tensor) -> Tensor:
-        x = x + self.ls1 * self.attn(self.norm1(x), self.norm1(x), self.norm1(x), need_weights=False)[0]
+        x = (
+            x
+            + self.ls1
+            * self.attn(
+                self.norm1(x), self.norm1(x), self.norm1(x), need_weights=False
+            )[0]
+        )
         x = x + self.ls2 * self.mlp(self.norm2(x))
         return x
 
@@ -315,10 +329,12 @@ class ViewpointPolicy(nn.Module):
         self.color_embed = nn.Linear(3, hidden_dim)
 
         # Transformer blocks
-        self.blocks = nn.ModuleList([
-            TransformerBlock(hidden_dim, n_heads, layerscale_init=layerscale_init)
-            for _ in range(n_transformer_blocks)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                TransformerBlock(hidden_dim, n_heads, layerscale_init=layerscale_init)
+                for _ in range(n_transformer_blocks)
+            ]
+        )
         self.final_norm = nn.LayerNorm(hidden_dim)
 
         # Output MLP: 2-layer SiLU MLP → norm → heads
@@ -335,7 +351,9 @@ class ViewpointPolicy(nn.Module):
         # Init
         self._init_weights(center_head_init_scale, scale_head_init_scale)
 
-    def _init_weights(self, center_head_init_scale: float, scale_head_init_scale: float) -> None:
+    def _init_weights(
+        self, center_head_init_scale: float, scale_head_init_scale: float
+    ) -> None:
         # Orthogonal init for projections
         nn.init.orthogonal_(self.scene_proj.weight, gain=1.0)
         nn.init.zeros_(self.scene_proj.bias)
@@ -349,9 +367,13 @@ class ViewpointPolicy(nn.Module):
                 nn.init.zeros_(m.bias)
 
         # Small uniform init on final heads
-        nn.init.uniform_(self.center_head.weight, -center_head_init_scale, center_head_init_scale)
+        nn.init.uniform_(
+            self.center_head.weight, -center_head_init_scale, center_head_init_scale
+        )
         nn.init.zeros_(self.center_head.bias)
-        nn.init.uniform_(self.scale_head.weight, -scale_head_init_scale, scale_head_init_scale)
+        nn.init.uniform_(
+            self.scale_head.weight, -scale_head_init_scale, scale_head_init_scale
+        )
         nn.init.zeros_(self.scale_head.bias)
 
     def forward(
@@ -374,8 +396,12 @@ class ViewpointPolicy(nn.Module):
 
         # Reshape to spatial and avg pool to pool_size x pool_size
         spatial = hidden.view(B, H, W, D).permute(0, 3, 1, 2)  # [B, D, H, W]
-        pooled = nn.functional.adaptive_avg_pool2d(spatial, self.pool_size)  # [B, D, pool_size, pool_size]
-        pooled = pooled.permute(0, 2, 3, 1).reshape(B, self.pool_size * self.pool_size, D)  # [B, pool_size^2, D]
+        pooled = nn.functional.adaptive_avg_pool2d(
+            spatial, self.pool_size
+        )  # [B, D, pool_size, pool_size]
+        pooled = pooled.permute(0, 2, 3, 1).reshape(
+            B, self.pool_size * self.pool_size, D
+        )  # [B, pool_size^2, D]
 
         # Normalize then project to policy dim
         pooled = self.input_norm(pooled)
@@ -387,7 +413,9 @@ class ViewpointPolicy(nn.Module):
         query = self.color_embed(color_normalized).unsqueeze(1)  # [B, 1, hidden_dim]
 
         # Concatenate: [scene_tokens, query]
-        tokens = torch.cat([scene_tokens, query], dim=1)  # [B, pool_size^2 + 1, hidden_dim]
+        tokens = torch.cat(
+            [scene_tokens, query], dim=1
+        )  # [B, pool_size^2 + 1, hidden_dim]
 
         # Transformer blocks
         for block in self.blocks:
@@ -407,14 +435,21 @@ class ViewpointPolicy(nn.Module):
             noisy_center = center_logits
             noisy_scale_logit = scale_logit
         else:
-            noisy_center = center_logits + torch.randn_like(center_logits) * self.noise_std
-            noisy_scale_logit = scale_logit + torch.randn_like(scale_logit) * self.noise_std
+            noisy_center = (
+                center_logits + torch.randn_like(center_logits) * self.noise_std
+            )
+            noisy_scale_logit = (
+                scale_logit + torch.randn_like(scale_logit) * self.noise_std
+            )
 
         # Sigmoid bounds scale to [min_scale, max_scale], or use fixed scale
         if self.fixed_scale is not None:
             scale = torch.full_like(scale_logit, self.fixed_scale)
         else:
-            scale = torch.sigmoid(noisy_scale_logit) * (self.max_scale - self.min_scale) + self.min_scale
+            scale = (
+                torch.sigmoid(noisy_scale_logit) * (self.max_scale - self.min_scale)
+                + self.min_scale
+            )
         # tanh bounds center, scaled by valid offset given scale
         max_offset = 1 - scale  # Valid center range: [-max_offset, max_offset]
         centers = torch.tanh(noisy_center) * max_offset.unsqueeze(-1)
@@ -561,7 +596,15 @@ def plot_sample_images(
         px_pred = (pred_centers[i, 1].item() + 1) / 2 * W
 
         # Target as circle
-        ax.scatter(px_tgt, py_tgt, c="white", s=200, marker="o", edgecolors="black", linewidths=2)
+        ax.scatter(
+            px_tgt,
+            py_tgt,
+            c="white",
+            s=200,
+            marker="o",
+            edgecolors="black",
+            linewidths=2,
+        )
         # Prediction as X
         ax.scatter(px_pred, py_pred, c="lime", s=150, marker="x", linewidths=3)
 
@@ -570,9 +613,15 @@ def plot_sample_images(
 
         # Show target color in corner
         color = target_colors[i].cpu().numpy()
-        ax.add_patch(mpatches.Rectangle((5, 5), 30, 30, facecolor=color, edgecolor="white", linewidth=2))
+        ax.add_patch(
+            mpatches.Rectangle(
+                (5, 5), 30, 30, facecolor=color, edgecolor="white", linewidth=2
+            )
+        )
 
-        ax.set_title(f"dist={torch.norm(pred_centers[i] - target_centers[i]).item():.3f}")
+        ax.set_title(
+            f"dist={torch.norm(pred_centers[i] - target_centers[i]).item():.3f}"
+        )
         ax.axis("off")
 
     plt.tight_layout()
@@ -629,7 +678,17 @@ def plot_trajectory_with_glimpses(
     # Draw target marker
     ty = (target_centers[sample_idx, 0].item() + 1) / 2 * H
     tx = (target_centers[sample_idx, 1].item() + 1) / 2 * W
-    ax.scatter(tx, ty, c="white", s=200, marker="*", edgecolors="black", linewidths=2, zorder=10, label="Target")
+    ax.scatter(
+        tx,
+        ty,
+        c="white",
+        s=200,
+        marker="*",
+        edgecolors="black",
+        linewidths=2,
+        zorder=10,
+        label="Target",
+    )
 
     # Draw connecting lines
     if n_steps > 1:
@@ -649,11 +708,17 @@ def plot_trajectory_with_glimpses(
             label=f"t={i} (s={box.width / W:.2f})",
         )
         ax.add_patch(rect)
-        ax.plot(box.center_x, box.center_y, "o", color=colors[i], markersize=6, zorder=2)
+        ax.plot(
+            box.center_x, box.center_y, "o", color=colors[i], markersize=6, zorder=2
+        )
 
     # Target color patch
     tgt_color = target_colors[sample_idx].cpu().numpy()
-    ax.add_patch(mpatches.Rectangle((5, 5), 30, 30, facecolor=tgt_color, edgecolor="white", linewidth=2))
+    ax.add_patch(
+        mpatches.Rectangle(
+            (5, 5), 30, 30, facecolor=tgt_color, edgecolor="white", linewidth=2
+        )
+    )
 
     ax.set_title("Trajectory")
     ax.legend(loc="upper right", fontsize=7)
@@ -687,8 +752,20 @@ def plot_scale_distribution(
     s_det = scales_det.cpu().numpy()
     s_noised = scales_noised.cpu().numpy()
 
-    ax.hist(s_det, bins=30, alpha=0.7, label=f"Deterministic (μ={s_det.mean():.3f})", density=True)
-    ax.hist(s_noised, bins=30, alpha=0.7, label=f"With noise (μ={s_noised.mean():.3f})", density=True)
+    ax.hist(
+        s_det,
+        bins=30,
+        alpha=0.7,
+        label=f"Deterministic (μ={s_det.mean():.3f})",
+        density=True,
+    )
+    ax.hist(
+        s_noised,
+        bins=30,
+        alpha=0.7,
+        label=f"With noise (μ={s_noised.mean():.3f})",
+        density=True,
+    )
 
     ax.set_xlabel("Scale")
     ax.set_ylabel("Density")
@@ -712,8 +789,8 @@ def plot_scene_pca(
         grid_size: Spatial grid size (H = W)
         sample_idx: Which batch sample to visualize
     """
-    from sklearn.decomposition import PCA
     import numpy as np
+    from sklearn.decomposition import PCA
 
     n_steps = len(hiddens)
 
@@ -747,6 +824,7 @@ def plot_scene_pca(
 
 def compute_policy_grad_norms(policy: ViewpointPolicy) -> dict[str, float]:
     """Compute gradient norms for policy components."""
+
     def module_grad_norm(module: nn.Module) -> float:
         grads = [p.grad for p in module.parameters() if p.grad is not None]
         if not grads:
@@ -779,8 +857,14 @@ def summarize_policy_stats(stats: dict[str, Tensor]) -> dict[str, float]:
         High = policy outputs different values per input (learning)
     """
     return {
-        "batch_spread_logits": (stats["center_logits_y"].std() + stats["center_logits_x"].std()).item() / 2,
-        "batch_spread_centers": (stats["center_y"].std() + stats["center_x"].std()).item() / 2,
+        "batch_spread_logits": (
+            stats["center_logits_y"].std() + stats["center_logits_x"].std()
+        ).item()
+        / 2,
+        "batch_spread_centers": (
+            stats["center_y"].std() + stats["center_x"].std()
+        ).item()
+        / 2,
         "scale_mean": stats["scale"].mean().item(),
         "scale_std": stats["scale"].std().item(),
     }
@@ -816,7 +900,9 @@ class Config:
     policy_center_head_init_scale: float = 0.1
     policy_scale_head_init_scale: float = 0.01  # 10x smaller - sigmoid more sensitive
     policy_layerscale_init: float = 1e-3
-    policy_fixed_scale: float | None = None  # If set, freeze scale to this value (for debugging)
+    policy_fixed_scale: float | None = (
+        0.5  # If set, freeze scale to this value (for debugging)
+    )
     # Training
     n_steps_per_episode: int = 4
     n_steps: int = 10000
@@ -945,7 +1031,9 @@ def evaluate_policy(
 
         # Also run stochastic to compare scales
         hidden_fresh = avp._init_hidden(B, None)
-        vp_noised, stats_noised = policy(hidden_fresh, target_colors, deterministic=False)
+        vp_noised, stats_noised = policy(
+            hidden_fresh, target_colors, deterministic=False
+        )
         scales_noised = stats_noised["scale"]
 
         # Log per-timestep distance
@@ -955,8 +1043,7 @@ def evaluate_policy(
 
         # Scatter plot of final predictions (batch overview)
         fig = plot_policy_scatter(
-            final_vp.centers, target_centers, target_colors,
-            f"{prefix} - Step {step}"
+            final_vp.centers, target_centers, target_colors, f"{prefix} - Step {step}"
         )
         log_figure(exp, fig, f"{prefix}/scatter", step)
 
@@ -1030,7 +1117,9 @@ def train(cfg: Config) -> None:
         weight_decay=cfg.weight_decay,
     )
     scheduler = warmup_cosine_scheduler(optimizer, cfg.n_steps, cfg.warmup_steps)
-    log.info(f"Optimizer: peak_lr={peak_lr:.2e}, warmup={cfg.warmup_steps}, betas=({cfg.adam_beta1}, {cfg.adam_beta2})")
+    log.info(
+        f"Optimizer: peak_lr={peak_lr:.2e}, warmup={cfg.warmup_steps}, betas=({cfg.adam_beta1}, {cfg.adam_beta2})"
+    )
 
     exp.log_parameters({"policy_params": count_parameters(policy), "peak_lr": peak_lr})
 
@@ -1094,7 +1183,11 @@ def train(cfg: Config) -> None:
         scheduler.step()
 
         # EMA (keep as tensor, no .item() in hot loop)
-        ema_loss = loss.detach() if step == 0 else alpha * loss.detach() + (1 - alpha) * ema_loss
+        ema_loss = (
+            loss.detach()
+            if step == 0
+            else alpha * loss.detach() + (1 - alpha) * ema_loss
+        )
 
         if step % cfg.log_every == 0:
             assert grad_norms is not None
@@ -1105,15 +1198,18 @@ def train(cfg: Config) -> None:
             if step == 0:
                 log_grad_breakdown(grad_norms, step)
 
-            exp.log_metrics({
-                "loss": ema_loss.item(),
-                "grad_norm": grad_norm.item(),
-                **grad_norms,
-                "lr": scheduler.get_last_lr()[0],
-                "batch_spread_logits": policy_stats["batch_spread_logits"],
-                "scale_mean": policy_stats["scale_mean"],
-                "scale_std": policy_stats["scale_std"],
-            }, step=step)
+            exp.log_metrics(
+                {
+                    "loss": ema_loss.item(),
+                    "grad_norm": grad_norm.item(),
+                    **grad_norms,
+                    "lr": scheduler.get_last_lr()[0],
+                    "batch_spread_logits": policy_stats["batch_spread_logits"],
+                    "scale_mean": policy_stats["scale_mean"],
+                    "scale_std": policy_stats["scale_std"],
+                },
+                step=step,
+            )
 
             pbar.set_postfix_str(f"loss={ema_loss.item():.3f}")
 
@@ -1121,8 +1217,12 @@ def train(cfg: Config) -> None:
         if step > 0 and step % cfg.val_every == 0:
             with torch.inference_mode():
                 fig = plot_trajectory_with_glimpses(
-                    images, target_colors, target_centers,
-                    train_viewpoints, train_glimpses, sample_idx=0
+                    images,
+                    target_colors,
+                    target_centers,
+                    train_viewpoints,
+                    train_glimpses,
+                    sample_idx=0,
                 )
                 log_figure(exp, fig, "train/trajectory", step)
 
