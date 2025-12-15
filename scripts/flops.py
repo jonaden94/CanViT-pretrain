@@ -9,6 +9,7 @@ from typing import NamedTuple
 from torch import nn
 
 from avp_vit import AVPConfig, AVPViT
+from avp_vit.attention import AttentionConfig
 from avp_vit.backbone.dinov3 import DINOv3Backbone
 
 CKPT_PATH = Path("dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
@@ -74,6 +75,7 @@ def cross_attn_flops(
 
 
 def avp_step_flops(model: AVPViT, backbone: DINOv3Backbone) -> AVPStepFLOPs:
+    """FLOPs for one AVP step. Uses introspection on actual model modules."""
     cfg = model.cfg
     D = backbone.embed_dim
     n_blocks = backbone.n_blocks
@@ -81,27 +83,32 @@ def avp_step_flops(model: AVPViT, backbone: DINOv3Backbone) -> AVPStepFLOPs:
     spatial_patches = cfg.scene_grid_size**2
     n_local = glimpse_patches + backbone.n_prefix_tokens
     n_scene = model.n_ephemeral_registers + model.n_persistent_registers + spatial_patches
-    convex = cfg.use_convex_gating
 
     glimpse_embed = backbone.patch_embed_flops(glimpse_patches)
-    read_attn = cross_attn_flops(
-        n_q=n_local, n_kv=n_scene, dim=D, n_blocks=n_blocks,
-        q_linear=True, k_linear=False, v_linear=False, o_linear=True,
-        convex=convex,
+
+    # Use actual model introspection for attention FLOPs
+    read_attn_total = sum(
+        model.read_attn[i].flops(n_local, n_scene)  # type: ignore[union-attr]
+        for i in range(n_blocks)
     )
     blocks = n_blocks * backbone.block_flops(n_local)
-    write_attn = cross_attn_flops(
-        n_q=n_scene, n_kv=n_local, dim=D, n_blocks=n_blocks,
-        q_linear=False, k_linear=True, v_linear=True, o_linear=False,
-        convex=convex,
+    write_attn_total = sum(
+        model.write_attn[i].flops(n_scene, n_local)  # type: ignore[union-attr]
+        for i in range(n_blocks)
     )
+
+    # Approximate breakdown (for display purposes)
+    convex_mult = 2 if cfg.use_convex_gating else 1
+    sdpa_per_attn = convex_mult * n_blocks * 4 * n_local * n_scene * D
+    read_attn = CrossAttnFLOPs(sdpa_per_attn, 0, 0, 0, 0, read_attn_total)
+    write_attn = CrossAttnFLOPs(sdpa_per_attn, 0, 0, 0, 0, write_attn_total)
 
     if isinstance(model.output_proj, nn.Identity):
         output_proj = 0
     else:
         output_proj = 2 * spatial_patches * D**2
 
-    total = glimpse_embed + read_attn.total + blocks + write_attn.total + output_proj
+    total = glimpse_embed + read_attn_total + blocks + write_attn_total + output_proj
     return AVPStepFLOPs(glimpse_embed, read_attn, blocks, write_attn, output_proj, total, n_local, n_scene)
 
 
@@ -229,63 +236,63 @@ def main() -> None:
     print()
 
     # Table header
-    print(f"{'Scene':<10} {'Teacher':<12} {'Teacher':<12} {'AVP step':<12} {'AVP convex':<12} {'Full-Lin CA':<12}")
-    print(f"{'grid':<10} {'(scene)':<12} {'(glimpse)':<12} {'(EWA)':<12} {'(2x EWA)':<12} {'(no EWA)':<12}")
+    print(f"{'Scene':<10} {'Teacher':<12} {'AVP':<12} {'AVP+V_MLP':<12} {'AVP convex':<12} {'AVP cvx+MLP':<12}")
+    print(f"{'grid':<10} {'(scene)':<12} {'(base)':<12} {'(2x exp)':<12} {'(2x attn)':<12} {'(both)':<12}")
     print("-" * 82)
 
     for scene_grid in SCENE_GRIDS:
-        n_spatial = scene_grid**2
-        n_scene = N_REGISTERS + n_spatial
-        n_local = GLIMPSE_GRID**2 + backbone.n_prefix_tokens
-
         t_scene = teacher_flops(backbone, scene_grid**2)
-        t_glimpse = teacher_flops(backbone, GLIMPSE_GRID**2)
 
-        avp = AVPViT(
-            backbone,
-            AVPConfig(
-                scene_grid_size=scene_grid,
-                glimpse_grid_size=GLIMPSE_GRID,
-                n_scene_registers=N_REGISTERS,
-                use_output_proj=True,
-                use_convex_gating=False,
-            ),
-        )
-        a = avp_step_flops(avp, backbone)
+        # Base AVP (no convex, no V MLP)
+        avp_base = AVPViT(backbone, AVPConfig(
+            scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
+            n_scene_registers=N_REGISTERS, use_output_proj=True,
+            use_convex_gating=False,
+        ))
+        a_base = avp_step_flops(avp_base, backbone)
 
-        avp_cvx = AVPViT(
-            backbone,
-            AVPConfig(
-                scene_grid_size=scene_grid,
-                glimpse_grid_size=GLIMPSE_GRID,
-                n_scene_registers=N_REGISTERS,
-                use_output_proj=True,
-                use_convex_gating=True,
-                layer_scale_init=1e-3,
-            ),
-        )
+        # AVP with V MLP (2x expansion)
+        avp_mlp = AVPViT(backbone, AVPConfig(
+            scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
+            n_scene_registers=N_REGISTERS, use_output_proj=True,
+            use_convex_gating=False,
+            attention=AttentionConfig(write_v_expansion=2),
+        ))
+        a_mlp = avp_step_flops(avp_mlp, backbone)
+
+        # AVP convex (no V MLP)
+        avp_cvx = AVPViT(backbone, AVPConfig(
+            scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
+            n_scene_registers=N_REGISTERS, use_output_proj=True,
+            use_convex_gating=True, layer_scale_init=1e-3,
+        ))
         a_cvx = avp_step_flops(avp_cvx, backbone)
 
-        read_full = cross_attn_flops(n_local, n_scene, D, n_blocks, True, True, True, True)
-        write_full = cross_attn_flops(n_scene, n_local, D, n_blocks, True, True, True, True)
-        full_linear_total = a.glimpse_embed + read_full.total + a.backbone + write_full.total + a.output_proj
+        # AVP convex + V MLP
+        avp_cvx_mlp = AVPViT(backbone, AVPConfig(
+            scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
+            n_scene_registers=N_REGISTERS, use_output_proj=True,
+            use_convex_gating=True, layer_scale_init=1e-3,
+            attention=AttentionConfig(write_v_expansion=2),
+        ))
+        a_cvx_mlp = avp_step_flops(avp_cvx_mlp, backbone)
 
         print(
             f"{scene_grid}x{scene_grid:<7} "
             f"{fmt(t_scene.total):<12} "
-            f"{fmt(t_glimpse.total):<12} "
-            f"{fmt(a.total):<12} "
+            f"{fmt(a_base.total):<12} "
+            f"{fmt(a_mlp.total):<12} "
             f"{fmt(a_cvx.total):<12} "
-            f"{fmt(full_linear_total):<12}"
+            f"{fmt(a_cvx_mlp.total):<12}"
         )
 
     print()
     print("Legend:")
     print("  Teacher (scene)   = Full ViT at scene resolution")
-    print("  Teacher (glimpse) = Full ViT at glimpse resolution (7x7 = 112x112 px)")
-    print("  AVP step (EWA)    = One step; Q,O Linear on local, K,V Linear on local (read/write swapped)")
-    print("  AVP convex        = 2x attention (proposal + gate)")
-    print("  Full-Lin CA       = Hypothetical: ALL of Q,K,V,O are Linear")
+    print("  AVP (base)        = LayerScale, V=Linear")
+    print("  AVP+V_MLP         = LayerScale, V=MLP(2x expansion, SiLU)")
+    print("  AVP convex        = ConvexGating (2x attention), V=Linear")
+    print("  AVP cvx+MLP       = ConvexGating + V=MLP")
     print()
 
     # Detailed breakdown for largest scene

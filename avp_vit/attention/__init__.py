@@ -66,18 +66,25 @@ class RoPECrossAttention(nn.Module):
         out = F.scaled_dot_product_attention(q, k, v)
         return self.out_transform(from_multihead(out))
 
+    def _proj_flops(self, module: nn.Module, n_tokens: int) -> int:
+        """FLOPs for a projection module (Linear, Sequential of Linears, or 0 for EWA/Identity)."""
+        if isinstance(module, nn.Linear):
+            return 2 * n_tokens * module.in_features * module.out_features
+        if isinstance(module, nn.Sequential):
+            return sum(
+                2 * n_tokens * m.in_features * m.out_features
+                for m in module
+                if isinstance(m, nn.Linear)
+            )
+        return 0
+
     def flops(self, n_q: int, n_kv: int) -> int:
-        """FLOPs for one forward pass. SDPA + Linear projections (ignores cheap EWA)."""
-        D = self.dim
-        f = 4 * n_q * n_kv * D  # SDPA: Q @ Kᵀ + softmax @ V
-        if isinstance(self.q_transform, nn.Linear):
-            f += 2 * n_q * D * D
-        if isinstance(self.k_transform, nn.Linear):
-            f += 2 * n_kv * D * D
-        if isinstance(self.v_transform, nn.Linear):
-            f += 2 * n_kv * D * D
-        if isinstance(self.out_transform, nn.Linear):
-            f += 2 * n_q * D * D
+        """FLOPs for one forward pass. SDPA + projections (ignores cheap EWA)."""
+        f = 4 * n_q * n_kv * self.dim  # SDPA: Q @ Kᵀ + softmax @ V
+        f += self._proj_flops(self.q_transform, n_q)
+        f += self._proj_flops(self.k_transform, n_kv)
+        f += self._proj_flops(self.v_transform, n_kv)
+        f += self._proj_flops(self.out_transform, n_q)
         return f
 
 
