@@ -5,6 +5,7 @@ import io
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from typing import Literal
 from pathlib import Path
 
 import comet_ml
@@ -137,8 +138,6 @@ class TargetNorm(torch.nn.Module):
         return (x - mean_local) / std_local
 
 
-LOSS_FN = l1_loss
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -177,6 +176,7 @@ class Config:
     warmup_ratio: float = 0.01
     grad_clip: float = 1.0
     crop_scale_min: float = 0.4
+    loss: Literal["l1", "mse"] = "l1"
     # Logging
     log_every: int = 20
     val_every: int = 50
@@ -401,6 +401,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     if cfg.compile:
         compile_avp(avp)
 
+    loss_fn = {"l1": l1_loss, "mse": mse_loss}[cfg.loss]
+    log.info(f"Loss function: {cfg.loss}")
+
     # Target normalization: position-aware running stats
     n_tokens = cfg.avp.scene_grid_size**2
     target_norm = TargetNorm(
@@ -524,7 +527,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             state.targets,
             state.hidden,
             state.local_prev,
-            loss_fn=LOSS_FN,
+            loss_fn=loss_fn,
         )
 
         if not torch.isfinite(loss):
