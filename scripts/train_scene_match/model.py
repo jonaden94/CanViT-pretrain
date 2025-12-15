@@ -27,7 +27,13 @@ def load_teacher(cfg: Config) -> DINOv3Backbone:
 
 def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
     """Create AVP model with copied backbone."""
-    log.info(f"Creating AVP with scene_grid_size={cfg.avp.scene_grid_size}")
+    patch_size = teacher.patch_size
+    scene_px = cfg.avp.scene_grid_size * patch_size
+    glimpse_px = cfg.avp.glimpse_grid_size * patch_size
+    log.info(
+        f"Creating AVP: scene={cfg.avp.scene_grid_size}x{cfg.avp.scene_grid_size} ({scene_px}px), "
+        f"glimpse={cfg.avp.glimpse_grid_size}x{cfg.avp.glimpse_grid_size} ({glimpse_px}px)"
+    )
     backbone_copy = copy.deepcopy(teacher)
     for p in backbone_copy.parameters():
         p.requires_grad = not cfg.freeze_inner_backbone
