@@ -25,6 +25,7 @@ class Config:
             layer_scale_init=1e-2,
             temporal_gate_init=1e-3,
             use_output_proj=True,
+            use_output_proj_norm=False,
             n_scene_registers=32,
             gradient_checkpointing=True,
             use_convex_gating=True,
