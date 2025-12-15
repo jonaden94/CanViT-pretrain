@@ -24,7 +24,7 @@ class Config:
             scene_grid_size=64,
             glimpse_grid_size=7,
             layer_scale_init=1e-2,
-            temporal_gate_init=1e-3,
+            temporal_gate_init=1e-4,
             use_output_proj=False,
             use_output_proj_norm=False,
             n_scene_registers=32,
