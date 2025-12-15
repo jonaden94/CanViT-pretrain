@@ -56,6 +56,8 @@ class AVPConfig:
     use_local_temporal: bool = False  # Temporal gating on local stream across glimpses
     use_convex_gating: bool = False  # Dynamic per-token gating (vs static LayerScale)
     use_scene_input_norm: bool = False  # LayerNorm on hidden at start of each timestep
+    use_scene_temporal_gate: bool = False  # Gated residual for recurrence stability
+    temporal_gate_init: float = 0.0  # Init for inter-step gate (separate from gate_init)
     attention: AttentionConfig = field(default_factory=AttentionConfig)
 
 
@@ -86,6 +88,8 @@ class AVPViT(nn.Module):
     local_init: nn.Parameter | None  # Learned initial local state [1, N, D]
     local_temporal_norm: nn.LayerNorm | None
     local_temporal_gate: nn.Parameter | None
+    # Scene temporal gating (when use_scene_temporal_gate=True)
+    scene_temporal_gate: nn.Parameter | None
 
     @property
     def glimpse_size(self) -> int:
@@ -214,19 +218,37 @@ class AVPViT(nn.Module):
             self.local_temporal_norm = None
             self.local_temporal_gate = None
 
+        # Scene temporal gating: hidden = base + gate * (prev_hidden - base)
+        # At init (gate≈0), each timestep starts from base, enabling stable single-step learning
+        # Uses temporal_gate_init (not gate_init) so intra-step gates can be high while this stays low
+        if cfg.use_scene_temporal_gate:
+            self.scene_temporal_gate = nn.Parameter(torch.full((embed_dim,), cfg.temporal_gate_init))
+        else:
+            self.scene_temporal_gate = None
+
+    def _get_base_hidden(self, B: int) -> Tensor:
+        """Get base hidden state (learnable inits expanded to batch size)."""
+        spatial = self.spatial_init.expand(B, -1, -1)
+        if self.persistent_registers is not None:
+            return torch.cat([self.persistent_registers.expand(B, -1, -1), spatial], dim=1)
+        return spatial
+
     def _init_hidden(self, B: int, hidden: Tensor | None) -> Tensor:
-        """Initialize hidden state: [persistent_registers, spatial_init].
+        """Initialize hidden state with optional gated residual.
+
+        When use_scene_temporal_gate=True:
+            hidden = base + gate * (prev_hidden - base)
+        At init (gate≈0), each timestep starts from base regardless of prev_hidden.
+        This enables stable single-step learning before recurrence kicks in.
 
         Hidden state shape: [B, n_persistent + G*G, D]
-        - persistent_registers: passed through between timesteps
-        - spatial_init: the G*G grid tokens
         """
+        base = self._get_base_hidden(B)
         if hidden is None:
-            spatial = self.spatial_init.expand(B, -1, -1)
-            if self.persistent_registers is not None:
-                hidden = torch.cat([self.persistent_registers.expand(B, -1, -1), spatial], dim=1)
-            else:
-                hidden = spatial
+            return base
+        if self.scene_temporal_gate is not None:
+            residual = hidden - base
+            return base + self.scene_temporal_gate * residual
         return hidden
 
     def get_spatial(self, hidden: Tensor) -> Tensor:
