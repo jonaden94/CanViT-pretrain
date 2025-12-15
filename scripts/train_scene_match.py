@@ -10,10 +10,13 @@ import comet_ml
 import matplotlib.pyplot as plt
 import optuna
 import torch
-import torch.nn as nn
 from dinov3.hub.backbones import dinov3_vits16
 from matplotlib.figure import Figure
 from torch import Tensor
+from torch.nn.functional import (  # noqa: F401 (l1_loss for easy switching)
+    l1_loss,
+    mse_loss,
+)
 from tqdm import tqdm
 from ymc.lr import get_linear_scaled_lr
 from ytch.device import get_sensible_device
@@ -35,6 +38,8 @@ from avp_vit.train import (
     val_transform,
     warmup_cosine_scheduler,
 )
+
+LOSS_FN = mse_loss  # Change to l1_loss for L1
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
@@ -153,7 +158,7 @@ def viz_and_log(
 
     with torch.inference_mode():
         outputs, _, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
-        mses = [nn.functional.mse_loss(out.scene, target).item() for out in outputs]
+        losses = [LOSS_FN(out.scene, target).item() for out in outputs]
 
         # Initial scene from hidden (or spatial_init if None)
         if hidden is not None:
@@ -212,7 +217,7 @@ def viz_and_log(
     fig_traj = plot_trajectory(full_img, boxes, names)
     log_figure(exp, fig_traj, f"{prefix}/trajectory", step)
 
-    return mses
+    return losses
 
 
 def eval_and_log(
@@ -229,12 +234,14 @@ def eval_and_log(
     with torch.inference_mode():
         target = teacher.forward_norm_patches(images)
 
-    mses = viz_and_log(exp, step, "val", avp, teacher, images, viewpoints, target, None)
+    losses = viz_and_log(
+        exp, step, "val", avp, teacher, images, viewpoints, target, None
+    )
 
-    for t, mse in enumerate(mses):
-        exp.log_metric(f"val/mse_t{t}", mse, step=step)
+    for t, loss in enumerate(losses):
+        exp.log_metric(f"val/loss_t{t}", loss, step=step)
 
-    val_loss = mses[-1]
+    val_loss = losses[-1]
     exp.log_metric("val/loss", val_loss, step=step)
     return val_loss
 
@@ -347,8 +354,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             batch = train_loader.next_batch().to(cfg.device)
             init_imgs_list.append(batch)
             init_targets_list.append(teacher.forward_norm_patches(batch))
-    init_imgs = torch.cat(init_imgs_list, dim=0)[:cfg.batch_size]
-    init_targets = torch.cat(init_targets_list, dim=0)[:cfg.batch_size]
+    init_imgs = torch.cat(init_imgs_list, dim=0)[: cfg.batch_size]
+    init_targets = torch.cat(init_targets_list, dim=0)[: cfg.batch_size]
     hidden_init_full = avp._init_hidden(cfg.batch_size, None)
     local_init_full = (
         avp.local_init.expand(cfg.batch_size, -1, -1)
@@ -380,7 +387,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             for _ in range(cfg.n_viewpoints_per_step)
         ]
         loss, final_hidden, final_local = avp.forward_loss(
-            state.images, viewpoints, state.targets, state.hidden, state.local_prev
+            state.images,
+            viewpoints,
+            state.targets,
+            state.hidden,
+            state.local_prev,
+            loss_fn=LOSS_FN,
         )
 
         if not torch.isfinite(loss):
