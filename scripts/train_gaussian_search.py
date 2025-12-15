@@ -297,12 +297,14 @@ class ViewpointPolicy(nn.Module):
         center_head_init_scale: float = 0.1,
         scale_head_init_scale: float = 0.01,
         layerscale_init: float = 1e-3,
+        fixed_scale: float | None = None,
     ) -> None:
         super().__init__()
         self.min_scale = min_scale
         self.max_scale = max_scale
         self.noise_std = noise_std
         self.pool_size = pool_size
+        self.fixed_scale = fixed_scale
 
         # Normalize input scene features before projection
         self.input_norm = nn.LayerNorm(embed_dim)
@@ -380,8 +382,10 @@ class ViewpointPolicy(nn.Module):
         pooled = self.input_norm(pooled)
         scene_tokens = self.scene_proj(pooled)  # [B, pool_size^2, hidden_dim]
 
-        # Create query token from color
-        query = self.color_embed(target_color).unsqueeze(1)  # [B, 1, hidden_dim]
+        # Normalize color to ~N(0,1) then embed as query token
+        # Colors are in [0.09, 0.9], mean ~0.5, std ~0.37
+        color_normalized = (target_color - 0.5) / 0.4
+        query = self.color_embed(color_normalized).unsqueeze(1)  # [B, 1, hidden_dim]
 
         # Concatenate: [scene_tokens, query]
         tokens = torch.cat([scene_tokens, query], dim=1)  # [B, pool_size^2 + 1, hidden_dim]
@@ -407,8 +411,11 @@ class ViewpointPolicy(nn.Module):
             noisy_center = center_logits + torch.randn_like(center_logits) * self.noise_std
             noisy_scale_logit = scale_logit + torch.randn_like(scale_logit) * self.noise_std
 
-        # Sigmoid bounds scale to [min_scale, max_scale]
-        scale = torch.sigmoid(noisy_scale_logit) * (self.max_scale - self.min_scale) + self.min_scale
+        # Sigmoid bounds scale to [min_scale, max_scale], or use fixed scale
+        if self.fixed_scale is not None:
+            scale = torch.full_like(scale_logit, self.fixed_scale)
+        else:
+            scale = torch.sigmoid(noisy_scale_logit) * (self.max_scale - self.min_scale) + self.min_scale
         # tanh bounds center, scaled by valid offset given scale
         max_offset = 1 - scale  # Valid center range: [-max_offset, max_offset]
         centers = torch.tanh(noisy_center) * max_offset.unsqueeze(-1)
@@ -765,6 +772,7 @@ class Config:
     policy_center_head_init_scale: float = 0.1
     policy_scale_head_init_scale: float = 0.01  # 10x smaller - sigmoid more sensitive
     policy_layerscale_init: float = 1e-3
+    policy_fixed_scale: float | None = None  # If set, freeze scale to this value (for debugging)
     # Training
     n_steps_per_episode: int = 4
     n_steps: int = 10000
