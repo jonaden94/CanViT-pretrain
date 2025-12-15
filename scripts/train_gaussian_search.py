@@ -327,7 +327,7 @@ class ViewpointPolicy(nn.Module):
 
         # Color embedding → query token
         self.color_embed = nn.Linear(3, hidden_dim)
-        self.query_norm = nn.LayerNorm(embed_dim)
+        self.query_norm = nn.LayerNorm(hidden_dim)
 
         # Transformer blocks
         self.blocks = nn.ModuleList(
