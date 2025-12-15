@@ -244,6 +244,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 state.targets,
                 state.hidden,
                 norm,
+                log_spatial_stats=cfg.log_spatial_stats,
             )
             exp.log_metric(f"grid{G}/train/viz_l1", train_l1[-1], step=step)
             exp.log_metric(f"grid{G}/train/viz_mse", train_mse[-1], step=step)
@@ -252,7 +253,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             val_images = val_loader.next_batch().to(cfg.device)
             norm.eval()
             val_loss = eval_and_log(
-                exp, step, avp, teacher, compute_targets, val_images, norm, f"grid{G}/val"
+                exp, step, avp, teacher, compute_targets, val_images, norm, f"grid{G}/val",
+                log_spatial_stats=cfg.log_spatial_stats,
             )
             norm.train()
             exp.log_metric("val/loss", val_loss, step=step)

@@ -21,6 +21,27 @@ from avp_vit.train.viewpoint import make_curriculum_eval_viewpoints
 log = logging.getLogger(__name__)
 
 
+def compute_spatial_stats(x: Tensor) -> dict[str, float]:
+    """Compute mean/std across spatial dimension, averaged over batch.
+
+    Args:
+        x: [B, N, D] tensor (N = spatial tokens)
+
+    Returns:
+        Dict with 'mean' and 'std' scalars:
+        - mean: average of per-sample spatial means
+        - std: average of per-sample spatial stds
+    """
+    # Per-sample spatial stats: [B, D]
+    spatial_mean = x.mean(dim=1)
+    spatial_std = x.std(dim=1)
+    # Average across batch and dimensions to get scalars
+    return {
+        "mean": spatial_mean.mean().item(),
+        "std": spatial_std.mean().item(),
+    }
+
+
 def log_figure(exp: comet_ml.Experiment, fig: Figure, name: str, step: int) -> None:
     """Log matplotlib figure to Comet."""
     with io.BytesIO() as buf:
@@ -42,6 +63,7 @@ def viz_and_log(
     hidden: Tensor | None,
     target_norm: PositionAwareNorm | None = None,
     show_hidden: bool = True,
+    log_spatial_stats: bool = True,
 ) -> tuple[list[float], list[float]]:
     """Run forward trajectory and log visualization.
 
@@ -60,6 +82,20 @@ def viz_and_log(
         outputs, _, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
         l1_losses = [l1_loss(out.scene, target).item() for out in outputs]
         mse_losses = [mse_loss(out.scene, target).item() for out in outputs]
+
+        # Log spatial stats for target and final prediction
+        if log_spatial_stats:
+            target_stats = compute_spatial_stats(target)
+            pred_stats = compute_spatial_stats(outputs[-1].scene)
+            exp.log_metrics(
+                {
+                    f"{prefix}/target_spatial_mean": target_stats["mean"],
+                    f"{prefix}/target_spatial_std": target_stats["std"],
+                    f"{prefix}/pred_spatial_mean": pred_stats["mean"],
+                    f"{prefix}/pred_spatial_std": pred_stats["std"],
+                },
+                step=step,
+            )
 
         # Initial scene from hidden (or base hidden if None)
         if hidden is not None:
@@ -156,6 +192,7 @@ def eval_and_log(
     images: Tensor,
     target_norm: PositionAwareNorm | None = None,
     prefix: str = "val",
+    log_spatial_stats: bool = True,
 ) -> float:
     """Evaluate on one batch with curriculum viewpoints. Returns final L1 loss.
 
@@ -171,7 +208,8 @@ def eval_and_log(
         target = compute_targets(images)
 
     l1_losses, mse_losses = viz_and_log(
-        exp, step, prefix, avp, teacher, images, viewpoints, target, None, target_norm
+        exp, step, prefix, avp, teacher, images, viewpoints, target, None, target_norm,
+        log_spatial_stats=log_spatial_stats,
     )
 
     for t, (l1, mse) in enumerate(zip(l1_losses, mse_losses, strict=True)):

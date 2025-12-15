@@ -52,6 +52,7 @@ class Config:
     log_every: int = 20
     val_every: int = 50
     ckpt_every: int = 500
+    log_spatial_stats: bool = True  # Log target/pred spatial mean/std
     # Compilation
     compile: bool = True
     # Optuna
