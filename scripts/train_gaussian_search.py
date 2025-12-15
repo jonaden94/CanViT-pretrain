@@ -301,6 +301,9 @@ class ViewpointPolicy(nn.Module):
         self.noise_std = noise_std
         self.pool_size = pool_size
 
+        # Normalize input scene features before projection
+        self.input_norm = nn.LayerNorm(embed_dim)
+
         # Project scene features to policy dim
         self.scene_proj = nn.Linear(embed_dim, hidden_dim)
 
@@ -368,7 +371,8 @@ class ViewpointPolicy(nn.Module):
         pooled = nn.functional.adaptive_avg_pool2d(spatial, self.pool_size)  # [B, D, pool_size, pool_size]
         pooled = pooled.permute(0, 2, 3, 1).reshape(B, self.pool_size * self.pool_size, D)  # [B, pool_size^2, D]
 
-        # Project to policy dim
+        # Normalize then project to policy dim
+        pooled = self.input_norm(pooled)
         scene_tokens = self.scene_proj(pooled)  # [B, pool_size^2, hidden_dim]
 
         # Create query token from color
