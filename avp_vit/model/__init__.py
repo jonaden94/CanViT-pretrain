@@ -187,6 +187,7 @@ class AVPViT(nn.Module):
 
         # Normalize hidden state at start of each timestep (prevents scale blowup)
         self.scene_input_norm = nn.LayerNorm(embed_dim)
+        nn.init.constant_(self.scene_input_norm.weight, 1.0 / (embed_dim ** 0.5))
 
         if cfg.use_output_proj:
             self.output_proj = nn.Linear(embed_dim, embed_dim)
