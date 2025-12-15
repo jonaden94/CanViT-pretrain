@@ -181,9 +181,11 @@ def test_convex_init_passthrough():
         # AVPViT forward (same seed for prepare_tokens)
         torch.manual_seed(123)
         out = avp.forward_step(images, vp)
-        initial_scene = avp.output_proj(avp.spatial_init.expand(B, -1, -1))
+        # Initial scene goes through scene_input_norm before processing
+        normed_init = avp.scene_input_norm(avp.spatial_init.expand(B, -1, -1))
+        initial_scene = avp.output_proj(normed_init)
 
-    # Scene: write gate ≈ 0 → scene ≈ initial
+    # Scene: write gate ≈ 0 → scene ≈ initial (after norm)
     scene_diff = (out.scene - initial_scene).abs().mean()
     assert scene_diff < 0.1, f"Scene changed too much: {scene_diff}"
 
@@ -213,12 +215,14 @@ def test_convex_gate_value_affects_output():
         out_lo = avp_lo.forward_step(images, vp)
         torch.manual_seed(123)
         out_hi = avp_hi.forward_step(images, vp)
-        initial = avp_lo.output_proj(avp_lo.spatial_init.expand(B, -1, -1))
+        # Initial scene goes through scene_input_norm before processing
+        normed_init = avp_lo.scene_input_norm(avp_lo.spatial_init.expand(B, -1, -1))
+        initial = avp_lo.output_proj(normed_init)
 
     diff_lo = (out_lo.scene - initial).abs().mean()
     diff_hi = (out_hi.scene - initial).abs().mean()
 
-    # Low gate: passthrough works (diff small)
+    # Low gate: passthrough works (diff small, after norm)
     assert diff_lo < 0.01, f"Low gate should preserve passthrough: {diff_lo}"
     # High gate: passthrough broken (diff large)
     assert diff_hi > 0.1, f"High gate should break passthrough: {diff_hi}"

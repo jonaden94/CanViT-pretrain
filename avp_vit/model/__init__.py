@@ -74,6 +74,7 @@ class AVPViT(nn.Module):
     ephemeral_registers: nn.Parameter | None  # Reinitialized each step
     spatial_init: nn.Parameter  # Learned initial spatial tokens [1, G*G, D]
     scene_positions: Tensor
+    scene_input_norm: nn.LayerNorm  # Normalize hidden at start of each timestep
     read_attn: nn.ModuleList  # Raw attention (layerscale) or ConvexGatedAttention (convex)
     write_attn: nn.ModuleList
     read_scale: nn.ModuleList | None  # LayerScale (layerscale mode) or None (convex)
@@ -183,6 +184,9 @@ class AVPViT(nn.Module):
         self.register_buffer("scene_positions", pos)
         self.scene_positions = pos
 
+        # Normalize hidden state at start of each timestep (prevents scale blowup)
+        self.scene_input_norm = nn.LayerNorm(embed_dim)
+
         if cfg.use_output_proj:
             self.output_proj = nn.Linear(embed_dim, embed_dim)
         else:
@@ -290,10 +294,11 @@ class AVPViT(nn.Module):
         else:
             local = local_fresh
 
-        # hidden_t: persistent + spatial -> prepend ephemeral registers for processing
+        # hidden_t: persistent + spatial, then prepend ephemeral, then normalize all together
         hidden_t = self._init_hidden(B, hidden)
         if self.ephemeral_registers is not None:
             hidden_t = torch.cat([self.ephemeral_registers.expand(B, -1, -1), hidden_t], dim=1)
+        hidden_t = self.scene_input_norm(hidden_t)  # normalize all scene tokens together
 
         local_pos = glimpse_positions(centers, scales, H, W, dtype=rope_dtype)
         scene_pos = self.scene_positions.to(rope_dtype).unsqueeze(0).expand(B, -1, -1)
