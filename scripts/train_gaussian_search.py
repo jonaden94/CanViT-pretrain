@@ -915,7 +915,8 @@ def evaluate_policy(
         scales_det: list[Tensor] = []
         dists_t: list[Tensor] = []
         # Normalize init hidden for fair PCA comparison (model normalizes at each step)
-        hiddens_for_viz: list[Tensor] = [avp.scene_input_norm(hidden.clone())]
+        # Use get_spatial to exclude registers
+        hiddens_for_viz: list[Tensor] = [avp.get_spatial(avp.scene_input_norm(hidden.clone()))]
 
         for t in range(cfg.n_steps_per_episode):
             vp, stats = policy(ctx_for_policy, deterministic=True)
@@ -930,7 +931,7 @@ def evaluate_policy(
             out = avp.forward_step(images, vp, hidden, None, ctx_in)  # fresh ctx to AVP
             hidden = out.hidden
             ctx_for_policy = out.context_out  # transformed ctx for policy
-            hiddens_for_viz.append(hidden.clone())
+            hiddens_for_viz.append(avp.get_spatial(hidden.clone()))
 
         final_vp = viewpoints[-1]
         final_dist = dists_t[-1].item()
