@@ -701,6 +701,51 @@ def plot_scale_distribution(
     return fig
 
 
+def plot_scene_pca(
+    hiddens: list[Tensor],
+    grid_size: int,
+    sample_idx: int = 0,
+) -> Figure:
+    """Plot PCA visualization of scene hidden states across timesteps.
+
+    Args:
+        hiddens: List of [B, H*W, D] hidden states at each timestep (including init)
+        grid_size: Spatial grid size (H = W)
+        sample_idx: Which batch sample to visualize
+    """
+    from sklearn.decomposition import PCA
+    import numpy as np
+
+    n_steps = len(hiddens)
+
+    # Extract single sample and reshape to [H*W, D]
+    feats = [h[sample_idx].cpu().numpy() for h in hiddens]  # List of [H*W, D]
+
+    # Fit PCA on concatenated features for consistent coloring
+    all_feats = np.concatenate(feats, axis=0)  # [n_steps * H*W, D]
+    pca = PCA(n_components=3, whiten=True)
+    pca.fit(all_feats)
+
+    # Project each timestep
+    def pca_rgb(f: np.ndarray) -> np.ndarray:
+        proj = pca.transform(f)
+        return 1.0 / (1.0 + np.exp(-proj.reshape(grid_size, grid_size, 3) * 2.0))
+
+    fig, axes = plt.subplots(1, n_steps, figsize=(4 * n_steps, 4))
+    if n_steps == 1:
+        axes = [axes]
+
+    for t, (ax, f) in enumerate(zip(axes, feats)):
+        rgb = pca_rgb(f)
+        ax.imshow(rgb)
+        ax.set_title(f"t={t}" if t > 0 else "init")
+        ax.axis("off")
+
+    plt.suptitle("Scene Hidden State (PCA → RGB)")
+    plt.tight_layout()
+    return fig
+
+
 def compute_policy_grad_norms(policy: ViewpointPolicy) -> dict[str, float]:
     """Compute gradient norms for policy components."""
     def module_grad_norm(module: nn.Module) -> float:
@@ -878,6 +923,7 @@ def evaluate_policy(
         glimpses: list[Tensor] = []
         scales_det: list[Tensor] = []
         dists_t: list[Tensor] = []
+        hiddens_for_viz: list[Tensor] = [hidden.clone()]  # Include init
 
         for t in range(cfg.n_steps_per_episode):
             vp, stats = policy(hidden, target_colors, deterministic=True)
@@ -891,6 +937,7 @@ def evaluate_policy(
 
             out = avp.forward_step(images, vp, hidden, None)
             hidden = out.hidden
+            hiddens_for_viz.append(hidden.clone())
 
         final_vp = viewpoints[-1]
         final_dist = dists_t[-1].item()
@@ -925,6 +972,10 @@ def evaluate_policy(
             title=f"Scale Distribution - Step {step}",
         )
         log_figure(exp, fig, f"{prefix}/scales", step)
+
+        # Scene hidden PCA across timesteps
+        fig = plot_scene_pca(hiddens_for_viz, cfg.avp.scene_grid_size, sample_idx=0)
+        log_figure(exp, fig, f"{prefix}/scene_pca", step)
 
         return final_dist
 
