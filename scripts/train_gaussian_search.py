@@ -250,7 +250,7 @@ def generate_multi_blob_batch(
 class TransformerBlock(nn.Module):
     """Transformer block with pre-norm and LayerScale."""
 
-    def __init__(self, dim: int, n_heads: int = 4, mlp_ratio: float = 2.0, layerscale_init: float = 0.1) -> None:
+    def __init__(self, dim: int, n_heads: int = 4, mlp_ratio: float = 2.0, layerscale_init: float = 1e-3) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.attn = nn.MultiheadAttention(dim, n_heads, batch_first=True)
@@ -296,6 +296,7 @@ class ViewpointPolicy(nn.Module):
         noise_std: float = 0.1,
         center_head_init_scale: float = 0.1,
         scale_head_init_scale: float = 0.01,
+        layerscale_init: float = 1e-3,
     ) -> None:
         super().__init__()
         self.min_scale = min_scale
@@ -314,16 +315,18 @@ class ViewpointPolicy(nn.Module):
 
         # Transformer blocks
         self.blocks = nn.ModuleList([
-            TransformerBlock(hidden_dim, n_heads) for _ in range(n_transformer_blocks)
+            TransformerBlock(hidden_dim, n_heads, layerscale_init=layerscale_init)
+            for _ in range(n_transformer_blocks)
         ])
         self.final_norm = nn.LayerNorm(hidden_dim)
 
-        # Output MLP: norm → 2-layer SiLU MLP → heads
+        # Output MLP: 2-layer SiLU MLP → norm → heads
         self.output_mlp = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
+            nn.LayerNorm(hidden_dim),
         )
         self.center_head = nn.Linear(hidden_dim, 2)
         self.scale_head = nn.Linear(hidden_dim, 1)
@@ -761,6 +764,7 @@ class Config:
     policy_noise_std: float = 0.1
     policy_center_head_init_scale: float = 0.1
     policy_scale_head_init_scale: float = 0.01  # 10x smaller - sigmoid more sensitive
+    policy_layerscale_init: float = 1e-3
     # Training
     n_steps_per_episode: int = 4
     n_steps: int = 10000
@@ -957,6 +961,7 @@ def train(cfg: Config) -> None:
         noise_std=cfg.policy_noise_std,
         center_head_init_scale=cfg.policy_center_head_init_scale,
         scale_head_init_scale=cfg.policy_scale_head_init_scale,
+        layerscale_init=cfg.policy_layerscale_init,
     ).to(cfg.device)
     log.info(f"Policy params: {count_parameters(policy):,}")
 
