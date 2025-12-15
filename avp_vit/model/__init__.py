@@ -55,6 +55,7 @@ class AVPConfig:
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries to save VRAM
     use_local_temporal: bool = False  # Temporal gating on local stream across glimpses
     use_convex_gating: bool = False  # Dynamic per-token gating (vs static LayerScale)
+    use_scene_input_norm: bool = False  # LayerNorm on hidden at start of each timestep
     attention: AttentionConfig = field(default_factory=AttentionConfig)
 
 
@@ -75,7 +76,7 @@ class AVPViT(nn.Module):
     ephemeral_registers: nn.Parameter | None  # Reinitialized each step
     spatial_init: nn.Parameter  # Learned initial spatial tokens [1, G*G, D]
     scene_positions: Tensor
-    scene_input_norm: nn.LayerNorm  # Normalize hidden at start of each timestep
+    scene_input_norm: nn.Module  # LayerNorm or Identity
     read_attn: nn.ModuleList  # Raw attention (layerscale) or ConvexGatedAttention (convex)
     write_attn: nn.ModuleList
     read_scale: nn.ModuleList | None  # LayerScale (layerscale mode) or None (convex)
@@ -185,9 +186,12 @@ class AVPViT(nn.Module):
         self.register_buffer("scene_positions", pos)
         self.scene_positions = pos
 
-        # Normalize hidden state at start of each timestep (prevents scale blowup)
-        self.scene_input_norm = nn.LayerNorm(embed_dim)
-        nn.init.constant_(self.scene_input_norm.weight, 1.0 / (embed_dim ** 0.5))
+        if cfg.use_scene_input_norm:
+            norm = nn.LayerNorm(embed_dim)
+            nn.init.constant_(norm.weight, 1.0 / (embed_dim ** 0.5))
+            self.scene_input_norm = norm
+        else:
+            self.scene_input_norm = nn.Identity()
 
         if cfg.use_output_proj:
             self.output_proj = nn.Linear(embed_dim, embed_dim)
