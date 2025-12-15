@@ -214,12 +214,12 @@ def plot_multistep_pca(
     n_rows = n_views + 1  # +1 for init row
     colors = timestep_colors(n_views)
 
-    # Fit PCA on teacher (shared) and per-timestep for self
+    # Fit PCA on teacher (shared) and final scene for self
     pca = fit_pca(teacher)
+    pca_self = fit_pca(scenes[-1])
     teacher_rgb = pca_rgb(pca, teacher, S, S)
     initial_rgb = pca_rgb(pca, initial_scene, S, S)
-    pca_init = fit_pca(initial_scene)
-    initial_rgb_self = pca_rgb(pca_init, initial_scene, S, S)
+    initial_rgb_self = pca_rgb(pca_self, initial_scene, S, S)
 
     # Precompute error maps (including initial)
     initial_error = ((initial_scene - teacher) ** 2).mean(axis=-1).reshape(S, S)
@@ -276,8 +276,7 @@ def plot_multistep_pca(
     for t in range(n_views):
         row = t + 1
         scene_rgb = pca_rgb(pca, scenes[t], S, S)
-        pca_t = fit_pca(scenes[t])
-        scene_rgb_self = pca_rgb(pca_t, scenes[t], S, S)
+        scene_rgb_self = pca_rgb(pca_self, scenes[t], S, S)
         local_avp_rgb = pca_rgb(pca, locals_avp[t], G, G)
         local_teacher_rgb = pca_rgb(pca, locals_teacher[t], G, G)
 
