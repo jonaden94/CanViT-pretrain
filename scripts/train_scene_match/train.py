@@ -1,13 +1,4 @@
-"""Main training loop with two-phase curriculum learning.
-
-Phase 1 (Warmup): Cycles through all grid sizes (largest first for OOM detection).
-    Each stage: 50% LR ramp (0→1), 50% cosine decay (1→0).
-
-Phase 2 (Main): Curriculum training (smallest to largest).
-    Each stage: fixed LR ramp steps, then cosine decay to end of stage.
-
-Both phases use identical per-stage structure, just with different parameterization.
-"""
+"""Main training loop with two-phase curriculum learning."""
 
 import logging
 from collections.abc import Callable
