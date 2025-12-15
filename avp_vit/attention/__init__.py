@@ -17,6 +17,7 @@ class AttentionConfig:
     use_ewa_transforms: bool = True  # EWA instead of Identity for unprojected streams
     use_post_rope_ewa: bool = False  # EWA after RoPE on Q/K
     identity_init_v: bool = False  # Identity-init V projection (write attn only)
+    write_v_expansion: int | None = None  # None = Linear, int = MLP with SiLU and given expansion
 
 
 class RoPECrossAttention(nn.Module):
@@ -104,15 +105,21 @@ class RoPEWriteCrossAttention(RoPECrossAttention):
         super().__init__(dim, num_heads, cfg)
         self.q_transform = _ewa_or_identity(dim, cfg.use_ewa_transforms)
         self.k_transform = nn.Linear(dim, dim)
-        self.v_transform = self._make_v_proj(dim, cfg.identity_init_v)
+        self.v_transform = self._make_v_proj(dim, cfg.identity_init_v, cfg.write_v_expansion)
         self.out_transform = _ewa_or_identity(dim, cfg.use_ewa_transforms)
 
     @staticmethod
-    def _make_v_proj(dim: int, identity_init: bool) -> nn.Linear:
-        proj = nn.Linear(dim, dim)
-        if identity_init:
-            nn.init.eye_(proj.weight)
-            nn.init.zeros_(proj.bias)
-        return proj
+    def _make_v_proj(dim: int, identity_init: bool, expansion: int | None) -> nn.Module:
+        if expansion is None:
+            proj = nn.Linear(dim, dim)
+            if identity_init:
+                nn.init.eye_(proj.weight)
+                nn.init.zeros_(proj.bias)
+            return proj
+        return nn.Sequential(
+            nn.Linear(dim, dim * expansion),
+            nn.SiLU(),
+            nn.Linear(dim * expansion, dim),
+        )
 
 
