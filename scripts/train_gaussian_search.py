@@ -1052,7 +1052,7 @@ def train(cfg: Config) -> None:
         )
 
         # Run episode (stochastic policy for exploration)
-        # Loss is based on LAST timestep only (policy must navigate to target)
+        # Loss is averaged across ALL timesteps
         # Collect viewpoints/glimpses for trajectory viz at val_every
         B = images.shape[0]
         hidden = avp._init_hidden(B, None)
