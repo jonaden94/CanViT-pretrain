@@ -41,7 +41,7 @@ def test_avp_forward_shapes(backbone: ViTBackbone) -> None:
 
 
 def test_hidden_unchanged_at_init(backbone: ViTBackbone) -> None:
-    """With γ=0, hidden should equal initial spatial_init (write has no effect)."""
+    """With γ=0, hidden should equal normalized spatial_init (write has no effect)."""
     cfg = AVPConfig(scene_grid_size=8, glimpse_grid_size=7, gate_init=0.0)
     avp = AVPViT(backbone, cfg)
 
@@ -51,8 +51,10 @@ def test_hidden_unchanged_at_init(backbone: ViTBackbone) -> None:
 
     _, hidden, _ = avp(images, viewpoints)
 
-    # With gates=0, write attention has no effect, so hidden = spatial_init
-    assert torch.allclose(hidden, avp.spatial_init.expand(B, -1, -1), atol=1e-5)
+    # With gates=0, write attention has no effect
+    # hidden = scene_input_norm(spatial_init) because norm is applied at start of each step
+    expected = avp.scene_input_norm(avp.spatial_init.expand(B, -1, -1))
+    assert torch.allclose(hidden, expected, atol=1e-5)
 
 
 def test_multi_viewpoint_forward(backbone: ViTBackbone) -> None:
