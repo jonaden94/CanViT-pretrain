@@ -685,12 +685,31 @@ def plot_scale_distribution(
     return fig
 
 
-def compute_center_head_grad_norm(policy: ViewpointPolicy) -> Tensor:
-    """Compute gradient norm for center_head only (for logging)."""
-    grads = [p.grad for p in policy.center_head.parameters() if p.grad is not None]
-    if not grads:
-        return torch.tensor(0.0)
-    return torch.stack([g.norm(2) for g in grads]).norm(2)
+def compute_policy_grad_norms(policy: ViewpointPolicy) -> dict[str, float]:
+    """Compute gradient norms for policy components."""
+    def module_grad_norm(module: nn.Module) -> float:
+        grads = [p.grad for p in module.parameters() if p.grad is not None]
+        if not grads:
+            return 0.0
+        return torch.stack([g.norm(2) for g in grads]).norm(2).item()
+
+    return {
+        "grad_policy_total": module_grad_norm(policy),
+        "grad_scene_proj": module_grad_norm(policy.scene_proj),
+        "grad_color_embed": module_grad_norm(policy.color_embed),
+        "grad_transformer": sum(module_grad_norm(b) for b in policy.blocks),
+        "grad_output_mlp": module_grad_norm(policy.output_mlp),
+        "grad_center_head": module_grad_norm(policy.center_head),
+        "grad_scale_head": module_grad_norm(policy.scale_head),
+    }
+
+
+def log_grad_breakdown(policy: ViewpointPolicy, step: int) -> None:
+    """Log detailed grad breakdown to stdout (for debugging at step 0)."""
+    norms = compute_policy_grad_norms(policy)
+    log.info(f"Step {step} grad breakdown:")
+    for name, val in norms.items():
+        log.info(f"  {name}: {val:.6f}")
 
 
 def summarize_policy_stats(stats: dict[str, Tensor]) -> dict[str, float]:
@@ -1004,14 +1023,18 @@ def train(cfg: Config) -> None:
 
         if step % cfg.log_every == 0:
             # Only sync here at logging time
-            center_head_grad = compute_center_head_grad_norm(policy)
+            grad_norms = compute_policy_grad_norms(policy)
             assert first_stats is not None
             policy_stats = summarize_policy_stats(first_stats)
+
+            # Log detailed grad breakdown on first step
+            if step == 0:
+                log_grad_breakdown(policy, step)
 
             exp.log_metrics({
                 "loss": ema_loss.item(),
                 "grad_norm": grad_norm.item(),
-                "grad_center_head": center_head_grad.item(),
+                **grad_norms,
                 "lr": scheduler.get_last_lr()[0],
                 "batch_spread_logits": policy_stats["batch_spread_logits"],
                 "scale_mean": policy_stats["scale_mean"],
