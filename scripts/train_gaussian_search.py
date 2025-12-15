@@ -260,14 +260,15 @@ class ViewpointPolicy(nn.Module):
     def __init__(
         self,
         embed_dim: int,
-        proj_dim: int = 4,
-        mlp_hidden: int = 256,
-        min_scale: float = 0.25,
-        max_scale: float = 1.0,
-        noise_std: float = 0.1,
-        center_head_init_scale: float = 0.1,
-        scale_head_init_scale: float = 0.01,
-        fixed_scale: float | None = None,
+        n_tokens: int,
+        proj_dim: int,
+        mlp_hidden: int,
+        min_scale: float,
+        max_scale: float,
+        noise_std: float,
+        center_head_init_scale: float,
+        scale_head_init_scale: float,
+        fixed_scale: float | None,
     ) -> None:
         super().__init__()
         self.min_scale = min_scale
@@ -280,12 +281,13 @@ class ViewpointPolicy(nn.Module):
         self.scene_proj = nn.Linear(embed_dim, proj_dim)
 
         # Color: project to small dim
-        self.color_proj = nn.Linear(3, 16)
+        color_dim = 16
+        self.color_proj = nn.Linear(3, color_dim)
 
         # MLP: [scene_flat, color] → hidden → viewpoint
-        # LazyLinear since scene_flat_dim = n_tokens * proj_dim (unknown at init)
+        scene_flat_dim = n_tokens * proj_dim
         self.mlp = nn.Sequential(
-            nn.LazyLinear(mlp_hidden),
+            nn.Linear(scene_flat_dim + color_dim, mlp_hidden),
             nn.LayerNorm(mlp_hidden),
             nn.SiLU(),
             nn.Linear(mlp_hidden, mlp_hidden),
@@ -987,8 +989,10 @@ def train(cfg: Config) -> None:
         compile_model(avp)
 
     log.info("Creating policy...")
+    n_scene_tokens = cfg.avp.scene_grid_size ** 2
     policy = ViewpointPolicy(
         embed_dim=backbone.embed_dim,
+        n_tokens=n_scene_tokens,
         proj_dim=cfg.policy_proj_dim,
         mlp_hidden=cfg.policy_mlp_hidden,
         min_scale=cfg.min_viewpoint_scale,
