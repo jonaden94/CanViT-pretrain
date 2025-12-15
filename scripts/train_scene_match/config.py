@@ -20,9 +20,10 @@ class Config:
     # Model
     avp: AVPConfig = field(
         default_factory=lambda: AVPConfig(
-            scene_grid_size=64,  # Max grid size for curriculum
+            scene_grid_size=64,
             glimpse_grid_size=7,
             layer_scale_init=1e-2,
+            temporal_gate_init=1e-3,
             use_output_proj=True,
             n_scene_registers=32,
             gradient_checkpointing=True,
