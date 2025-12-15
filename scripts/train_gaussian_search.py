@@ -1005,10 +1005,6 @@ def train(cfg: Config) -> None:
     if cfg.compile:
         compile_model(avp)
 
-    # Freeze AVP - only train policy
-    for p in avp.parameters():
-        p.requires_grad = False
-
     log.info("Creating policy...")
     policy = ViewpointPolicy(
         embed_dim=backbone.embed_dim,
@@ -1026,8 +1022,9 @@ def train(cfg: Config) -> None:
     log.info(f"Policy params: {count_parameters(policy):,}")
 
     peak_lr = cfg.ref_lr * (cfg.batch_size / 64)  # linear scaling from ref_lr @ BS=64
+    all_params = list(avp.parameters()) + list(policy.parameters())
     optimizer = torch.optim.AdamW(
-        policy.parameters(),
+        all_params,
         lr=peak_lr,
         betas=(cfg.adam_beta1, cfg.adam_beta2),
         weight_decay=cfg.weight_decay,
@@ -1092,7 +1089,7 @@ def train(cfg: Config) -> None:
         if step % cfg.log_every == 0:
             grad_norms = compute_policy_grad_norms(policy)
 
-        grad_norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.grad_clip)
+        grad_norm = torch.nn.utils.clip_grad_norm_(all_params, cfg.grad_clip)
         optimizer.step()
         scheduler.step()
 
