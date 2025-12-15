@@ -1,7 +1,5 @@
 """Smoke tests for curriculum training module."""
 
-import torch
-
 from avp_vit import AVPConfig
 
 from .config import Config

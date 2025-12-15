@@ -43,12 +43,17 @@ def create_norms(
 def init_survival_batch(
     avp: AVPViT,
     train_loader: InfiniteLoader,
-    get_targets: Callable[[Tensor], Tensor],
+    compute_targets: Callable[[Tensor], Tensor],
     batch_size: int,
     fresh_count: int,
     device: torch.device,
 ) -> SurvivalBatch:
-    """Initialize survival batch by loading fresh_count images at a time."""
+    """Initialize survival batch by loading fresh_count images at a time.
+
+    Args:
+        compute_targets: Function mapping images → normalized targets.
+            The returned targets are what AVP learns to output.
+    """
     n_init_batches = (batch_size + fresh_count - 1) // fresh_count
     log.info(
         f"Initializing survival batch: batch_size={batch_size}, fresh_count={fresh_count}, "
@@ -60,7 +65,7 @@ def init_survival_batch(
         for _ in range(n_init_batches):
             batch = train_loader.next_batch().to(device)
             init_imgs_list.append(batch)
-            init_targets_list.append(get_targets(batch))
+            init_targets_list.append(compute_targets(batch))
 
     init_imgs = torch.cat(init_imgs_list, dim=0)[:batch_size]
     init_targets = torch.cat(init_targets_list, dim=0)[:batch_size]
@@ -151,17 +156,23 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     avp.set_scene_grid_size(G)
     log.info(f"Starting at G={G}")
 
-    def get_targets(images: Tensor) -> Tensor:
+    def compute_normalized_targets(images: Tensor) -> Tensor:
+        """Extract teacher patches and apply position-aware running normalization.
+
+        Note: This returns normalized patches, not raw teacher output. The AVP
+        model is trained to produce scene representations matching these normalized
+        values. The norm captures per-position statistics across batches.
+        """
         with torch.autocast(device_type=cfg.device.type, dtype=torch.bfloat16):
-            patches = teacher.forward_norm_patches(images)
-        return norm(patches.float())
+            teacher_patches = teacher.forward_norm_patches(images)
+        return norm(teacher_patches.float())
 
     # Initial eval
     log.info("Running initial validation...")
     val_images = val_loader.next_batch().to(cfg.device)
     norm.eval()
     val_loss = eval_and_log(
-        exp, 0, avp, teacher, get_targets, val_images, norm, prefix=f"grid{G}/val"
+        exp, 0, avp, teacher, compute_normalized_targets, val_images, norm, prefix=f"grid{G}/val"
     )
     norm.train()
     log.info(f"Initial val_loss (G={G}): {val_loss:.4f}")
@@ -171,7 +182,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     # Initialize survival batch for first stage
     state = init_survival_batch(
-        avp, train_loader, get_targets, stage.batch_size, stage.fresh_count, cfg.device
+        avp, train_loader, compute_normalized_targets, stage.batch_size, stage.fresh_count, cfg.device
     )
 
     ema_loss_t = torch.tensor(0.0, device=cfg.device)
@@ -198,7 +209,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             state = init_survival_batch(
                 avp,
                 train_loader,
-                get_targets,
+                compute_normalized_targets,
                 stage.batch_size,
                 stage.fresh_count,
                 cfg.device,
@@ -207,7 +218,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         # Load fresh images
         fresh_imgs = train_loader.next_batch().to(cfg.device)
         with torch.no_grad():
-            fresh_targets = get_targets(fresh_imgs)
+            fresh_targets = compute_normalized_targets(fresh_imgs)
 
         # Compute min/max viewpoint scale for current grid size
         min_scale = stage.min_viewpoint_scale
@@ -283,7 +294,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             val_images = val_loader.next_batch().to(cfg.device)
             norm.eval()
             val_loss = eval_and_log(
-                exp, step, avp, teacher, get_targets, val_images, norm, f"grid{G}/val"
+                exp, step, avp, teacher, compute_normalized_targets, val_images, norm, f"grid{G}/val"
             )
             norm.train()
 
@@ -320,7 +331,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     val_images = val_loader.next_batch().to(cfg.device)
     norm.eval()
     val_loss = eval_and_log(
-        exp, cfg.n_steps, avp, teacher, get_targets, val_images, norm, f"grid{G}/val"
+        exp, cfg.n_steps, avp, teacher, compute_normalized_targets, val_images, norm, f"grid{G}/val"
     )
     norm.train()
     if val_loss < best_val_loss:

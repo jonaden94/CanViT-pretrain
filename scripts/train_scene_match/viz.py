@@ -134,20 +134,23 @@ def eval_and_log(
     step: int,
     avp: AVPViT,
     teacher: DINOv3Backbone,
-    get_targets: Callable[[Tensor], Tensor],
+    compute_targets: Callable[[Tensor], Tensor],
     images: Tensor,
     target_norm: PositionAwareNorm | None = None,
     prefix: str = "val",
 ) -> float:
-    """Evaluate on one batch with curriculum viewpoints. Returns final L1 loss."""
+    """Evaluate on one batch with curriculum viewpoints. Returns final L1 loss.
+
+    Args:
+        compute_targets: Function mapping images → normalized targets (what AVP outputs).
+    """
     B = images.shape[0]
     G = avp.cfg.scene_grid_size
     g = avp.cfg.glimpse_grid_size
     viewpoints = make_curriculum_eval_viewpoints(B, G, g, images.device)
 
     with torch.inference_mode():
-        # get_targets already handles AMP internally
-        target = get_targets(images)
+        target = compute_targets(images)
 
     l1_losses, mse_losses = viz_and_log(
         exp, step, prefix, avp, teacher, images, viewpoints, target, None, target_norm
