@@ -897,7 +897,7 @@ class Config:
     policy_scale_head_init_scale: float = 0.01  # 10x smaller - sigmoid more sensitive
     policy_layerscale_init: float = 1e-3
     policy_fixed_scale: float | None = (
-        0.5  # If set, freeze scale to this value (for debugging)
+        None  # If set, freeze scale to this value (for debugging)
     )
     # Training
     n_steps_per_episode: int = 4
