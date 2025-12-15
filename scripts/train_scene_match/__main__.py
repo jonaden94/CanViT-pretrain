@@ -26,12 +26,14 @@ def main() -> None:
     log.info(f"Total steps: {cfg.n_steps:,}")
 
     # Log schedule
-    log.info(f"WARMUP PHASE: {cfg.warmup_steps:,} steps (largest→smallest, mini LR cycles)")
-    log.info(f"MAIN TRAINING: {cfg.main_training_steps:,} steps (smallest→largest, cosine decay)")
-    log.info("Schedule:")
-    for phase, G, start, end in cfg.get_schedule():
-        phase_label = "warmup" if phase == "warmup" else "main  "
-        log.info(f"  [{phase_label}] G={G}: steps {start:,} - {end:,}")
+    log.info(f"PROBE: {cfg.probe_steps:,} steps (largest→smallest, {cfg.probe_ramp_ratio:.0%} ramp)")
+    log.info(f"MAIN: {cfg.main_steps:,} steps (smallest→largest, {cfg.main_ramp_steps} ramp steps)")
+    for entry in cfg.get_schedule():
+        log.info(
+            f"  [{entry.phase:5}] G={entry.grid_size}: "
+            f"steps {entry.start_step:,}-{entry.end_step:,} "
+            f"(ramp={entry.lr_ramp_steps}, decay={entry.lr_decay_steps})"
+        )
 
     log.info("=" * 60)
 

@@ -11,6 +11,28 @@ from avp_vit import AVPConfig
 
 
 @dataclass
+class ScheduleEntry:
+    """A single stage in the training schedule.
+
+    Each stage has: lr_ramp_steps of 0→1 ramp, then decay 1→0 for remainder.
+    """
+
+    phase: Literal["probe", "main"]
+    grid_size: int
+    start_step: int
+    end_step: int
+    lr_ramp_steps: int
+
+    @property
+    def duration(self) -> int:
+        return self.end_step - self.start_step + 1
+
+    @property
+    def lr_decay_steps(self) -> int:
+        return self.duration - self.lr_ramp_steps
+
+
+@dataclass
 class Config:
     # Paths
     teacher_ckpt: Path = Path("dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
@@ -40,7 +62,9 @@ class Config:
     num_workers: int = 8
     ref_lr: float = 1e-5
     weight_decay: float = 1e-5
-    warmup_ratio: float = 0.01  # Fraction of n_steps for warmup phase
+    probe_ratio: float = 0.01  # Fraction of n_steps for probe phase (all sizes, largest first)
+    probe_ramp_ratio: float = 0.5  # Within each probe stage, fraction that's LR ramp
+    main_ramp_steps: int = 500  # Within each main stage, fixed LR ramp steps
     grad_clip: float = 1.0
     crop_scale_min: float = 0.4
     loss: Literal["l1", "mse"] = "mse"
@@ -60,58 +84,67 @@ class Config:
         return max(self.grid_sizes)
 
     @property
-    def warmup_steps(self) -> int:
-        """Total warmup steps (cycles through all sizes in reverse order)."""
-        return int(self.n_steps * self.warmup_ratio)
+    def probe_steps(self) -> int:
+        return int(self.n_steps * self.probe_ratio)
 
     @property
-    def warmup_steps_per_size(self) -> int:
-        """Steps per grid size during warmup phase."""
-        return self.warmup_steps // len(self.grid_sizes)
+    def probe_steps_per_size(self) -> int:
+        return self.probe_steps // len(self.grid_sizes)
 
     @property
-    def main_training_steps(self) -> int:
-        """Steps for main curriculum training (after warmup)."""
-        return self.n_steps - self.warmup_steps
+    def main_steps(self) -> int:
+        return self.n_steps - self.probe_steps
 
     @property
     def main_steps_per_stage(self) -> int:
-        """Steps per curriculum stage during main training."""
-        return self.main_training_steps // len(self.grid_sizes)
+        return self.main_steps // len(self.grid_sizes)
 
     @property
-    def warmup_grid_sizes(self) -> tuple[int, ...]:
-        """Grid sizes for warmup phase (largest first for OOM detection)."""
+    def probe_grid_sizes(self) -> tuple[int, ...]:
+        """Largest first for OOM detection."""
         return tuple(reversed(self.grid_sizes))
 
-    def get_schedule(self) -> list[tuple[str, int, int, int]]:
-        """Return full training schedule as list of (phase, grid_size, start_step, end_step).
+    def get_schedule(self) -> list[ScheduleEntry]:
+        """Return full training schedule."""
+        schedule: list[ScheduleEntry] = []
 
-        Warmup phase cycles through all sizes (largest first) with mini LR cycles.
-        Main training follows curriculum order (smallest to largest).
-        """
-        schedule: list[tuple[str, int, int, int]] = []
-
-        # Warmup phase (largest → smallest)
+        # Probe phase (largest → smallest)
         step = 0
-        for G in self.warmup_grid_sizes:
-            end = step + self.warmup_steps_per_size - 1
-            schedule.append(("warmup", G, step, end))
+        probe_sizes = self.probe_grid_sizes
+        for i, G in enumerate(probe_sizes):
+            end = step + self.probe_steps_per_size - 1
+            if i == len(probe_sizes) - 1:
+                end = self.probe_steps - 1  # Last stage absorbs remainder
+            duration = end - step + 1
+            assert duration > 0, f"Probe stage G={G} has non-positive duration"
+            ramp = int(duration * self.probe_ramp_ratio)
+            assert 0 < ramp < duration, f"Probe stage G={G}: ramp={ramp} invalid for duration={duration}"
+            schedule.append(ScheduleEntry(
+                phase="probe",
+                grid_size=G,
+                start_step=step,
+                end_step=end,
+                lr_ramp_steps=ramp,
+            ))
             step = end + 1
 
-        # Main training (smallest → largest)
+        assert step == self.probe_steps, f"Probe phase ends at {step}, expected {self.probe_steps}"
+
+        # Main phase (smallest → largest)
         for i, G in enumerate(self.grid_sizes):
-            start = self.warmup_steps + i * self.main_steps_per_stage
+            start = self.probe_steps + i * self.main_steps_per_stage
             end = start + self.main_steps_per_stage - 1
             if i == len(self.grid_sizes) - 1:
-                end = self.n_steps - 1  # Last stage gets remaining steps
-            schedule.append(("main", G, start, end))
+                end = self.n_steps - 1
+            duration = end - start + 1
+            assert duration > self.main_ramp_steps, f"Main stage G={G}: duration={duration} < ramp={self.main_ramp_steps}"
+            schedule.append(ScheduleEntry(
+                phase="main",
+                grid_size=G,
+                start_step=start,
+                end_step=end,
+                lr_ramp_steps=self.main_ramp_steps,
+            ))
 
+        assert schedule[-1].end_step == self.n_steps - 1, f"Schedule ends at {schedule[-1].end_step}, expected {self.n_steps - 1}"
         return schedule
-
-    def get_phase_and_grid(self, step: int) -> tuple[str, int]:
-        """Return (phase, grid_size) for a given step."""
-        for phase, G, start, end in self.get_schedule():
-            if start <= step <= end:
-                return phase, G
-        return "main", self.grid_sizes[-1]  # Fallback

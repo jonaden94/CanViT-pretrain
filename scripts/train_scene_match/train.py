@@ -1,10 +1,12 @@
 """Main training loop with two-phase curriculum learning.
 
 Phase 1 (Warmup): Cycles through all grid sizes (largest first for OOM detection).
-    Each sub-phase has its own mini LR cycle (linear warmup + cosine decay).
+    Each stage: 50% LR ramp (0→1), 50% cosine decay (1→0).
 
-Phase 2 (Main): Normal curriculum training (smallest to largest).
-    Single cosine decay from peak to 0.
+Phase 2 (Main): Curriculum training (smallest to largest).
+    Each stage: fixed LR ramp steps, then cosine decay to end of stage.
+
+Both phases use identical per-stage structure, just with different parameterization.
 """
 
 import logging
@@ -25,7 +27,7 @@ from avp_vit.train.curriculum import CurriculumStage, log_curriculum_stage
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import random_viewpoint
 
-from .config import Config
+from .config import Config, ScheduleEntry
 from .data import create_curriculum_stages, create_loaders_for_curriculum
 from .model import compile_avp, compile_teacher, create_avp, load_teacher
 from .scheduler import create_curriculum_scheduler
@@ -139,16 +141,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     optimizer = torch.optim.AdamW(trainable, lr=peak_lr, weight_decay=cfg.weight_decay)
     scheduler = create_curriculum_scheduler(optimizer, cfg)
     log.info(f"Optimizer: AdamW, peak_lr={peak_lr:.2e}, weight_decay={cfg.weight_decay:.2e}")
-    log.info(
-        f"Schedule: {cfg.warmup_steps:,} warmup steps ({cfg.warmup_steps_per_size:,} per size), "
-        f"{cfg.main_training_steps:,} main training steps"
-    )
 
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}_best.pt"
     best_val_loss = float("inf")
     ckpt_val_loss = float("inf")
 
-    # Precompute schedule for fast lookup
     schedule = cfg.get_schedule()
 
     # State tracking (all set on first iteration via phase transition)
@@ -158,12 +155,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     norm: PositionAwareNorm | None = None
     val_loader: InfiniteLoader | None = None
 
-    def get_current_stage(step: int) -> tuple[str, int]:
-        """Get (phase, grid_size) for current step from precomputed schedule."""
-        for phase, G, start, end in schedule:
-            if start <= step <= end:
-                return phase, G
-        return schedule[-1][0], schedule[-1][1]  # Fallback to last
+    def get_current_entry(step: int) -> ScheduleEntry:
+        for entry in schedule:
+            if entry.start_step <= step <= entry.end_step:
+                return entry
+        raise ValueError(f"Step {step} not in schedule")
 
     def compute_normalized_targets(images: Tensor) -> Tensor:
         """Extract teacher patches and apply position-aware running normalization."""
@@ -179,12 +175,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     pbar = tqdm(range(cfg.n_steps), desc="Training", unit="step")
 
     for step in pbar:
-        # Check for phase/grid transitions
-        phase, G = get_current_stage(step)
+        entry = get_current_entry(step)
+        G = entry.grid_size
 
-        if phase != current_phase or G != current_G:
-            log.info(f"Step {step}: [{phase}] Transitioning to G={G}")
-            current_phase = phase
+        if entry.phase != current_phase or G != current_G:
+            log.info(f"Step {step}: [{entry.phase}] Transitioning to G={G}")
+            current_phase = entry.phase
             current_G = G
 
             stage = stages[G]
@@ -194,7 +190,15 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             avp.set_scene_grid_size(G)
             log_curriculum_stage(stage, log)
 
-            # Initialize/reinitialize survival batch for this stage
+            # Baseline eval BEFORE training on this stage
+            val_images = val_loader.next_batch().to(cfg.device)
+            norm.eval()
+            eval_and_log(
+                exp, step, avp, teacher, compute_normalized_targets, val_images, norm, f"grid{G}/init"
+            )
+            norm.train()
+
+            # Initialize survival batch for this stage
             state = init_survival_batch(
                 avp,
                 train_loader,
@@ -261,12 +265,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                     "train/grad_norm": grad_norm,
                     "train/lr": lr,
                     "train/grid_size": G,
-                    "train/phase": 0 if phase == "warmup" else 1,
+                    "train/phase": 0 if entry.phase == "probe" else 1,
                 },
                 step=step,
             )
             pbar.set_postfix_str(
-                f"[{phase}] G={G} loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}"
+                f"[{entry.phase}] G={G} loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}"
             )
 
         if step > 0 and step % cfg.val_every == 0:
