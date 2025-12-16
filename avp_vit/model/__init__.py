@@ -81,7 +81,7 @@ class AVPConfig:
     glimpse_grid_size: int = 7
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
     layer_scale_init: float = 0.01  # Init for LayerScale (reference: 0.01)
-    temporal_gate_init: float | None = None  # None=disabled, float=gate init (ref: 0.001)
+    temporal_gate_init: float | None = 0.001  # None=disabled, float=gate init (ref: 0.001)
     use_output_proj: bool = True
     use_output_proj_norm: bool = False  # LayerNorm before Linear in output_proj
     gradient_checkpointing: bool = True  # Checkpoint at timestep boundaries
