@@ -236,7 +236,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             )
 
         if step % cfg.val_every == 0:
-            # Training viz (no curves - Comet limit)
+            # Training viz (no curves)
             train_l1, train_mse = viz_and_log(
                 exp,
                 step,
@@ -250,17 +250,19 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 norm,
                 log_spatial_stats=cfg.log_spatial_stats,
                 log_curves=False,
+                loss_type=cfg.loss,
             )
             exp.log_metric(f"grid{G}/train/viz_l1", train_l1[-1], step=step)
             exp.log_metric(f"grid{G}/train/viz_mse", train_mse[-1], step=step)
 
-            # Validation (curves only at curve_every intervals)
+            # Validation (curves at curve_every intervals)
             val_images = val_loader.next_batch().to(cfg.device)
             norm.eval()
             val_loss = eval_and_log(
                 exp, step, avp, teacher, compute_targets, val_images, norm, f"grid{G}/val",
                 log_spatial_stats=cfg.log_spatial_stats,
                 log_curves=(step % cfg.curve_every == 0),
+                loss_type=cfg.loss,
             )
             norm.train()
             exp.log_metric("val/loss", val_loss, step=step)

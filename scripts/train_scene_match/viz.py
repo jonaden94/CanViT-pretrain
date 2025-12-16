@@ -4,6 +4,7 @@ import io
 import logging
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 import comet_ml
 import matplotlib.pyplot as plt
@@ -65,11 +66,10 @@ def viz_and_log(
     show_hidden: bool = True,
     log_spatial_stats: bool = True,
     log_curves: bool = True,
+    loss_type: Literal["l1", "mse"] = "mse",
+    log_register_curves: bool = False,
 ) -> tuple[list[float], list[float]]:
     """Run forward trajectory and log visualization.
-
-    Args:
-        show_hidden: If True, show raw hidden spatial column in PCA plot.
 
     Returns (l1_losses, mse_losses) per timestep.
     """
@@ -102,8 +102,8 @@ def viz_and_log(
                 step=step,
             )
 
-            # Persistent register norm vs timestep (if any)
-            if n_persistent > 0:
+            # Persistent register norm vs timestep (if enabled and any exist)
+            if log_register_curves and n_persistent > 0:
                 reg_norms = [h[:, :n_persistent].norm(dim=-1).mean().item() for h in hiddens]
                 exp.log_curve(
                     f"{prefix}/register_norm_vs_timestep",
@@ -126,18 +126,16 @@ def viz_and_log(
 
             # Loss vs timestep (t=0 is initial scene before any viewpoint)
             initial_scene = avp.compute_scene(initial_hidden)
-            initial_l1 = l1_loss(initial_scene, target).item()
-            initial_mse = mse_loss(initial_scene, target).item()
+            if loss_type == "l1":
+                initial_loss = l1_loss(initial_scene, target).item()
+                losses = l1_losses
+            else:
+                initial_loss = mse_loss(initial_scene, target).item()
+                losses = mse_losses
             exp.log_curve(
-                f"{prefix}/l1_vs_timestep",
-                x=list(range(len(l1_losses) + 1)),
-                y=[initial_l1] + l1_losses,
-                step=step,
-            )
-            exp.log_curve(
-                f"{prefix}/mse_vs_timestep",
-                x=list(range(len(mse_losses) + 1)),
-                y=[initial_mse] + mse_losses,
+                f"{prefix}/loss_vs_timestep",
+                x=list(range(len(losses) + 1)),
+                y=[initial_loss] + losses,
                 step=step,
             )
 
@@ -246,6 +244,7 @@ def eval_and_log(
     prefix: str = "val",
     log_spatial_stats: bool = True,
     log_curves: bool = True,
+    loss_type: Literal["l1", "mse"] = "mse",
 ) -> float:
     """Evaluate on one batch with curriculum viewpoints. Returns final L1 loss."""
     B = images.shape[0]
@@ -260,6 +259,7 @@ def eval_and_log(
         exp, step, prefix, avp, teacher, images, viewpoints, target, None, target_norm,
         log_spatial_stats=log_spatial_stats,
         log_curves=log_curves,
+        loss_type=loss_type,
     )
 
     for t, (l1, mse) in enumerate(zip(l1_losses, mse_losses, strict=True)):

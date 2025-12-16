@@ -38,7 +38,7 @@ class Config:
     # Logging
     log_every: int = 20
     val_every: int = 50
-    curve_every: int = 1000  # Curves less often than val (Comet limit: 1000/experiment)
+    curve_every: int = 250  # Curves less often than val (Comet limit: 1000/experiment)
     ckpt_every: int = 500
     log_spatial_stats: bool = True  # Log target/pred spatial mean/std
     # Compilation
