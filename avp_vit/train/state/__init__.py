@@ -11,6 +11,7 @@ class SurvivalBatch:
     """Batch state for fresh-ratio survival.
 
     Replaces a fraction of batch each step; surviving samples keep hidden for continuation.
+    Fresh and survivor samples are randomly distributed (no deterministic positions).
     """
 
     images: Tensor  # [B, C, H, W]
@@ -19,7 +20,14 @@ class SurvivalBatch:
 
     @staticmethod
     def init(images: Tensor, targets: Tensor, hidden: Tensor) -> "SurvivalBatch":
-        return SurvivalBatch(images=images, targets=targets, hidden=hidden)
+        """Initialize with random permutation to avoid first-step position bias."""
+        B = images.shape[0]
+        perm = torch.randperm(B, device=images.device)
+        return SurvivalBatch(
+            images=images[perm],
+            targets=targets[perm],
+            hidden=hidden[perm],
+        )
 
     def step(
         self,
@@ -29,17 +37,25 @@ class SurvivalBatch:
         next_hidden: Tensor,
         hidden_init: Tensor,
     ) -> "SurvivalBatch":
-        """Permute batch, replace first K with fresh samples."""
+        """Replace K samples with fresh, permute to randomize positions.
+
+        Since batch is already randomly ordered from previous step's permutation,
+        taking indices [K:] is equivalent to randomly selecting B-K survivors.
+        Final permutation ensures fresh samples aren't at deterministic positions.
+        """
         B = self.images.shape[0]
         K = fresh_images.shape[0]
+
+        # Cat fresh + survivors (survivors = indices K: due to prior random order)
+        images = torch.cat([fresh_images, self.images[K:]], dim=0)
+        targets = torch.cat([fresh_targets, self.targets[K:]], dim=0)
+        # hidden_init NOT detached (learnable), next_hidden IS detached (no BPTT)
+        hidden = torch.cat([hidden_init, next_hidden[K:].detach()], dim=0)
+
+        # Permute to randomize final positions
         perm = torch.randperm(B, device=self.images.device)
-
-        images = self.images[perm]
-        targets = self.targets[perm]
-        hidden = next_hidden[perm].detach()
-
-        images[:K] = fresh_images
-        targets[:K] = fresh_targets
-        hidden[:K] = hidden_init
-
-        return SurvivalBatch(images=images, targets=targets, hidden=hidden)
+        return SurvivalBatch(
+            images=images[perm],
+            targets=targets[perm],
+            hidden=hidden[perm],
+        )
