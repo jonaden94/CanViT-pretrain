@@ -64,6 +64,7 @@ def viz_and_log(
     target_norm: PositionAwareNorm | None = None,
     show_hidden: bool = True,
     log_spatial_stats: bool = True,
+    log_curves: bool = True,
 ) -> tuple[list[float], list[float]]:
     """Run forward trajectory and log visualization.
 
@@ -83,17 +84,51 @@ def viz_and_log(
         l1_losses = [l1_loss(out.scene, target).item() for out in outputs]
         mse_losses = [mse_loss(out.scene, target).item() for out in outputs]
 
-        # Log per-timestep hidden norm (should be flat if recurrence is stable)
-        # Include initial hidden at t=0, then outputs at t=1,2,...
-        initial_hidden = hidden if hidden is not None else avp._get_base_hidden(images.shape[0])
-        hidden_norms = [initial_hidden.norm(dim=-1).mean().item()]
-        hidden_norms.extend(out.hidden.norm(dim=-1).mean().item() for out in outputs)
-        exp.log_curve(
-            f"{prefix}/hidden_norm_vs_timestep",
-            x=list(range(len(hidden_norms))),
-            y=hidden_norms,
-            step=step,
-        )
+        # Compute hidden states for logging and visualization
+        # t=0 = _init_hidden output (before any viewpoint), t=1,2,... = after each viewpoint
+        B = images.shape[0]
+        initial_hidden = avp._init_hidden(B, hidden)  # Matches forward_loss t=0
+
+        if log_curves:
+            # Per-timestep hidden norm (should be flat if recurrence is stable)
+            hidden_norms = [initial_hidden.norm(dim=-1).mean().item()]
+            hidden_norms.extend(out.hidden.norm(dim=-1).mean().item() for out in outputs)
+            exp.log_curve(
+                f"{prefix}/hidden_norm_vs_timestep",
+                x=list(range(len(hidden_norms))),
+                y=hidden_norms,
+                step=step,
+            )
+
+            # Step-to-step hidden difference norm (measures change per timestep)
+            hiddens = [initial_hidden] + [out.hidden for out in outputs]
+            diff_norms = [
+                (hiddens[i + 1] - hiddens[i]).norm(dim=-1).mean().item()
+                for i in range(len(hiddens) - 1)
+            ]
+            exp.log_curve(
+                f"{prefix}/hidden_diff_norm_vs_timestep",
+                x=list(range(len(diff_norms))),
+                y=diff_norms,
+                step=step,
+            )
+
+            # Loss vs timestep (t=0 is initial scene before any viewpoint)
+            initial_scene = avp.compute_scene(initial_hidden)
+            initial_l1 = l1_loss(initial_scene, target).item()
+            initial_mse = mse_loss(initial_scene, target).item()
+            exp.log_curve(
+                f"{prefix}/l1_vs_timestep",
+                x=list(range(len(l1_losses) + 1)),
+                y=[initial_l1] + l1_losses,
+                step=step,
+            )
+            exp.log_curve(
+                f"{prefix}/mse_vs_timestep",
+                x=list(range(len(mse_losses) + 1)),
+                y=[initial_mse] + mse_losses,
+                step=step,
+            )
 
         # Log spatial stats for target and final prediction
         if log_spatial_stats:
@@ -109,27 +144,21 @@ def viz_and_log(
                 step=step,
             )
 
-        # Initial scene from hidden (or base hidden if None)
-        if hidden is not None:
-            initial_hidden_full = hidden[0:1]
-        else:
-            initial_hidden_full = avp._get_base_hidden(1)
-        initial_scene = avp.compute_scene(initial_hidden_full)[0]
-
-        # Prepare viz data for first sample
+        # Prepare viz data for first sample (initial_hidden already computed above)
         sample_idx = 0
         n_prefix = teacher.n_prefix_tokens
         H, W = avp.scene_size, avp.scene_size
+        initial_scene = avp.compute_scene(initial_hidden)  # [B, N, D]
 
         full_img = imagenet_denormalize(images[sample_idx].cpu()).numpy()
         teacher_np = target[sample_idx].cpu().float().numpy()
-        initial_np = initial_scene.cpu().float().numpy()
+        initial_np = initial_scene[sample_idx].cpu().float().numpy()
 
         scenes = [out.scene[sample_idx].cpu().float().numpy() for out in outputs]
 
         # Raw hidden spatials (before output_proj)
         if show_hidden:
-            initial_hidden_spatial = avp.get_spatial(initial_hidden_full)[0].cpu().float().numpy()
+            initial_hidden_spatial = avp.get_spatial(initial_hidden[sample_idx : sample_idx + 1])[0].cpu().float().numpy()
             hidden_spatials = [
                 avp.get_spatial(out.hidden[sample_idx : sample_idx + 1])[0].cpu().float().numpy()
                 for out in outputs
@@ -205,12 +234,9 @@ def eval_and_log(
     target_norm: PositionAwareNorm | None = None,
     prefix: str = "val",
     log_spatial_stats: bool = True,
+    log_curves: bool = True,
 ) -> float:
-    """Evaluate on one batch with curriculum viewpoints. Returns final L1 loss.
-
-    Args:
-        compute_targets: Function mapping images → normalized targets (what AVP outputs).
-    """
+    """Evaluate on one batch with curriculum viewpoints. Returns final L1 loss."""
     B = images.shape[0]
     G = avp.cfg.scene_grid_size
     g = avp.cfg.glimpse_grid_size
@@ -222,6 +248,7 @@ def eval_and_log(
     l1_losses, mse_losses = viz_and_log(
         exp, step, prefix, avp, teacher, images, viewpoints, target, None, target_norm,
         log_spatial_stats=log_spatial_stats,
+        log_curves=log_curves,
     )
 
     for t, (l1, mse) in enumerate(zip(l1_losses, mse_losses, strict=True)):
