@@ -90,24 +90,35 @@ def viz_and_log(
         initial_hidden = avp._init_hidden(B, hidden)  # Matches forward_loss t=0
 
         if log_curves:
-            # Per-timestep hidden norm (should be flat if recurrence is stable)
-            hidden_norms = [initial_hidden.norm(dim=-1).mean().item()]
-            hidden_norms.extend(out.hidden.norm(dim=-1).mean().item() for out in outputs)
+            hiddens = [initial_hidden] + [out.hidden for out in outputs]
+            n_persistent = avp.n_persistent_registers
+
+            # Spatial hidden norm vs timestep (excludes persistent registers)
+            spatial_norms = [avp.get_spatial(h).norm(dim=-1).mean().item() for h in hiddens]
             exp.log_curve(
-                f"{prefix}/hidden_norm_vs_timestep",
-                x=list(range(len(hidden_norms))),
-                y=hidden_norms,
+                f"{prefix}/spatial_norm_vs_timestep",
+                x=list(range(len(spatial_norms))),
+                y=spatial_norms,
                 step=step,
             )
 
-            # Step-to-step hidden difference norm (measures change per timestep)
-            hiddens = [initial_hidden] + [out.hidden for out in outputs]
+            # Persistent register norm vs timestep (if any)
+            if n_persistent > 0:
+                reg_norms = [h[:, :n_persistent].norm(dim=-1).mean().item() for h in hiddens]
+                exp.log_curve(
+                    f"{prefix}/register_norm_vs_timestep",
+                    x=list(range(len(reg_norms))),
+                    y=reg_norms,
+                    step=step,
+                )
+
+            # Step-to-step spatial difference norm
             diff_norms = [
-                (hiddens[i + 1] - hiddens[i]).norm(dim=-1).mean().item()
+                (avp.get_spatial(hiddens[i + 1]) - avp.get_spatial(hiddens[i])).norm(dim=-1).mean().item()
                 for i in range(len(hiddens) - 1)
             ]
             exp.log_curve(
-                f"{prefix}/hidden_diff_norm_vs_timestep",
+                f"{prefix}/spatial_diff_norm_vs_timestep",
                 x=list(range(len(diff_norms))),
                 y=diff_norms,
                 step=step,

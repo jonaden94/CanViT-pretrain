@@ -226,6 +226,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 "train/lr": lr,
                 "train/grid_size": G,
                 "train/scene_temporal_gate_mean": scene_gate_mean,
+                "train/spatial_hidden_init_norm": avp.spatial_hidden_init.norm().item(),
             }
             if avp.local_temporal_gate is not None:
                 metrics["train/local_temporal_gate_mean"] = torch.sigmoid(avp.local_temporal_gate).mean().item()
