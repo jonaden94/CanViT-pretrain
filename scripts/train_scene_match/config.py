@@ -26,8 +26,8 @@ class Config:
     n_viewpoints_per_step: int = (
         2  # Inner loop viewpoints (>=2 for length generalization)
     )
-    n_steps: int = 50000
-    batch_size: int = 32  # Max batch size (at max grid size)
+    n_steps: int = 200000
+    batch_size: int = 16  # Max batch size (at max grid size)
     num_workers: int = 8
     ref_lr: float = 1e-5
     weight_decay: float = 1e-5
@@ -38,7 +38,7 @@ class Config:
     # Logging
     log_every: int = 20
     val_every: int = 50
-    curve_every: int = 250  # Curves less often than val (Comet limit: 1000/experiment)
+    curve_every: int = 1000  # Curves less often than val (Comet limit: 1000/experiment)
     ckpt_every: int = 500
     log_spatial_stats: bool = True  # Log target/pred spatial mean/std
     # Compilation
