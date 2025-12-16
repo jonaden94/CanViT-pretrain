@@ -25,6 +25,12 @@ def timestep_colors(n: int) -> list[RGBA]:
     return [cmap(i / max(1, n - 1)) for i in range(n)]
 
 
+def _pca_proj_to_rgb(proj: NDArray[np.floating], H: int, W: int) -> NDArray[np.floating]:
+    """Convert PCA projection to RGB image via sigmoid. Clips to avoid overflow."""
+    x = proj.reshape(H, W, 3) * 2.0
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -500, 500)))
+
+
 def fit_pca(features: NDArray[np.floating]) -> PCA:
     """Fit PCA on features for RGB visualization.
 
@@ -46,8 +52,7 @@ def pca_rgb(pca: PCA, features: NDArray[np.floating], H: int, W: int) -> NDArray
         [H, W, 3] numpy array with sigmoid-scaled values in [0, 1]
     """
     proj = pca.transform(features)
-    # Sigmoid scaling: 2.0 is a heuristic that works well for visualization
-    return 1.0 / (1.0 + np.exp(-proj.reshape(H, W, 3) * 2.0))
+    return _pca_proj_to_rgb(proj, H, W)
 
 
 def pca_rgb_proj_only(
@@ -77,7 +82,7 @@ def pca_rgb_proj_only(
     standardized = centered / (std + 1e-8)
     # Project using PCA components (shape: [n_components, n_features])
     proj = standardized @ pca.components_.T
-    return 1.0 / (1.0 + np.exp(-proj.reshape(H, W, 3) * 2.0))
+    return _pca_proj_to_rgb(proj, H, W)
 
 
 def imagenet_denormalize(t: Tensor) -> Tensor:

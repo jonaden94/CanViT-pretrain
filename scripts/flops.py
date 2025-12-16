@@ -87,14 +87,15 @@ def avp_step_flops(model: AVPViT, backbone: DINOv3Backbone) -> AVPStepFLOPs:
     glimpse_embed = backbone.patch_embed_flops(glimpse_patches)
 
     # Use actual model introspection for attention FLOPs
+    n_adapters = model.n_adapters
     read_attn_total = sum(
         model.read_attn[i].flops(n_local, n_scene)  # type: ignore[union-attr]
-        for i in range(n_blocks)
+        for i in range(n_adapters)
     )
     blocks = n_blocks * backbone.block_flops(n_local)
     write_attn_total = sum(
         model.write_attn[i].flops(n_scene, n_local)  # type: ignore[union-attr]
-        for i in range(n_blocks)
+        for i in range(n_adapters)
     )
 
     # Approximate breakdown (for display purposes)
