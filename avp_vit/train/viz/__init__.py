@@ -28,7 +28,7 @@ def timestep_colors(n: int) -> list[RGBA]:
 def _pca_proj_to_rgb(proj: NDArray[np.floating], H: int, W: int) -> NDArray[np.floating]:
     """Convert PCA projection to RGB image via sigmoid. Clips to avoid overflow."""
     x = proj.reshape(H, W, 3) * 2.0
-    return 1.0 / (1.0 + np.exp(-np.clip(x, -500, 500)))
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -20, 20)))
 
 
 def fit_pca(features: NDArray[np.floating]) -> PCA:
