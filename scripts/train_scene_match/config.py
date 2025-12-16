@@ -19,7 +19,7 @@ class Config:
     ckpt_dir: Path = Path("checkpoints")
     # Model (uses AVPConfig defaults, only override scene_grid_size)
     avp: AVPConfig = field(default_factory=lambda: AVPConfig(scene_grid_size=64))
-    freeze_inner_backbone: bool = True
+    freeze_inner_backbone: bool = False
     # Grid sizes (randomly sampled each step)
     grid_sizes: tuple[int, ...] = (16, 32, 64)
     # Training
