@@ -80,7 +80,7 @@ def viz_and_log(
     G = avp.cfg.glimpse_grid_size
 
     with torch.inference_mode():
-        outputs, _, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
+        outputs, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
         l1_losses = [l1_loss(out.scene, target).item() for out in outputs]
         mse_losses = [mse_loss(out.scene, target).item() for out in outputs]
 

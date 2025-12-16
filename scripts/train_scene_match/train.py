@@ -67,14 +67,11 @@ def init_survival_batch(
     init_imgs = torch.cat(init_imgs_list, dim=0)[:batch_size]
     init_targets = torch.cat(init_targets_list, dim=0)[:batch_size]
     hidden_init = avp._init_hidden(batch_size, None)
-    local_init = (
-        avp.local_init.expand(batch_size, -1, -1) if avp.local_init is not None else None
-    )
 
     log.info(
         f"Survival batch initialized: images={init_imgs.shape}, targets={init_targets.shape}"
     )
-    return SurvivalBatch.init(init_imgs, init_targets, hidden_init, local_init)
+    return SurvivalBatch.init(init_imgs, init_targets, hidden_init)
 
 
 def train(cfg: Config, trial: optuna.Trial) -> float:
@@ -193,12 +190,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             random_viewpoint(stage.batch_size, cfg.device, min_scale, max_scale)
             for _ in range(cfg.n_viewpoints_per_step)
         ]
-        loss, final_hidden, final_local = avp.forward_loss(
+        loss, final_hidden = avp.forward_loss(
             state.images,
             viewpoints,
             state.targets,
-            state.hidden,
-            state.local_prev,
+            hidden=state.hidden,
             loss_fn=loss_fn,
         )
 
@@ -223,9 +219,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             ema_loss = ema_loss_t.item()
             grad_norm = grad_norm_t.item()
             lr = scheduler.get_last_lr()[0]
-            # Log actual gate values (sigmoid of logits), not raw logits
             scene_gate_mean = torch.sigmoid(avp.scene_temporal_gate).mean().item()
-            metrics = {
+            exp.log_metrics({
                 f"grid{G}/train/loss": ema_loss,
                 "train/loss": ema_loss,
                 "train/grad_norm": grad_norm,
@@ -233,10 +228,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 "train/grid_size": G,
                 "train/scene_temporal_gate_mean": scene_gate_mean,
                 "train/spatial_hidden_init_norm": avp.spatial_hidden_init.norm().item(),
-            }
-            if avp.local_temporal_gate is not None:
-                metrics["train/local_temporal_gate_mean"] = torch.sigmoid(avp.local_temporal_gate).mean().item()
-            exp.log_metrics(metrics, step=step)
+            }, step=step)
             pbar.set_postfix_str(
                 f"G={G} loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}"
             )
@@ -284,18 +276,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
         # Fresh ratio survival: permute batch, replace first K with fresh
         hidden_init = avp._init_hidden(stage.fresh_count, None)
-        local_init = (
-            avp.local_init.expand(stage.fresh_count, -1, -1)
-            if avp.local_init is not None
-            else None
-        )
         states[G] = state.step(
-            fresh_imgs,
-            fresh_targets,
-            final_hidden,
-            final_local,
-            hidden_init,
-            local_init,
+            fresh_images=fresh_imgs,
+            fresh_targets=fresh_targets,
+            next_hidden=final_hidden,
+            hidden_init=hidden_init,
         )
 
     # Final checkpoint

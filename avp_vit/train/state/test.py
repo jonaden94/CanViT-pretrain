@@ -10,12 +10,11 @@ class TestSurvivalBatch:
         B, C, H, W, D, G = 4, 3, 64, 64, 128, 16
         images = torch.randn(B, C, H, W)
         targets = torch.randn(B, G * G, D)
-        hidden_init = torch.randn(B, G * G, D)
-        state = SurvivalBatch.init(images, targets, hidden_init, None)
+        hidden = torch.randn(B, G * G, D)
+        state = SurvivalBatch.init(images, targets, hidden)
         assert state.images is images
         assert state.targets is targets
-        assert state.hidden is hidden_init
-        assert state.local_prev is None
+        assert state.hidden is hidden
 
     def test_step_shapes(self) -> None:
         B, K, C, H, W, D, G = 4, 2, 3, 64, 64, 128, 16
@@ -23,45 +22,38 @@ class TestSurvivalBatch:
             torch.randn(B, C, H, W),
             torch.randn(B, G * G, D),
             torch.randn(B, G * G, D),
-            None,
         )
 
         new_state = state.step(
             fresh_images=torch.randn(K, C, H, W),
             fresh_targets=torch.randn(K, G * G, D),
             next_hidden=torch.randn(B, G * G, D),
-            next_local_prev=None,
             hidden_init=torch.randn(K, G * G, D),
-            local_init=None,
         )
         assert new_state.images.shape == (B, C, H, W)
         assert new_state.targets.shape == (B, G * G, D)
-        assert new_state.hidden is not None
         assert new_state.hidden.shape == (B, G * G, D)
-        assert new_state.local_prev is None
 
     def test_fresh_count_equals_batch_resets_all(self) -> None:
         """K=B means all items are replaced."""
         B, C, H, W, D, G = 4, 3, 64, 64, 128, 16
         old_images = torch.randn(B, C, H, W)
         old_targets = torch.randn(B, G * G, D)
-        state = SurvivalBatch.init(old_images, old_targets, torch.randn(B, G * G, D), None)
+        state = SurvivalBatch.init(old_images, old_targets, torch.randn(B, G * G, D))
 
         fresh_images = torch.randn(B, C, H, W)
         fresh_targets = torch.randn(B, G * G, D)
         hidden_init = torch.randn(B, G * G, D)
 
         new_state = state.step(
-            fresh_images, fresh_targets,
+            fresh_images=fresh_images,
+            fresh_targets=fresh_targets,
             next_hidden=torch.randn(B, G * G, D),
-            next_local_prev=None,
             hidden_init=hidden_init,
-            local_init=None,
         )
         # All items replaced (though permuted)
         assert torch.equal(new_state.images, fresh_images)
         assert torch.equal(new_state.targets, fresh_targets)
-        assert new_state.hidden is not None
         assert torch.equal(new_state.hidden, hidden_init)
 
     def test_hidden_detached(self) -> None:
@@ -71,44 +63,15 @@ class TestSurvivalBatch:
             torch.randn(B, C, H, W),
             torch.randn(B, G * G, D),
             torch.randn(B, G * G, D),
-            None,
         )
         next_hidden = torch.randn(B, G * G, D, requires_grad=True)
         new_state = state.step(
-            torch.randn(K, C, H, W),
-            torch.randn(K, G * G, D),
-            next_hidden,
-            next_local_prev=None,
+            fresh_images=torch.randn(K, C, H, W),
+            fresh_targets=torch.randn(K, G * G, D),
+            next_hidden=next_hidden,
             hidden_init=torch.randn(K, G * G, D),
-            local_init=None,
         )
-        assert new_state.hidden is not None
         assert not new_state.hidden.requires_grad
-
-    def test_local_prev_handled(self) -> None:
-        """local_prev is properly handled when use_local_temporal=True."""
-        B, K, C, H, W, D, G, N = 4, 2, 3, 64, 64, 128, 16, 10
-        state = SurvivalBatch.init(
-            torch.randn(B, C, H, W),
-            torch.randn(B, G * G, D),
-            torch.randn(B, G * G, D),
-            torch.randn(B, N, D),
-        )
-
-        next_local_prev = torch.randn(B, N, D, requires_grad=True)
-        local_init = torch.randn(K, N, D)
-
-        new_state = state.step(
-            torch.randn(K, C, H, W),
-            torch.randn(K, G * G, D),
-            torch.randn(B, G * G, D),
-            next_local_prev=next_local_prev,
-            hidden_init=torch.randn(K, G * G, D),
-            local_init=local_init,
-        )
-        assert new_state.local_prev is not None
-        assert new_state.local_prev.shape == (B, N, D)
-        assert not new_state.local_prev.requires_grad  # detached
 
     def test_permutation_is_random(self) -> None:
         """Different calls produce different permutations."""
@@ -118,18 +81,15 @@ class TestSurvivalBatch:
             images,
             torch.randn(B, G * G, D),
             torch.randn(B, G * G, D),
-            None,
         )
 
         results = []
         for _ in range(5):
             new_state = state.step(
-                torch.zeros(K, C, H, W),
-                torch.randn(K, G * G, D),
-                torch.randn(B, G * G, D),
-                None,
-                torch.randn(K, G * G, D),
-                None,
+                fresh_images=torch.zeros(K, C, H, W),
+                fresh_targets=torch.randn(K, G * G, D),
+                next_hidden=torch.randn(B, G * G, D),
+                hidden_init=torch.randn(K, G * G, D),
             )
             # Fresh images are zeros, survivors have original index values
             survivor_order = new_state.images[K:, 0, 0, 0].tolist()
@@ -146,30 +106,24 @@ class TestSurvivalBatch:
             torch.randn(B, C, H, W),
             torch.randn(B, G * G, D),
             torch.randn(B, N_REGISTERS + G * G, D),
-            None,
         )
 
         # Matching shapes - should work
         new_state = state.step(
-            torch.randn(K, C, H, W),
-            torch.randn(K, G * G, D),
-            torch.randn(B, N_REGISTERS + G * G, D),
-            None,
-            torch.randn(K, N_REGISTERS + G * G, D),
-            None,
+            fresh_images=torch.randn(K, C, H, W),
+            fresh_targets=torch.randn(K, G * G, D),
+            next_hidden=torch.randn(B, N_REGISTERS + G * G, D),
+            hidden_init=torch.randn(K, N_REGISTERS + G * G, D),
         )
-        assert new_state.hidden is not None
         assert new_state.hidden.shape == (B, N_REGISTERS + G * G, D)
 
         # Mismatched - should fail
         try:
             state.step(
-                torch.randn(K, C, H, W),
-                torch.randn(K, G * G, D),
-                torch.randn(B, N_REGISTERS + G * G, D),
-                None,
-                torch.randn(K, G * G, D),  # Wrong shape!
-                None,
+                fresh_images=torch.randn(K, C, H, W),
+                fresh_targets=torch.randn(K, G * G, D),
+                next_hidden=torch.randn(B, N_REGISTERS + G * G, D),
+                hidden_init=torch.randn(K, G * G, D),  # Wrong shape!
             )
             assert False, "Should have raised"
         except RuntimeError:
