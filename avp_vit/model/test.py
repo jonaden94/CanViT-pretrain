@@ -121,7 +121,7 @@ def test_forward_shapes():
 
 
 def test_layer_scale_init():
-    cfg = AVPConfig(scene_grid_size=4, layer_scale_init=0.5, n_scene_registers=0)
+    cfg = AVPConfig(scene_grid_size=4, layer_scale_init=0.5, gating="none", n_scene_registers=0)
     backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
@@ -536,6 +536,7 @@ def test_context_gradient_flow():
         scene_grid_size=4,
         glimpse_grid_size=3,
         layer_scale_init=1.0,
+        gating="none",
         n_scene_registers=0,
     )
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
@@ -563,6 +564,7 @@ def test_context_influences_scene():
         scene_grid_size=4,
         glimpse_grid_size=3,
         layer_scale_init=1.0,
+        gating="none",
         n_scene_registers=0,
     )
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)

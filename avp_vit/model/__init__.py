@@ -81,10 +81,10 @@ class AVPConfig:
     glimpse_grid_size: int = 7
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
     layer_scale_init: float = 1e-4  # Init for LayerScale / gate_init
-    use_output_proj: bool = False
+    use_output_proj: bool = True
     use_output_proj_norm: bool = False  # LayerNorm before Linear in output_proj
     gradient_checkpointing: bool = True  # Checkpoint at timestep boundaries
-    gating: GatingMode = "none"  # none=LayerScale, cheap=1 attn+Linear, full=2 attn
+    gating: GatingMode = "cheap"  # none=LayerScale, cheap=1 attn+Linear, full=2 attn
     adapter_stride: int = 2  # Apply read/write adapters every N backbone blocks
     attention: AttentionConfig = field(default_factory=AttentionConfig)
 
