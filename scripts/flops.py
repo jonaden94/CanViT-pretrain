@@ -237,42 +237,42 @@ def main() -> None:
     print()
 
     # Table header
-    print(f"{'Scene':<10} {'Teacher':<12} {'AVP':<12} {'AVP+V_MLP':<12} {'AVP convex':<12} {'AVP cvx+MLP':<12}")
-    print(f"{'grid':<10} {'(scene)':<12} {'(base)':<12} {'(2x exp)':<12} {'(2x attn)':<12} {'(both)':<12}")
+    print(f"{'Scene':<10} {'Teacher':<12} {'AVP':<12} {'AVP':<12} {'AVP cvx':<12} {'AVP cvx':<12}")
+    print(f"{'grid':<10} {'(scene)':<12} {'(V=Lin)':<12} {'(V=MLP)':<12} {'(V=Lin)':<12} {'(V=MLP)':<12}")
     print("-" * 82)
 
     for scene_grid in SCENE_GRIDS:
         t_scene = teacher_flops(backbone, scene_grid**2)
 
-        # Base AVP (no convex, no V MLP)
+        # Base AVP (no convex, V=Linear)
         avp_base = AVPViT(backbone, AVPConfig(
             scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
             n_scene_registers=N_REGISTERS, use_output_proj=True,
+            attention=AttentionConfig(write_v_expansion=None),
         ))
         a_base = avp_step_flops(avp_base, backbone)
 
-        # AVP with V MLP (2x expansion)
+        # AVP with V MLP (2x expansion, the default)
         avp_mlp = AVPViT(backbone, AVPConfig(
             scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
             n_scene_registers=N_REGISTERS, use_output_proj=True,
-            attention=AttentionConfig(write_v_expansion=2),
         ))
         a_mlp = avp_step_flops(avp_mlp, backbone)
 
-        # AVP convex (no V MLP)
+        # AVP convex (V=Linear)
         avp_cvx = AVPViT(backbone, AVPConfig(
             scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
             n_scene_registers=N_REGISTERS, use_output_proj=True,
             gating="full", layer_scale_init=1e-3,
+            attention=AttentionConfig(write_v_expansion=None),
         ))
         a_cvx = avp_step_flops(avp_cvx, backbone)
 
-        # AVP convex + V MLP
+        # AVP convex + V MLP (default)
         avp_cvx_mlp = AVPViT(backbone, AVPConfig(
             scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
             n_scene_registers=N_REGISTERS, use_output_proj=True,
             gating="full", layer_scale_init=1e-3,
-            attention=AttentionConfig(write_v_expansion=2),
         ))
         a_cvx_mlp = avp_step_flops(avp_cvx_mlp, backbone)
 
@@ -285,13 +285,14 @@ def main() -> None:
             f"{fmt(a_cvx_mlp.total):<12}"
         )
 
+    default_v_exp = AttentionConfig().write_v_expansion
     print()
     print("Legend:")
     print("  Teacher (scene)   = Full ViT at scene resolution")
-    print("  AVP (base)        = LayerScale, V=Linear")
-    print("  AVP+V_MLP         = LayerScale, V=MLP(2x expansion, SiLU)")
-    print("  AVP convex        = ConvexGating (2x attention), V=Linear")
-    print("  AVP cvx+MLP       = ConvexGating + V=MLP")
+    print("  AVP (V=Lin)       = LayerScale gating, V=Linear")
+    print(f"  AVP (V=MLP)       = LayerScale gating, V=MLP({default_v_exp}x, SiLU) [default]")
+    print("  AVP cvx (V=Lin)   = ConvexGating (2x attention), V=Linear")
+    print(f"  AVP cvx (V=MLP)   = ConvexGating (2x attention), V=MLP({default_v_exp}x, SiLU) [default]")
     print()
 
     # Detailed breakdown for largest scene
