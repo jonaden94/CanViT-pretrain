@@ -81,7 +81,7 @@ def viz_and_log(
     show_hidden: bool = True,
     log_spatial_stats: bool = True,
     log_curves: bool = True,
-    loss_type: Literal["l1", "mse"] = "mse",
+    loss_type: Literal["l1", "mse", "cos"] = "mse",
     log_register_curves: bool = False,
 ) -> tuple[list[float], list[float]]:
     """Run forward trajectory and log visualization.
@@ -349,7 +349,7 @@ def eval_and_log(
     prefix: str = "val",
     log_spatial_stats: bool = True,
     log_curves: bool = True,
-    loss_type: Literal["l1", "mse"] = "mse",
+    loss_type: Literal["l1", "mse", "cos"] = "mse",
 ) -> float:
     """Full evaluation with PCA visualization (expensive). Returns final scene l1 loss (normalized).
 

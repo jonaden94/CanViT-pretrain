@@ -8,7 +8,7 @@ import comet_ml
 import optuna
 import torch
 from torch import Tensor, nn
-from torch.nn.functional import l1_loss, mse_loss
+from torch.nn.functional import cosine_similarity, l1_loss, mse_loss
 from tqdm import tqdm
 from ymc.lr import get_linear_scaled_lr
 from ytch.model import count_parameters
@@ -179,7 +179,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         compile_teacher(teacher)
         compile_avp(avp)
 
-    loss_fn = {"l1": l1_loss, "mse": mse_loss}[cfg.loss]
+    def cos_loss(pred: Tensor, target: Tensor) -> Tensor:
+        return (1 - cosine_similarity(pred, target, dim=-1)).mean()
+
+    loss_fn = {"l1": l1_loss, "mse": mse_loss, "cos": cos_loss}[cfg.loss]
     log.info(f"Loss function: {cfg.loss}")
 
     # Create resolution stages and resources
@@ -340,8 +343,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 "train/grad_norm": grad_norm,
                 "train/lr": lr,
                 "train/grid_size": G,
-                "train/spatial_hidden_init_norm": avp.spatial_hidden_init.norm().item(),
-                "train/cls_hidden_init_norm": avp.cls_hidden_init.norm().item(),
+                "train/spatial_hidden_init_norm": avp.hidden_stream.spatial_init.norm().item(),
+                "train/cls_hidden_init_norm": avp.hidden_stream.cls_init.norm().item(),
             }
             if avp.cls_proj is not None:
                 cls_linear = avp.cls_proj[1]

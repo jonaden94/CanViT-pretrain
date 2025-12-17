@@ -42,7 +42,7 @@ class Config:
     # Training
     num_workers: int = 8
     crop_scale_min: float = 0.4
-    loss: Literal["l1", "mse"] = "mse"
+    loss: Literal["l1", "mse", "cos"] = "mse"
     # Logging
     log_every: int = 20
     val_every: int = 250
