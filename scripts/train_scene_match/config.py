@@ -42,7 +42,7 @@ class Config:
     loss: Literal["l1", "mse"] = "mse"
     # Logging
     log_every: int = 20
-    val_every: int = 50
+    val_every: int = 500
     curve_every: int = 1000  # Curves less often than val (Comet limit: 1000/experiment)
     ckpt_every: int = 1000
     log_spatial_stats: bool = True  # Log target/pred spatial mean/std
