@@ -4,7 +4,7 @@
 
 Adapting `scripts/train_scene_match/` to run on Alliance Canada with ImageNet-21k (IN21k), which has **no train/val split**.
 
-**Problem**: IN21k is at `/project/.../winter21_whole/` with 13M+ images in 19k class folders. Read-only filesystem, limited inodes. Need to split into train/val programmatically.
+**Problem**: IN21k is at `/datashare/imagenet/winter21_whole` with 13M+ images in 19k class folders. NFS3 mount, read-only, limited inodes. Need to split into train/val programmatically.
 
 **Solution**: Parquet index files listing which images belong to train vs val. Fast loading (~0.5s) vs walking filesystem (~20-30 min).
 
@@ -147,8 +147,8 @@ uv run python -m scripts.train_scene_match \
 **IN21k**:
 ```bash
 uv run python -m scripts.train_scene_match \
-    --train-dir /project/.../winter21_whole \
-    --val-dir /project/.../winter21_whole \
+    --train-dir /datashare/imagenet/winter21_whole \
+    --val-dir /datashare/imagenet/winter21_whole \
     --index-dir ./indices
 ```
 
@@ -177,7 +177,18 @@ uv run pytest avp_vit/train/data/indexed/test.py -v
 
 ## SLURM Notes
 
-- Copy ImageNet to `$SLURM_TMPDIR` for fast I/O
+- IN21k path: `/datashare/imagenet/winter21_whole` (NFS3 mount)
+- May have access issues if you belong to >16 groups
+- Store indices in `$SCRATCH` or `$PROJECT` (persist across jobs)
 - `COMET_OFFLINE_DIRECTORY=$SCRATCH/comet_offline`
 - `TORCH_COMPILE_CACHE_DIR=$SCRATCH/torch_compile_cache`
 - All config overridable via CLI (tyro)
+
+## Smoke Test
+
+```bash
+uv run python scripts/smoke_test_indexed.py \
+    --root /datashare/imagenet/winter21_whole \
+    --index-dir $SCRATCH/indices \
+    --num-batches 5
+```

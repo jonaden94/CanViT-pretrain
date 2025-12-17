@@ -15,6 +15,7 @@ dependencies = [
     "comet-ml>=3.55.0",
     "tyro>=1.0.1",
     "rich>=14.2.0",
+    "pyarrow>=22.0.0",
 ]
 
 [build-system]
