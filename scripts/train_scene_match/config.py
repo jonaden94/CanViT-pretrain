@@ -28,7 +28,7 @@ class Config:
     n_viewpoints_per_step: int = (
         2  # Inner loop viewpoints (>=2 for length generalization)
     )
-    warmup_steps: int = 1000
+    warmup_steps: int = 5000
     grad_clip: float = 1.0
     n_steps: int = 200000
     # Data
