@@ -467,10 +467,11 @@ def plot_multistep_pca(
         axes[row, C_LOCAL_TEACHER].set_title("Local Teacher" if t == 0 else "")
         axes[row, C_LOCAL_TEACHER].axis("off")
 
-        # Col: Cropped Teacher (uses local teacher's PCA for direct comparison)
+        # Col: Cropped Teacher (own PCA - raw crop from full-image teacher)
         if show_cropped:
             assert C_CROPPED_TEACHER is not None and locals_teacher_cropped is not None
-            cropped_rgb = pca_rgb(pca_local_teacher, locals_teacher_cropped[t], G, G)
+            pca_cropped = fit_pca(locals_teacher_cropped[t])
+            cropped_rgb = pca_rgb(pca_cropped, locals_teacher_cropped[t], G, G)
             axes[row, C_CROPPED_TEACHER].imshow(cropped_rgb)
             axes[row, C_CROPPED_TEACHER].set_title("Cropped Teacher" if t == 0 else "")
             axes[row, C_CROPPED_TEACHER].axis("off")

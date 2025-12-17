@@ -219,11 +219,12 @@ def viz_and_log(
 
         # Cropped teacher: sample from full-image teacher at viewpoint positions
         # Shows "what teacher thinks at these positions with FULL image context"
+        # No mean_map centering - this is raw teacher, PCA handles its own centering
         target_spatial = target.view(target.shape[0], scene_grid_size, scene_grid_size, -1).permute(0, 3, 1, 2)
         locals_teacher_cropped = [
-            (sample_at_viewpoint(target_spatial, vp, glimpse_grid_size)[sample_idx]  # [D, G, G]
-             .permute(1, 2, 0).reshape(-1, target.shape[-1])  # [G², D]
-             - avp.sample_mean_map_at_viewpoint(vp)).cpu().float().numpy()
+            sample_at_viewpoint(target_spatial, vp, glimpse_grid_size)[sample_idx]  # [D, G, G]
+            .permute(1, 2, 0).reshape(-1, target.shape[-1])  # [G², D]
+            .cpu().float().numpy()
             for vp in viewpoints
         ]
 
