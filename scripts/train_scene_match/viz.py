@@ -221,8 +221,8 @@ def viz_and_log(
         # Shows "what teacher thinks at these positions with FULL image context"
         target_spatial = target.view(target.shape[0], scene_grid_size, scene_grid_size, -1).permute(0, 3, 1, 2)
         locals_teacher_cropped = [
-            (sample_at_viewpoint(target_spatial, vp, glimpse_grid_size)
-             .permute(0, 2, 3, 1).reshape(-1, target.shape[-1])[sample_idx]  # back to [G², D], pick sample
+            (sample_at_viewpoint(target_spatial, vp, glimpse_grid_size)[sample_idx]  # [D, G, G]
+             .permute(1, 2, 0).reshape(-1, target.shape[-1])  # [G², D]
              - avp.sample_mean_map_at_viewpoint(vp)).cpu().float().numpy()
             for vp in viewpoints
         ]
