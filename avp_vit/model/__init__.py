@@ -43,23 +43,6 @@ def _make_gated_attn(
     raise ValueError(f"Unknown gating mode: {gating!r}")
 
 
-def _spatial_norm(x: Tensor, eps: float = 1e-6) -> Tensor:
-    """Normalize each dimension independently across spatial positions.
-
-    Args:
-        x: [B, N, D] tensor (N = spatial tokens)
-
-    Returns:
-        [B, N, D] tensor where each (b, :, d) has mean≈0, std≈1
-    """
-    B, N, D = x.shape
-    mean = x.mean(dim=1, keepdim=True)
-    std = x.std(dim=1, keepdim=True)
-    assert mean.shape == (B, 1, D)
-    assert std.shape == (B, 1, D)
-    return (x - mean) / (std + eps)
-
-
 # Type variable for forward_reduce accumulator
 T = TypeVar("T")
 
@@ -487,15 +470,17 @@ class AVPViT(nn.Module):
             # Scene loss (always)
             scene_loss = scene_loss + loss_fn(out.scene, target)
 
-            # Local loss (if enabled) - spatially normalized
+            # Local loss (if enabled) - normalized using target's spatial stats
             if self.local_proj is not None:
                 local_pred = self.compute_local(out.local, vp)
                 G_glimpse = self.cfg.glimpse_grid_size
                 cropped = sample_at_viewpoint(target_spatial, vp, G_glimpse)
                 cropped = cropped.permute(0, 2, 3, 1).reshape(B, -1, D)
-                # Spatial norm: zero-mean, unit-std per (batch, dim) across spatial positions
-                local_pred_norm = _spatial_norm(local_pred)
-                cropped_norm = _spatial_norm(cropped)
+                # Normalize both using target's per-dim stats across spatial positions
+                tgt_mean = cropped.mean(dim=1, keepdim=True)
+                tgt_std = cropped.std(dim=1, keepdim=True) + 1e-6
+                local_pred_norm = (local_pred - tgt_mean) / tgt_std
+                cropped_norm = (cropped - tgt_mean) / tgt_std
                 step_local = loss_fn(local_pred_norm, cropped_norm)
                 local_loss_acc = step_local if local_loss_acc is None else local_loss_acc + step_local
 
