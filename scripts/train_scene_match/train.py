@@ -326,6 +326,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 "train/grid_size": G,
                 "train/spatial_hidden_init_norm": avp.spatial_hidden_init.norm().item(),
             }
+            if avp.cls_proj is not None:
+                cls_linear = avp.cls_proj[1]
+                assert isinstance(cls_linear, torch.nn.Linear)
+                metrics["train/cls_proj_weight_norm"] = cls_linear.weight.norm().item()
             if losses.local is not None:
                 metrics[f"grid{G}/train/local_loss"] = ema_local
                 metrics["train/local_loss"] = ema_local
