@@ -11,3 +11,6 @@
   - ybml.correctness.assert_shape
   - assert xxx is not None
 - `uv run ipython -c` is your friend
+- `COMET_API_KEY=$(cat ~/comet_api_key.txt) uv run ...`
+- Do not answer without having the relevant facts.
+- Before you investigate something, and as you go about it, explicitly state to the user what your hypotheses, reasoning, and intermediate observations are.
