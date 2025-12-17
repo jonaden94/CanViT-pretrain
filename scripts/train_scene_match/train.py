@@ -339,7 +339,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         if step % cfg.val_every == 0:
             val_images = val_loader.next_batch().to(cfg.device)
             val_loss = val_metrics_only(
-                exp, step, avp, compute_raw_targets, normalizer, val_images, G, f"grid{G}/val",
+                exp, step, avp, compute_raw_targets, normalizer, cls_normalizer,
+                val_images, G, f"grid{G}/val",
             )
             exp.log_metric("val/loss", val_loss, step=step)
 
@@ -361,7 +362,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
             val_images = val_loader.next_batch().to(cfg.device)
             eval_and_log(
-                exp, step, avp, teacher, compute_raw_targets, normalizer, val_images, G, f"grid{G}/val",
+                exp, step, avp, teacher, compute_raw_targets, normalizer, cls_normalizer,
+                val_images, G, f"grid{G}/val",
                 log_spatial_stats=cfg.log_spatial_stats,
                 log_curves=(step % cfg.curve_every == 0),
                 loss_type=cfg.loss,
