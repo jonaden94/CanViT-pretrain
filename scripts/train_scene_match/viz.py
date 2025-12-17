@@ -282,8 +282,8 @@ def viz_and_log(
     )
     log_figure(exp, fig_pca, f"{prefix}/pca", step)
 
-    fig_traj = plot_trajectory(full_img, boxes, names)
-    log_figure(exp, fig_traj, f"{prefix}/trajectory", step)
+    # fig_traj = plot_trajectory(full_img, boxes, names)
+    # log_figure(exp, fig_traj, f"{prefix}/trajectory", step)
 
     return l1_losses, mse_losses
 
