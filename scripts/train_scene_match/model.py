@@ -89,7 +89,7 @@ def create_avp(
     glimpse_px = cfg.avp.glimpse_grid_size * patch_size
 
     for p in student_backbone.parameters():
-        p.requires_grad = not cfg.freeze_inner_backbone
+        p.requires_grad = not cfg.freeze_student_backbone
 
     avp = AVPViT(student_backbone, cfg.avp, output_dim=teacher_embed_dim).to(cfg.device)
 
@@ -97,7 +97,7 @@ def create_avp(
         f"AVP created: scene={cfg.avp.scene_grid_size}x{cfg.avp.scene_grid_size} ({scene_px}px), "
         f"glimpse={cfg.avp.glimpse_grid_size}x{cfg.avp.glimpse_grid_size} ({glimpse_px}px), "
         f"student_dim={student_backbone.embed_dim} -> output_dim={teacher_embed_dim}, "
-        f"backbone_frozen={cfg.freeze_inner_backbone}"
+        f"freeze_student_backbone={cfg.freeze_student_backbone}"
     )
     return avp
 

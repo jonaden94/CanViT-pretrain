@@ -12,21 +12,20 @@ from avp_vit import AVPConfig
 
 @dataclass
 class Config:
-    # Model architectures (required - no defaults to force explicit choice)
-    teacher_model: str = "dinov3_vits16"  # e.g., "dinov3_vits16", "dinov3_vitb16"
-    student_model: str = "dinov3_vits16"  # e.g., "dinov3_vits16"
-    # Checkpoints
+    # Teacher
+    teacher_model: str = "dinov3_vits16"
     teacher_ckpt: Path = Path("dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
-    student_ckpt: Path | None = None  # None = random init with student_model template
-    # Paths
+    # Student
+    student_model: str = "dinov3_vits16"
+    student_ckpt: Path | None = None  # None = random init
+    freeze_student_backbone: bool = False
+    # AVP
+    avp: AVPConfig = field(default_factory=lambda: AVPConfig(scene_grid_size=64))
+    grid_sizes: tuple[int, ...] = (16, 32, 64)
+    # Data
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
     ckpt_dir: Path = Path("checkpoints")
-    # Model (uses AVPConfig defaults, only override scene_grid_size)
-    avp: AVPConfig = field(default_factory=lambda: AVPConfig(scene_grid_size=64))
-    freeze_inner_backbone: bool = False
-    # Grid sizes (randomly sampled each step)
-    grid_sizes: tuple[int, ...] = (16, 32, 64)
     # Training
     n_viewpoints_per_step: int = (
         2  # Inner loop viewpoints (>=2 for length generalization)
