@@ -208,12 +208,13 @@ def viz_and_log(
         ]
 
         if target_norm is not None and target_norm.initialized:
+            g = avp.cfg.glimpse_grid_size
             locals_avp = [
-                target_norm.normalize_at_viewpoint(feat, vp, scene_grid_size).cpu().float().numpy()
+                target_norm.normalize_at_viewpoint(feat, vp, g).cpu().float().numpy()
                 for feat, vp in zip(locals_avp_raw, viewpoints, strict=True)
             ]
             locals_teacher = [
-                target_norm.normalize_at_viewpoint(feat, vp, scene_grid_size).cpu().float().numpy()
+                target_norm.normalize_at_viewpoint(feat, vp, g).cpu().float().numpy()
                 for feat, vp in zip(locals_teacher_raw, viewpoints, strict=True)
             ]
         else:
