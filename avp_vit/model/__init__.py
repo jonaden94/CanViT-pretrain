@@ -78,7 +78,6 @@ class AVPConfig:
     gating: GatingMode = "none"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
     adapter_stride: int = 4  # Adapters every N backbone blocks (reference: 1)
     attention: AttentionConfig = field(default_factory=AttentionConfig)
-    mean_map_grid_size: int = 32  # Learnable spatial mean map size
     use_local_loss: bool = False  # Enable local loss (supervise glimpse predictions)
     use_cls_loss: bool = True  # Enable CLS token loss (supervise CLS predictions)
 
@@ -100,7 +99,6 @@ class AVPViT(nn.Module):
         nn.Parameter | None
     )  # [n_registers, D] per-position + per-dim
     spatial_temporal_gate: nn.Parameter | None  # [D] per-dim only
-    mean_map: nn.Parameter  # [1, teacher_dim, G_proto, G_proto]
     read_attn: nn.ModuleList
     write_attn: nn.ModuleList
     scene_proj: nn.Sequential
@@ -216,11 +214,6 @@ class AVPViT(nn.Module):
         else:
             self.cls_proj = None
 
-        # Learnable spatial mean map: scene = mean + residual
-        G_proto = cfg.mean_map_grid_size
-        D = self.teacher_dim
-        self.mean_map = nn.Parameter(torch.zeros(1, D, G_proto, G_proto))
-
     def _get_base_hidden(self, B: int, scene_grid_size: int) -> Tensor:
         """Base hidden: [scene_registers | spatial], shape [B, n_registers + G*G, D]."""
         n_spatial = scene_grid_size**2
@@ -265,38 +258,9 @@ class AVPViT(nn.Module):
         """Extract spatial from hidden: [B, n_registers + G*G, D] -> [B, G*G, D]."""
         return hidden[:, self.n_registers :]
 
-    def interpolate_mean_map(self, scene_grid_size: int) -> Tensor:
-        """Interpolate mean_map to target grid size. Returns [1, G*G, D]."""
-        G_proto = self.cfg.mean_map_grid_size
-        D = self.teacher_dim
-        G = scene_grid_size
-        if G == G_proto:
-            m = self.mean_map
-        else:
-            m = F.interpolate(
-                self.mean_map, size=(G, G), mode="bilinear", align_corners=False
-            )
-        assert m.shape == (1, D, G, G)
-        mean = m.flatten(2).transpose(1, 2)  # [1, G*G, D]
-        assert mean.shape == (1, G * G, D)
-        return mean
-
-    def sample_mean_map_at_viewpoint(self, viewpoint: Viewpoint) -> Tensor:
-        """Sample mean_map at viewpoint positions. Returns [B, G_glimpse², D]."""
-        B = viewpoint.centers.shape[0]
-        G = self.cfg.glimpse_grid_size
-        D = self.teacher_dim
-        m_batch = self.mean_map.expand(B, -1, -1, -1)
-        m = sample_at_viewpoint(m_batch, viewpoint, G)  # [B, D, G, G]
-        mean = m.permute(0, 2, 3, 1).reshape(B, G * G, D)  # [B, G², D]
-        return mean
-
     def compute_scene(self, hidden: Tensor) -> Tensor:
-        """Extract spatial tokens from hidden, project to teacher_dim: mean + residual."""
-        G = self._infer_scene_grid_size(hidden)
-        residual = self.scene_proj(self.get_spatial(hidden))
-        mean = self.interpolate_mean_map(G)
-        return mean + residual
+        """Extract spatial tokens from hidden, project to teacher_dim."""
+        return self.scene_proj(self.get_spatial(hidden))
 
     def compute_local(self, local: Tensor, viewpoint: Viewpoint) -> Tensor:
         """Project local patch tokens to teacher_dim."""
