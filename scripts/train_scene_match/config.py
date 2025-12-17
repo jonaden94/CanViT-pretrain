@@ -21,14 +21,14 @@ class Config:
     freeze_student_backbone: bool = False
     # AVP
     avp: AVPConfig = field(default_factory=AVPConfig)
-    grid_sizes: tuple[int, ...] = (96,)
-    batch_size: int = 16  # Max batch size (at max grid size)
-    ref_lr: float = 1e-5
+    grid_sizes: tuple[int, ...] = (64,)
+    batch_size: int = 8  # Max batch size (at max grid size)
+    ref_lr: float = 2e-5
     weight_decay: float = 1e-4
     n_viewpoints_per_step: int = (
         2  # Inner loop viewpoints (>=2 for length generalization)
     )
-    warmup_steps: int = 5000
+    warmup_steps: int = 2000
     grad_clip: float = 1.0
     n_steps: int = 200000
     # Data
