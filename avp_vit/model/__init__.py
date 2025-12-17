@@ -262,7 +262,9 @@ class AVPViT(nn.Module):
         if G == G_proto:
             m = self.mean_map
         else:
-            m = F.interpolate(self.mean_map, size=(G, G), mode="bilinear", align_corners=False)
+            m = F.interpolate(
+                self.mean_map, size=(G, G), mode="bilinear", align_corners=False
+            )
         assert m.shape == (1, D, G, G)
         mean = m.flatten(2).transpose(1, 2)  # [1, G*G, D]
         assert mean.shape == (1, G * G, D)
@@ -287,12 +289,12 @@ class AVPViT(nn.Module):
 
     def compute_local(self, local: Tensor, viewpoint: Viewpoint) -> Tensor:
         """Project local patch tokens to teacher_dim: mean + residual."""
-        assert self.local_proj is not None, "local_proj not initialized (use_local_loss=False)"
+        assert self.local_proj is not None, (
+            "local_proj not initialized (use_local_loss=False)"
+        )
         n_prefix = self.backbone.n_prefix_tokens
         patch_tokens = local[:, n_prefix:]  # [B, G², D_student]
-        residual = self.local_proj(patch_tokens)  # [B, G², D_teacher]
-        mean = self.sample_mean_map_at_viewpoint(viewpoint)
-        return mean + residual
+        return self.local_proj(patch_tokens)  # [B, G², D_teacher]
 
     def _process_glimpse(
         self,
@@ -455,12 +457,12 @@ class AVPViT(nn.Module):
                 cropped = sample_at_viewpoint(target_spatial, vp, G_glimpse)
                 cropped = cropped.permute(0, 2, 3, 1).reshape(B, -1, D)
                 # Normalize both using target's per-dim stats across spatial positions
-                tgt_mean = cropped.mean(dim=1, keepdim=True)
-                tgt_std = cropped.std(dim=1, keepdim=True) + 1e-6
-                local_pred_norm = (local_pred - tgt_mean) / tgt_std
-                cropped_norm = (cropped - tgt_mean) / tgt_std
-                step_local = loss_fn(local_pred_norm, cropped_norm)
-                local_loss_acc = step_local if local_loss_acc is None else local_loss_acc + step_local
+                step_local = loss_fn(local_pred, cropped)
+                local_loss_acc = (
+                    step_local
+                    if local_loss_acc is None
+                    else local_loss_acc + step_local
+                )
 
         losses = LossOutputs(
             scene=scene_loss / n,
@@ -477,7 +479,9 @@ class AVPViT(nn.Module):
     ) -> tuple[list[StepOutput], Tensor]:
         """Collect full StepOutput at each step. Returns (outputs, final_hidden)."""
 
-        def reducer(acc: list[StepOutput], out: StepOutput, _vp: Viewpoint) -> list[StepOutput]:
+        def reducer(
+            acc: list[StepOutput], out: StepOutput, _vp: Viewpoint
+        ) -> list[StepOutput]:
             return [*acc, out]
 
         return self.forward_reduce(
