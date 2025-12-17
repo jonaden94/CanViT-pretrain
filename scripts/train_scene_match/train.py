@@ -48,6 +48,7 @@ def init_survival_batch(
     compute_targets: Callable[[Tensor], Tensor],
     batch_size: int,
     fresh_count: int,
+    scene_grid_size: int,
     device: torch.device,
 ) -> SurvivalBatch:
     """Initialize survival batch by loading fresh_count images at a time."""
@@ -66,7 +67,7 @@ def init_survival_batch(
 
     init_imgs = torch.cat(init_imgs_list, dim=0)[:batch_size]
     init_targets = torch.cat(init_targets_list, dim=0)[:batch_size]
-    hidden_init = avp._init_hidden(batch_size, None)
+    hidden_init = avp.init_hidden(batch_size, scene_grid_size)
 
     log.info(
         f"Survival batch initialized: images={init_imgs.shape}, targets={init_targets.shape}"
@@ -156,13 +157,13 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     log.info("Initializing survival batches for all grid sizes...")
     states: dict[int, SurvivalBatch] = {}
     for G, stage in stages.items():
-        avp.set_scene_grid_size(G)
         states[G] = init_survival_batch(
             avp,
             train_loaders[G],
             target_fns[G],
             stage.batch_size,
             stage.fresh_count,
+            G,
             cfg.device,
         )
 
@@ -179,7 +180,6 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         norm = norms[G]
         train_loader = train_loaders[G]
         val_loader = val_loaders[G]
-        avp.set_scene_grid_size(G)
         compute_targets = target_fns[G]
 
         # Load fresh images
@@ -200,7 +200,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             state.images,
             viewpoints,
             state.targets,
-            hidden=state.hidden,
+            state.hidden,
             loss_fn=loss_fn,
         )
 
@@ -261,7 +261,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             val_images = val_loader.next_batch().to(cfg.device)
             norm.eval()
             val_loss = eval_and_log(
-                exp, step, avp, teacher, compute_targets, val_images, norm, f"grid{G}/val",
+                exp, step, avp, teacher, compute_targets, val_images, G, norm, f"grid{G}/val",
                 log_spatial_stats=cfg.log_spatial_stats,
                 log_curves=(step % cfg.curve_every == 0),
                 loss_type=cfg.loss,
@@ -279,7 +279,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                     raise optuna.TrialPruned()
 
         # Fresh ratio survival: permute batch, replace first K with fresh
-        hidden_init = avp._init_hidden(stage.fresh_count, None)
+        hidden_init = avp.init_hidden(stage.fresh_count, G)
         states[G] = state.step(
             fresh_images=fresh_imgs,
             fresh_targets=fresh_targets,

@@ -28,7 +28,7 @@ def test_curriculum_stages_creation() -> None:
 def test_config_min_scale() -> None:
     """Min viewpoint scale computed correctly from curriculum stages."""
     cfg = Config(
-        avp=AVPConfig(scene_grid_size=64, glimpse_grid_size=7),
+        avp=AVPConfig(glimpse_grid_size=7),
         grid_sizes=(16, 32, 64),
     )
     stages = create_curriculum_stages(cfg, patch_size=14)

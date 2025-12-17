@@ -3,6 +3,7 @@
 import gc
 import io
 import logging
+import math
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
@@ -21,6 +22,14 @@ from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import make_curriculum_eval_viewpoints
 
 log = logging.getLogger(__name__)
+
+
+def _infer_scene_grid_size(target: Tensor) -> int:
+    """Infer scene grid size from target shape [B, G², D]."""
+    n_tokens = target.shape[1]
+    G = int(math.sqrt(n_tokens))
+    assert G * G == n_tokens, f"target has {n_tokens} tokens, not a perfect square"
+    return G
 
 
 def compute_spatial_stats(x: Tensor) -> dict[str, float]:
@@ -68,7 +77,7 @@ def viz_and_log(
     images: Tensor,
     viewpoints: list[Viewpoint],
     target: Tensor,
-    hidden: Tensor | None,
+    hidden: Tensor,
     target_norm: PositionAwareNorm | None = None,
     show_hidden: bool = True,
     log_spatial_stats: bool = True,
@@ -84,7 +93,8 @@ def viz_and_log(
 
     assert isinstance(avp.backbone, DINOv3Backbone)
     avp_backbone = avp.backbone
-    G = avp.cfg.glimpse_grid_size
+    scene_grid_size = _infer_scene_grid_size(target)
+    glimpse_grid_size = avp.cfg.glimpse_grid_size
 
     with torch.inference_mode():
         outputs, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
@@ -92,9 +102,8 @@ def viz_and_log(
         mse_losses = [mse_loss(out.scene, target).item() for out in outputs]
 
         # Compute hidden states for logging and visualization
-        # t=0 = _init_hidden output (before any viewpoint), t=1,2,... = after each viewpoint
-        B = images.shape[0]
-        initial_hidden = avp._init_hidden(B, hidden)  # Matches forward_loss t=0
+        # t=0 = initial hidden before any viewpoint, t=1,2,... = after each viewpoint
+        initial_hidden = avp._apply_temporal_gate(hidden)
 
         if log_curves:
             hiddens = [initial_hidden] + [out.hidden for out in outputs]
@@ -163,7 +172,8 @@ def viz_and_log(
         # Prepare viz data for first sample (initial_hidden already computed above)
         sample_idx = 0
         n_prefix = teacher.n_prefix_tokens
-        H, W = avp.scene_size, avp.scene_size
+        scene_size_px = scene_grid_size * avp.backbone.patch_size
+        H, W = scene_size_px, scene_size_px
         initial_scene = avp.compute_scene(initial_hidden)  # [B, N, D]
 
         full_img = imagenet_denormalize(images[sample_idx].cpu()).numpy()
@@ -199,11 +209,11 @@ def viz_and_log(
 
         if target_norm is not None and target_norm.initialized:
             locals_avp = [
-                target_norm.normalize_at_viewpoint(feat, vp, G).cpu().float().numpy()
+                target_norm.normalize_at_viewpoint(feat, vp, scene_grid_size).cpu().float().numpy()
                 for feat, vp in zip(locals_avp_raw, viewpoints, strict=True)
             ]
             locals_teacher = [
-                target_norm.normalize_at_viewpoint(feat, vp, G).cpu().float().numpy()
+                target_norm.normalize_at_viewpoint(feat, vp, scene_grid_size).cpu().float().numpy()
                 for feat, vp in zip(locals_teacher_raw, viewpoints, strict=True)
             ]
         else:
@@ -226,8 +236,8 @@ def viz_and_log(
         glimpses,
         boxes,
         names,
-        avp.cfg.scene_grid_size,
-        avp.cfg.glimpse_grid_size,
+        scene_grid_size,
+        glimpse_grid_size,
         initial_np,
         hidden_spatials=hidden_spatials,
         initial_hidden_spatial=initial_hidden_spatial,
@@ -247,6 +257,7 @@ def eval_and_log(
     teacher: DINOv3Backbone,
     compute_targets: Callable[[Tensor], Tensor],
     images: Tensor,
+    scene_grid_size: int,
     target_norm: PositionAwareNorm | None = None,
     prefix: str = "val",
     log_spatial_stats: bool = True,
@@ -255,15 +266,15 @@ def eval_and_log(
 ) -> float:
     """Evaluate on one batch with curriculum viewpoints. Returns final L1 loss."""
     B = images.shape[0]
-    G = avp.cfg.scene_grid_size
     g = avp.cfg.glimpse_grid_size
-    viewpoints = make_curriculum_eval_viewpoints(B, G, g, images.device)
+    viewpoints = make_curriculum_eval_viewpoints(B, scene_grid_size, g, images.device)
 
     with torch.inference_mode():
         target = compute_targets(images)
+        hidden = avp.init_hidden(B, scene_grid_size)
 
     l1_losses, mse_losses = viz_and_log(
-        exp, step, prefix, avp, teacher, images, viewpoints, target, None, target_norm,
+        exp, step, prefix, avp, teacher, images, viewpoints, target, hidden, target_norm,
         log_spatial_stats=log_spatial_stats,
         log_curves=log_curves,
         loss_type=loss_type,

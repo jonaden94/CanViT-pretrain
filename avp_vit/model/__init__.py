@@ -1,6 +1,6 @@
 import math
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Literal, NamedTuple, TypeVar, cast, final, override
 
 import torch
@@ -63,7 +63,6 @@ class StepOutput(NamedTuple):
 @final
 @dataclass
 class AVPConfig:
-    scene_grid_size: int
     glimpse_grid_size: int = 7
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
     layer_scale_init: float = 0.01  # Init for LayerScale (reference: 0.01)
@@ -96,7 +95,6 @@ class AVPViT(nn.Module):
     ephemeral_registers: nn.Parameter | None  # [1, n_ephemeral, D]
     spatial_hidden_init: nn.Parameter  # [1, 1, D] -> broadcast to [B, G*G, D]
     scene_temporal_gate: nn.Parameter | None  # [D] gate, or None if disabled
-    scene_positions: Tensor
     read_attn: nn.ModuleList  # Unified API: all handle residual/gating internally
     write_attn: nn.ModuleList
     scene_proj: nn.Sequential  # LayerNorm + Linear: projects to teacher_dim
@@ -104,10 +102,6 @@ class AVPViT(nn.Module):
     @property
     def glimpse_size(self) -> int:
         return self.cfg.glimpse_grid_size * self.backbone.patch_size
-
-    @property
-    def scene_size(self) -> int:
-        return self.cfg.scene_grid_size * self.backbone.patch_size
 
     @property
     def n_scene_registers(self) -> int:
@@ -191,40 +185,18 @@ class AVPViT(nn.Module):
             for _ in range(n_adapters)
         ])
 
-        device = self.spatial_hidden_init.device
-        assert isinstance(device, torch.device)
-        pos = make_grid_positions(
-            cfg.scene_grid_size, cfg.scene_grid_size, device, dtype=backbone.rope_dtype
-        )
-        self.register_buffer("scene_positions", pos)
-        self.scene_positions = pos
-
         # Scene projection: LayerNorm + Linear (projects to teacher_dim for loss)
         self.scene_proj = nn.Sequential(
             nn.LayerNorm(embed_dim),
             nn.Linear(embed_dim, self.teacher_dim),
         )
 
-    def set_scene_grid_size(self, new_size: int) -> None:
-        """Update scene grid size for curriculum. Recomputes scene_positions buffer."""
-        assert new_size >= self.cfg.glimpse_grid_size, (
-            f"scene_grid_size {new_size} must be >= glimpse_grid_size {self.cfg.glimpse_grid_size}"
-        )
-        self.cfg = replace(self.cfg, scene_grid_size=new_size)
-        pos = make_grid_positions(
-            new_size,
-            new_size,
-            self.scene_positions.device,
-            dtype=self.backbone.rope_dtype,
-        )
-        self.scene_positions = pos
-
-    def _get_base_hidden(self, B: int) -> Tensor:
+    def _get_base_hidden(self, B: int, scene_grid_size: int) -> Tensor:
         """Get base hidden state (learnable inits expanded to batch size).
 
         Returns: [B, n_persistent + G*G, D] = [persistent_registers | spatial_hidden]
         """
-        n_spatial = self.cfg.scene_grid_size**2
+        n_spatial = scene_grid_size ** 2
         spatial_hidden = self.spatial_hidden_init.expand(B, n_spatial, -1)
         if self.persistent_registers is not None:
             return torch.cat(
@@ -232,17 +204,28 @@ class AVPViT(nn.Module):
             )
         return spatial_hidden
 
-    def _init_hidden(self, B: int, hidden: Tensor | None) -> Tensor:
-        """Initialize hidden state, optionally with gated residual.
+    def _infer_scene_grid_size(self, hidden: Tensor) -> int:
+        """Infer scene grid size from hidden state shape."""
+        n_spatial = hidden.shape[1] - self.n_persistent_registers
+        G = int(math.sqrt(n_spatial))
+        assert G * G == n_spatial, f"hidden spatial dim {n_spatial} is not a perfect square"
+        return G
 
-        If temporal_gate_init is set: hidden = base + gate * (prev - base)
-        Otherwise: direct passthrough (hidden if provided, else base)
+    def init_hidden(self, batch_size: int, scene_grid_size: int) -> Tensor:
+        """Create initial hidden state for given batch size and scene grid size."""
+        return self._get_base_hidden(batch_size, scene_grid_size)
+
+    def _apply_temporal_gate(self, hidden: Tensor) -> Tensor:
+        """Apply temporal gating to hidden state if enabled.
+
+        If temporal_gate_init is set: hidden = base + gate * (hidden - base)
+        Otherwise: passthrough
         """
-        if hidden is None:
-            return self._get_base_hidden(B)
         if self.scene_temporal_gate is None:
             return hidden
-        base = self._get_base_hidden(B)
+        B = hidden.shape[0]
+        G = self._infer_scene_grid_size(hidden)
+        base = self._get_base_hidden(B, G)
         return base + self.scene_temporal_gate * (hidden - base)
 
     def get_spatial(self, hidden: Tensor) -> Tensor:
@@ -265,7 +248,7 @@ class AVPViT(nn.Module):
         glimpse: Tensor,
         centers: Tensor,
         scales: Tensor,
-        hidden: Tensor | None,
+        hidden: Tensor,
         context: Tensor | None,
     ) -> StepOutput:
         """Process one glimpse: read from hidden, forward through backbone, write to hidden.
@@ -274,7 +257,7 @@ class AVPViT(nn.Module):
             glimpse: Extracted glimpse image [B, C, H, W]
             centers: Viewpoint centers [B, 2]
             scales: Viewpoint scales [B]
-            hidden: Previous hidden state [B, n_persistent + G*G, D] or None for fresh start
+            hidden: Hidden state [B, n_persistent + G*G, D] (use init_hidden to create)
             context: External context tokens [B, N_ctx, D] or None. Participates in attention,
                      returned transformed but NOT persisted in hidden state.
 
@@ -282,13 +265,15 @@ class AVPViT(nn.Module):
             StepOutput with both hidden (for continuation) and scene (for loss/viz)
         """
         D = self.backbone.embed_dim
+        B = hidden.shape[0]
+        scene_grid_size = self._infer_scene_grid_size(hidden)
 
         # Tokenize inside checkpoint so patch embedding activations aren't stored
         local_fresh, H, W = self.backbone.prepare_tokens(glimpse)
-        G = self.cfg.glimpse_grid_size
-        assert H == W == G, f"backbone returned {H}x{W} but config expects {G}x{G}"
+        glimpse_G = self.cfg.glimpse_grid_size
+        assert H == W == glimpse_G, f"backbone returned {H}x{W} but config expects {glimpse_G}x{glimpse_G}"
 
-        B = local_fresh.shape[0]
+        assert local_fresh.shape[0] == B, f"batch mismatch: glimpse {local_fresh.shape[0]} vs hidden {B}"
         rope_dtype = self.backbone.rope_dtype
         periods = self.backbone.rope_periods
         n_ephemeral = self.n_ephemeral_registers
@@ -309,11 +294,10 @@ class AVPViT(nn.Module):
 
         local = local_fresh
 
-        # Build hidden_t: [context, ephemeral, persistent, spatial]
-        # Context is prepended first so it's at position 0:n_ctx after processing
-        hidden_t = self._init_hidden(B, hidden)
+        # Apply temporal gating and build hidden_t: [context, ephemeral, persistent, spatial]
+        hidden_t = self._apply_temporal_gate(hidden)
         n_persistent = self.n_persistent_registers
-        n_spatial = self.cfg.scene_grid_size**2
+        n_spatial = scene_grid_size ** 2
         assert hidden_t.shape == (B, n_persistent + n_spatial, D), (
             f"hidden shape {hidden_t.shape} != expected ({B}, {n_persistent + n_spatial}, {D})"
         )
@@ -334,7 +318,10 @@ class AVPViT(nn.Module):
         )
 
         local_pos = glimpse_positions(centers, scales, H, W, dtype=rope_dtype)
-        scene_pos = self.scene_positions.to(rope_dtype).unsqueeze(0).expand(B, -1, -1)
+        # Compute scene positions on-the-fly (cheap: O(G²) vs O(G² * D * layers) for attention)
+        scene_pos = make_grid_positions(
+            scene_grid_size, scene_grid_size, glimpse.device, dtype=rope_dtype
+        ).unsqueeze(0).expand(B, -1, -1)
         local_rope = compute_rope(local_pos, periods)
         scene_rope = compute_rope(scene_pos, periods)
 
@@ -378,7 +365,7 @@ class AVPViT(nn.Module):
         self,
         images: Tensor,
         viewpoint: Viewpoint,
-        hidden: Tensor | None = None,
+        hidden: Tensor,
         context: Tensor | None = None,
     ) -> StepOutput:
         """Process a single viewpoint.
@@ -386,7 +373,7 @@ class AVPViT(nn.Module):
         Args:
             images: Input images [B, C, H, W]
             viewpoint: Where to look in the images
-            hidden: Previous hidden state [B, G*G, D] for CONTINUATION, or None for fresh start
+            hidden: Hidden state [B, n_persistent + G*G, D] (use init_hidden to create initial)
             context: External context tokens [B, N_ctx, D] or None. Pre-embedded by caller.
                      Participates in attention, returned transformed in context_out.
 
@@ -422,21 +409,18 @@ class AVPViT(nn.Module):
         self,
         images: Tensor,
         viewpoints: list[Viewpoint],
+        hidden: Tensor,
         reducer: Callable[[T, StepOutput], T],
         init: T,
         *,
-        hidden: Tensor | None = None,
         context: Tensor | None = None,
     ) -> tuple[T, Tensor]:
         """Scan over viewpoints, reducing with custom function. Returns (accumulator, final_hidden)."""
-        B = images.shape[0]
         acc = init
         for vp in viewpoints:
             out = self.forward_step(images, vp, hidden, context)
             hidden = out.hidden
             acc = reducer(acc, out)
-        if hidden is None:
-            hidden = self._init_hidden(B, None)
         return acc, hidden
 
     # ==================== Standard Invocations ====================
@@ -446,8 +430,8 @@ class AVPViT(nn.Module):
         images: Tensor,
         viewpoints: list[Viewpoint],
         target: Tensor,
+        hidden: Tensor,
         *,
-        hidden: Tensor | None = None,
         context: Tensor | None = None,
         loss_fn: Callable[[Tensor, Tensor], Tensor] = F.mse_loss,
     ) -> tuple[Tensor, Tensor]:
@@ -460,9 +444,9 @@ class AVPViT(nn.Module):
         total, final_hidden = self.forward_reduce(
             images,
             viewpoints,
+            hidden,
             reducer,
             init=torch.tensor(0.0, device=images.device),
-            hidden=hidden,
             context=context,
         )
         return total / len(viewpoints), final_hidden
@@ -471,7 +455,7 @@ class AVPViT(nn.Module):
         self,
         images: Tensor,
         viewpoints: list[Viewpoint],
-        hidden: Tensor | None = None,
+        hidden: Tensor,
         context: Tensor | None = None,
     ) -> tuple[list[StepOutput], Tensor]:
         """Collect full StepOutput at each step. Returns (outputs, final_hidden)."""
@@ -480,7 +464,7 @@ class AVPViT(nn.Module):
             return [*acc, out]
 
         return self.forward_reduce(
-            images, viewpoints, reducer, init=[], hidden=hidden, context=context
+            images, viewpoints, hidden, reducer, init=[], context=context
         )
 
     @override
@@ -488,7 +472,7 @@ class AVPViT(nn.Module):
         self,
         images: Tensor,
         viewpoints: list[Viewpoint],
-        hidden: Tensor | None = None,
+        hidden: Tensor,
         context: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Process viewpoints, return final scene. Returns (scene, final_hidden)."""
@@ -498,5 +482,5 @@ class AVPViT(nn.Module):
 
         dummy = torch.empty(0, device=images.device)
         return self.forward_reduce(
-            images, viewpoints, reducer, init=dummy, hidden=hidden, context=context
+            images, viewpoints, hidden, reducer, init=dummy, context=context
         )

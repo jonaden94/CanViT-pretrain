@@ -68,12 +68,11 @@ def main(args: Args) -> None:
 
     # Create AVP and load weights
     cfg = AVPConfig(
-        scene_grid_size=G,
         glimpse_grid_size=7,
         n_scene_registers=32,
         gating="full",
     )
-    avp = AVPViT(copy.deepcopy(backbone), cfg).to(device)
+    avp = AVPViT(copy.deepcopy(backbone), cfg, teacher_dim=backbone.embed_dim).to(device)
     avp.load_state_dict(ckpt["avp"])
     avp.eval()
 
@@ -84,7 +83,8 @@ def main(args: Args) -> None:
     # Run forward
     vps = make_viewpoints(args.n_glimpses, device)
     with torch.inference_mode():
-        outputs, _ = avp.forward_trajectory_full(img, vps)
+        hidden = avp.init_hidden(1, G)
+        outputs, _ = avp.forward_trajectory_full(img, vps, hidden)
 
     # Visualize: image + trajectory + PCA of final scene
     final_scene = outputs[-1].scene[0].cpu().numpy()  # [G*G, D]

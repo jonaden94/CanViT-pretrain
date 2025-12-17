@@ -106,22 +106,24 @@ PATCH_SIZE = 16
 
 def test_forward_shapes():
     embed_dim, num_heads, n_blocks = 64, 4, 2
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
+    scene_grid_size = 4
+    cfg = AVPConfig(glimpse_grid_size=3, n_scene_registers=0)
     backbone = MockBackbone(embed_dim, num_heads, n_blocks, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=embed_dim)
 
     B = 2
     images = torch.randn(B, 3, 64, 64)
     viewpoints = [Viewpoint.full_scene(B, images.device)]
+    hidden = avp.init_hidden(B, scene_grid_size)
 
-    scene, hidden = avp(images, viewpoints)
+    scene, final_hidden = avp(images, viewpoints, hidden)
 
-    assert scene.shape == (B, 16, embed_dim)  # 4x4 grid
-    assert hidden.shape == (B, 16, embed_dim)
+    assert scene.shape == (B, scene_grid_size**2, embed_dim)
+    assert final_hidden.shape == (B, scene_grid_size**2, embed_dim)
 
 
 def test_layer_scale_init():
-    cfg = AVPConfig(scene_grid_size=4, layer_scale_init=0.5, gating="none", n_scene_registers=0)
+    cfg = AVPConfig(layer_scale_init=0.5, gating="none", n_scene_registers=0)
     backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=64)
 
@@ -140,7 +142,6 @@ def test_convex_gating_init():
 
     gate_init = 0.5
     cfg = AVPConfig(
-        scene_grid_size=4,
         layer_scale_init=gate_init,
         gating="full",
         n_scene_registers=0,
@@ -160,8 +161,8 @@ def test_convex_init_passthrough():
 
     n_blocks = 2
     gate_init = 1e-5
+    scene_grid_size = 4
     cfg = AVPConfig(
-        scene_grid_size=4,
         glimpse_grid_size=3,
         layer_scale_init=gate_init,
         gating="full",
@@ -171,9 +172,11 @@ def test_convex_init_passthrough():
     avp = AVPViT(backbone, cfg, teacher_dim=64)
 
     B = 2
+    scene_size = scene_grid_size * PATCH_SIZE
     torch.manual_seed(42)
-    images = torch.randn(B, 3, avp.scene_size, avp.scene_size)
+    images = torch.randn(B, 3, scene_size, scene_size)
     vp = Viewpoint("test", torch.zeros(B, 2), torch.ones(B))
+    hidden = avp.init_hidden(B, scene_grid_size)
 
     with torch.no_grad():
         glimpse = extract_glimpse(images, vp, avp.glimpse_size)
@@ -186,8 +189,8 @@ def test_convex_init_passthrough():
 
         # AVPViT forward (same seed for prepare_tokens)
         torch.manual_seed(123)
-        out = avp.forward_step(images, vp)
-        initial_scene = avp.scene_proj(avp.get_spatial(avp._get_base_hidden(B)))
+        out = avp.forward_step(images, vp, hidden)
+        initial_scene = avp.scene_proj(avp.get_spatial(avp._get_base_hidden(B, scene_grid_size)))
 
     # Scene: write gate ≈ 0 → scene ≈ initial
     scene_diff = (out.scene - initial_scene).abs().mean()
@@ -200,14 +203,13 @@ def test_convex_init_passthrough():
 
 def test_convex_gate_value_affects_output():
     """High gate breaks passthrough; low gate preserves it."""
+    scene_grid_size = 4
     cfg_lo = AVPConfig(
-        scene_grid_size=4,
         layer_scale_init=1e-5,
         gating="full",
         n_scene_registers=0,
     )
     cfg_hi = AVPConfig(
-        scene_grid_size=4,
         layer_scale_init=0.5,
         gating="full",
         n_scene_registers=0,
@@ -219,16 +221,19 @@ def test_convex_gate_value_affects_output():
     avp_hi = AVPViT(MockBackbone(64, 4, 2, 0, PATCH_SIZE), cfg_hi, teacher_dim=64)
 
     B = 2
+    scene_size = scene_grid_size * PATCH_SIZE
     torch.manual_seed(42)
-    images = torch.randn(B, 3, avp_lo.scene_size, avp_lo.scene_size)
+    images = torch.randn(B, 3, scene_size, scene_size)
     vp = Viewpoint("test", torch.zeros(B, 2), torch.ones(B))
+    hidden_lo = avp_lo.init_hidden(B, scene_grid_size)
+    hidden_hi = avp_hi.init_hidden(B, scene_grid_size)
 
     with torch.no_grad():
         torch.manual_seed(123)
-        out_lo = avp_lo.forward_step(images, vp)
+        out_lo = avp_lo.forward_step(images, vp, hidden_lo)
         torch.manual_seed(123)
-        out_hi = avp_hi.forward_step(images, vp)
-        initial = avp_lo.scene_proj(avp_lo.get_spatial(avp_lo._get_base_hidden(B)))
+        out_hi = avp_hi.forward_step(images, vp, hidden_hi)
+        initial = avp_lo.scene_proj(avp_lo.get_spatial(avp_lo._get_base_hidden(B, scene_grid_size)))
 
     diff_lo = (out_lo.scene - initial).abs().mean()
     diff_hi = (out_hi.scene - initial).abs().mean()
@@ -238,7 +243,7 @@ def test_convex_gate_value_affects_output():
 
 
 def test_scene_registers_disabled_when_zero():
-    cfg = AVPConfig(scene_grid_size=4, n_scene_registers=0)
+    cfg = AVPConfig(n_scene_registers=0)
     backbone = MockBackbone(64, 4, 2, 4, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=64)
 
@@ -248,7 +253,7 @@ def test_scene_registers_disabled_when_zero():
 
 
 def test_scene_registers_fixed_count():
-    cfg = AVPConfig(scene_grid_size=14, glimpse_grid_size=7, n_scene_registers=16)
+    cfg = AVPConfig(glimpse_grid_size=7, n_scene_registers=16)
     backbone = MockBackbone(64, 4, 2, 4, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=64)
 
@@ -263,7 +268,7 @@ def test_scene_registers_fixed_count():
 
 def test_scene_registers_split():
     embed_dim, num_heads, n_blocks = 64, 4, 2
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=7)
+    cfg = AVPConfig(glimpse_grid_size=3, n_scene_registers=7)
     backbone = MockBackbone(embed_dim, num_heads, n_blocks, 4, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=embed_dim)
 
@@ -278,24 +283,27 @@ def test_scene_registers_split():
 
 def test_scene_output_always_spatial_only():
     embed_dim, num_heads, n_blocks = 64, 4, 2
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=7)
+    scene_grid_size = 4
+    cfg = AVPConfig(glimpse_grid_size=3, n_scene_registers=7)
     backbone = MockBackbone(embed_dim, num_heads, n_blocks, 4, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=embed_dim)
 
     B = 2
     images = torch.randn(B, 3, 64, 64)
     viewpoints = [Viewpoint.full_scene(B, images.device)]
+    hidden = avp.init_hidden(B, scene_grid_size)
 
-    scene, hidden = avp(images, viewpoints)
+    scene, final_hidden = avp(images, viewpoints, hidden)
 
     assert scene.shape == (B, 16, embed_dim)  # 4x4 grid (spatial only)
     n_persistent = avp.n_persistent_registers
-    assert hidden.shape == (B, n_persistent + 16, embed_dim)
+    assert final_hidden.shape == (B, n_persistent + 16, embed_dim)
 
 
 def test_scene_registers_continuity():
     embed_dim, num_heads, n_blocks = 64, 4, 2
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=7)
+    scene_grid_size = 4
+    cfg = AVPConfig(glimpse_grid_size=3, n_scene_registers=7)
     backbone = MockBackbone(embed_dim, num_heads, n_blocks, 4, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=embed_dim)
 
@@ -303,8 +311,9 @@ def test_scene_registers_continuity():
     n_persistent = avp.n_persistent_registers
     images = torch.randn(B, 3, 64, 64)
     vp = Viewpoint.full_scene(B, images.device)
+    hidden = avp.init_hidden(B, scene_grid_size)
 
-    out1 = avp.forward_step(images, vp, None)
+    out1 = avp.forward_step(images, vp, hidden)
     assert out1.hidden.shape == (B, n_persistent + 16, embed_dim)
 
     out2 = avp.forward_step(images, vp, out1.hidden)
@@ -316,7 +325,7 @@ def test_scene_registers_continuity():
 
 def test_get_spatial_extracts_correctly():
     embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=8)
+    cfg = AVPConfig(glimpse_grid_size=3, n_scene_registers=8)
     backbone = MockBackbone(embed_dim, 4, 2, 4, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=embed_dim)
 
@@ -332,22 +341,24 @@ def test_get_spatial_extracts_correctly():
 
 def test_compute_scene_matches_step_output():
     embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=8)
+    scene_grid_size = 4
+    cfg = AVPConfig(glimpse_grid_size=3, n_scene_registers=8)
     backbone = MockBackbone(embed_dim, 4, 2, 4, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=embed_dim)
 
     B = 2
     images = torch.randn(B, 3, 64, 64)
     vp = Viewpoint.full_scene(B, images.device)
+    hidden = avp.init_hidden(B, scene_grid_size)
 
-    out = avp.forward_step(images, vp, None)
+    out = avp.forward_step(images, vp, hidden)
     scene_from_helper = avp.compute_scene(out.hidden)
     assert torch.allclose(scene_from_helper, out.scene)
 
 
 def test_scene_proj_is_layernorm_linear():
     """scene_proj is always LayerNorm + Linear (no Identity fallback)."""
-    cfg = AVPConfig(scene_grid_size=4, n_scene_registers=0)
+    cfg = AVPConfig(n_scene_registers=0)
     backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=64)
 
@@ -361,7 +372,8 @@ def test_teacher_dim_projects_to_different_dimension():
     """teacher_dim controls the scene projection output dimension."""
     embed_dim = 64
     teacher_dim = 128  # Different from embed_dim
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
+    scene_grid_size = 4
+    cfg = AVPConfig(glimpse_grid_size=3, n_scene_registers=0)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=teacher_dim)
 
@@ -372,15 +384,17 @@ def test_teacher_dim_projects_to_different_dimension():
     B = 2
     images = torch.randn(B, 3, 64, 64)
     vp = Viewpoint.full_scene(B, images.device)
+    hidden = avp.init_hidden(B, scene_grid_size)
 
-    out = avp.forward_step(images, vp, None)
+    out = avp.forward_step(images, vp, hidden)
     assert out.hidden.shape[-1] == embed_dim  # Internal state in embed_dim
     assert out.scene.shape[-1] == teacher_dim  # Projected output in teacher_dim
 
 
 def test_multi_viewpoint_forward():
     embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
+    scene_grid_size = 4
+    cfg = AVPConfig(glimpse_grid_size=3, n_scene_registers=0)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=embed_dim)
 
@@ -391,15 +405,16 @@ def test_multi_viewpoint_forward():
         Viewpoint.quadrant(B, images.device, 0, 0),
         Viewpoint.quadrant(B, images.device, 1, 1),
     ]
+    hidden = avp.init_hidden(B, scene_grid_size)
 
-    scene, hidden = avp(images, viewpoints)
+    scene, final_hidden = avp(images, viewpoints, hidden)
 
     assert scene.shape == (B, 16, embed_dim)
-    assert hidden.shape == (B, 16, embed_dim)
+    assert final_hidden.shape == (B, 16, embed_dim)
 
 
 def test_glimpse_size_from_backbone():
-    cfg = AVPConfig(scene_grid_size=14, glimpse_grid_size=7, n_scene_registers=0)
+    cfg = AVPConfig(glimpse_grid_size=7, n_scene_registers=0)
     backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=64)
 
@@ -408,15 +423,17 @@ def test_glimpse_size_from_backbone():
 
 def test_forward_step_returns_step_output():
     embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
+    scene_grid_size = 4
+    cfg = AVPConfig(glimpse_grid_size=3, n_scene_registers=0)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=embed_dim)
 
     B = 2
     images = torch.randn(B, 3, 64, 64)
     vp = Viewpoint.full_scene(B, images.device)
+    hidden = avp.init_hidden(B, scene_grid_size)
 
-    out = avp.forward_step(images, vp, None)
+    out = avp.forward_step(images, vp, hidden)
 
     assert isinstance(out, StepOutput)
     assert out.local.shape == (B, 10, embed_dim)  # CLS + 3x3
@@ -426,7 +443,8 @@ def test_forward_step_returns_step_output():
 
 def test_forward_loss():
     embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
+    scene_grid_size = 4
+    cfg = AVPConfig(glimpse_grid_size=3, n_scene_registers=0)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=embed_dim)
 
@@ -437,8 +455,9 @@ def test_forward_loss():
         Viewpoint.full_scene(B, images.device),
         Viewpoint.quadrant(B, images.device, 0, 0),
     ]
+    hidden = avp.init_hidden(B, scene_grid_size)
 
-    loss, final_hidden = avp.forward_loss(images, viewpoints, target)
+    loss, final_hidden = avp.forward_loss(images, viewpoints, target, hidden)
 
     assert loss.shape == ()
     assert loss.item() >= 0
@@ -447,18 +466,20 @@ def test_forward_loss():
 
 def test_forward_reduce_custom():
     embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
+    scene_grid_size = 4
+    cfg = AVPConfig(glimpse_grid_size=3, n_scene_registers=0)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=embed_dim)
 
     B = 2
     images = torch.randn(B, 3, 64, 64)
     viewpoints = [Viewpoint.full_scene(B, images.device)]
+    hidden = avp.init_hidden(B, scene_grid_size)
 
     def count_reducer(acc: int, out: StepOutput) -> int:
         return acc + 1
 
-    count, final_hidden = avp.forward_reduce(images, viewpoints, count_reducer, init=0)
+    count, final_hidden = avp.forward_reduce(images, viewpoints, hidden, count_reducer, init=0)
 
     assert count == 1
     assert final_hidden.shape == (B, 16, embed_dim)
@@ -466,8 +487,8 @@ def test_forward_reduce_custom():
 
 def test_gradient_checkpointing_smoke():
     embed_dim = 64
+    scene_grid_size = 4
     cfg = AVPConfig(
-        scene_grid_size=4,
         glimpse_grid_size=3,
         gradient_checkpointing=True,
         n_scene_registers=0,
@@ -479,8 +500,9 @@ def test_gradient_checkpointing_smoke():
     B = 2
     images = torch.randn(B, 3, 64, 64)
     viewpoints = [Viewpoint.full_scene(B, images.device)]
+    hidden = avp.init_hidden(B, scene_grid_size)
 
-    scene, _ = avp(images, viewpoints)
+    scene, _ = avp(images, viewpoints, hidden)
     loss = scene.sum()
     loss.backward()
 
@@ -489,37 +511,42 @@ def test_gradient_checkpointing_smoke():
 
 def test_forward_loss_requires_viewpoints():
     embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
+    scene_grid_size = 4
+    cfg = AVPConfig(glimpse_grid_size=3, n_scene_registers=0)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=embed_dim)
 
     B = 2
     images = torch.randn(B, 3, 64, 64)
     target = torch.randn(B, 16, embed_dim)
+    hidden = avp.init_hidden(B, scene_grid_size)
 
     with pytest.raises(AssertionError):
-        avp.forward_loss(images, [], target)
+        avp.forward_loss(images, [], target, hidden)
 
 
 # ==================== Context Tests ====================
 
 
 def test_context_none_returns_none():
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
+    scene_grid_size = 4
+    cfg = AVPConfig(glimpse_grid_size=3, n_scene_registers=0)
     backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=64)
 
     B = 2
     images = torch.randn(B, 3, 64, 64)
     vp = Viewpoint.full_scene(B, images.device)
+    hidden = avp.init_hidden(B, scene_grid_size)
 
-    out = avp.forward_step(images, vp, None, context=None)
+    out = avp.forward_step(images, vp, hidden, context=None)
     assert out.context_out is None
 
 
 def test_context_shapes():
     embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
+    scene_grid_size = 4
+    cfg = AVPConfig(glimpse_grid_size=3, n_scene_registers=0)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=embed_dim)
 
@@ -528,19 +555,20 @@ def test_context_shapes():
     images = torch.randn(B, 3, 64, 64)
     vp = Viewpoint.full_scene(B, images.device)
     context = torch.randn(B, n_ctx, embed_dim)
+    hidden = avp.init_hidden(B, scene_grid_size)
 
-    out = avp.forward_step(images, vp, None, context=context)
+    out = avp.forward_step(images, vp, hidden, context=context)
 
     assert out.context_out is not None
     assert out.context_out.shape == (B, n_ctx, embed_dim)
-    n_spatial = cfg.scene_grid_size**2
+    n_spatial = scene_grid_size**2
     assert out.hidden.shape == (B, n_spatial, embed_dim)
 
 
 def test_context_gradient_flow():
     embed_dim = 64
+    scene_grid_size = 4
     cfg = AVPConfig(
-        scene_grid_size=4,
         glimpse_grid_size=3,
         layer_scale_init=1.0,
         gating="none",
@@ -554,8 +582,9 @@ def test_context_gradient_flow():
     images = torch.randn(B, 3, 64, 64)
     vp = Viewpoint.full_scene(B, images.device)
     context = torch.randn(B, n_ctx, embed_dim, requires_grad=True)
+    hidden = avp.init_hidden(B, scene_grid_size)
 
-    out = avp.forward_step(images, vp, None, context=context)
+    out = avp.forward_step(images, vp, hidden, context=context)
     assert out.context_out is not None
 
     loss = out.context_out.sum() + out.scene.sum()
@@ -567,8 +596,8 @@ def test_context_gradient_flow():
 
 def test_context_influences_scene():
     embed_dim = 64
+    scene_grid_size = 4
     cfg = AVPConfig(
-        scene_grid_size=4,
         glimpse_grid_size=3,
         layer_scale_init=1.0,
         gating="none",
@@ -582,59 +611,42 @@ def test_context_influences_scene():
     torch.manual_seed(42)
     images = torch.randn(B, 3, 64, 64)
     vp = Viewpoint.full_scene(B, images.device)
+    hidden = avp.init_hidden(B, scene_grid_size)
 
     ctx1 = torch.randn(B, n_ctx, embed_dim)
     ctx2 = torch.randn(B, n_ctx, embed_dim)
 
     with torch.no_grad():
-        out1 = avp.forward_step(images, vp, None, context=ctx1)
-        out2 = avp.forward_step(images, vp, None, context=ctx2)
+        out1 = avp.forward_step(images, vp, hidden, context=ctx1)
+        out2 = avp.forward_step(images, vp, hidden, context=ctx2)
 
     diff = (out1.scene - out2.scene).abs().mean()
     assert diff > 0.01, f"Context should influence scene output, but diff={diff}"
 
 
-# ==================== Curriculum Tests ====================
+# ==================== Dynamic Grid Size Tests ====================
 
 
-def test_set_scene_grid_size():
+def test_different_grid_sizes_work():
+    """Model supports different grid sizes by passing different hidden states."""
     embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
+    cfg = AVPConfig(glimpse_grid_size=3, n_scene_registers=0)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg, teacher_dim=embed_dim)
-
-    assert avp.cfg.scene_grid_size == 4
-    assert avp.scene_positions.shape == (16, 2)
-
-    avp.set_scene_grid_size(8)
-
-    assert avp.cfg.scene_grid_size == 8
-    assert avp.scene_positions.shape == (64, 2)
-    assert avp.scene_size == 8 * PATCH_SIZE
-
-
-def test_set_scene_grid_size_forward_works():
-    embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
-    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
-    avp = AVPViT(backbone, cfg, teacher_dim=embed_dim)
-
-    avp.set_scene_grid_size(8)
 
     B = 2
-    images = torch.randn(B, 3, 8 * PATCH_SIZE, 8 * PATCH_SIZE)
-    vp = Viewpoint.full_scene(B, images.device)
 
-    out = avp.forward_step(images, vp, None)
+    # Test with grid_size=4
+    hidden_4 = avp.init_hidden(B, 4)
+    images_4 = torch.randn(B, 3, 4 * PATCH_SIZE, 4 * PATCH_SIZE)
+    vp = Viewpoint.full_scene(B, images_4.device)
+    out_4 = avp.forward_step(images_4, vp, hidden_4)
+    assert out_4.scene.shape == (B, 16, embed_dim)
+    assert out_4.hidden.shape == (B, 16, embed_dim)
 
-    assert out.scene.shape == (B, 64, embed_dim)
-    assert out.hidden.shape == (B, 64, embed_dim)
-
-
-def test_set_scene_grid_size_rejects_too_small():
-    cfg = AVPConfig(scene_grid_size=8, glimpse_grid_size=7, n_scene_registers=0)
-    backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
-    avp = AVPViT(backbone, cfg, teacher_dim=64)
-
-    with pytest.raises(AssertionError, match="must be >= glimpse_grid_size"):
-        avp.set_scene_grid_size(4)
+    # Test with grid_size=8
+    hidden_8 = avp.init_hidden(B, 8)
+    images_8 = torch.randn(B, 3, 8 * PATCH_SIZE, 8 * PATCH_SIZE)
+    out_8 = avp.forward_step(images_8, vp, hidden_8)
+    assert out_8.scene.shape == (B, 64, embed_dim)
+    assert out_8.hidden.shape == (B, 64, embed_dim)

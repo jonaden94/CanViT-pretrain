@@ -85,7 +85,6 @@ def create_avp(
 ) -> AVPViT:
     """Create AVP model wrapping student backbone, projecting to teacher_dim."""
     patch_size = student_backbone.patch_size
-    scene_px = cfg.avp.scene_grid_size * patch_size
     glimpse_px = cfg.avp.glimpse_grid_size * patch_size
 
     for p in student_backbone.parameters():
@@ -94,7 +93,7 @@ def create_avp(
     avp = AVPViT(student_backbone, cfg.avp, teacher_dim).to(cfg.device)
 
     log.info(
-        f"AVP created: scene={cfg.avp.scene_grid_size}x{cfg.avp.scene_grid_size} ({scene_px}px), "
+        f"AVP created: grid_sizes={cfg.grid_sizes}, "
         f"glimpse={cfg.avp.glimpse_grid_size}x{cfg.avp.glimpse_grid_size} ({glimpse_px}px), "
         f"student_dim={student_backbone.embed_dim} -> teacher_dim={teacher_dim}, "
         f"freeze_student_backbone={cfg.freeze_student_backbone}"

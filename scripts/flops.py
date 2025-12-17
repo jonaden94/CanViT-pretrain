@@ -74,13 +74,13 @@ def cross_attn_flops(
     return CrossAttnFLOPs(sdpa, q_proj, k_proj, v_proj, o_proj, sdpa + q_proj + k_proj + v_proj + o_proj)
 
 
-def avp_step_flops(model: AVPViT, backbone: DINOv3Backbone) -> AVPStepFLOPs:
+def avp_step_flops(model: AVPViT, backbone: DINOv3Backbone, scene_grid_size: int) -> AVPStepFLOPs:
     """FLOPs for one AVP step. Uses introspection on actual model modules."""
     cfg = model.cfg
     D = backbone.embed_dim
     n_blocks = backbone.n_blocks
     glimpse_patches = cfg.glimpse_grid_size**2
-    spatial_patches = cfg.scene_grid_size**2
+    spatial_patches = scene_grid_size**2
     n_local = glimpse_patches + backbone.n_prefix_tokens
     n_scene = model.n_ephemeral_registers + model.n_persistent_registers + spatial_patches
 
@@ -141,12 +141,12 @@ def print_detailed_breakdown(
     avp = AVPViT(
         backbone,
         AVPConfig(
-            scene_grid_size=scene_grid,
             glimpse_grid_size=glimpse_grid,
             n_scene_registers=n_registers,
         ),
+        teacher_dim=backbone.embed_dim,
     )
-    a = avp_step_flops(avp, backbone)
+    a = avp_step_flops(avp, backbone, scene_grid)
     t_scene = teacher_flops(backbone, scene_grid**2)
     t_glimpse = teacher_flops(backbone, glimpse_grid**2)
 
@@ -245,35 +245,35 @@ def main() -> None:
 
         # Base AVP (no convex, V=Linear)
         avp_base = AVPViT(backbone, AVPConfig(
-            scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
+            glimpse_grid_size=GLIMPSE_GRID,
             n_scene_registers=N_REGISTERS,
             attention=AttentionConfig(write_v_expansion=None),
-        ))
-        a_base = avp_step_flops(avp_base, backbone)
+        ), teacher_dim=D)
+        a_base = avp_step_flops(avp_base, backbone, scene_grid)
 
         # AVP with V MLP (2x expansion, the default)
         avp_mlp = AVPViT(backbone, AVPConfig(
-            scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
+            glimpse_grid_size=GLIMPSE_GRID,
             n_scene_registers=N_REGISTERS,
-        ))
-        a_mlp = avp_step_flops(avp_mlp, backbone)
+        ), teacher_dim=D)
+        a_mlp = avp_step_flops(avp_mlp, backbone, scene_grid)
 
         # AVP convex (V=Linear)
         avp_cvx = AVPViT(backbone, AVPConfig(
-            scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
+            glimpse_grid_size=GLIMPSE_GRID,
             n_scene_registers=N_REGISTERS,
             gating="full", layer_scale_init=1e-3,
             attention=AttentionConfig(write_v_expansion=None),
-        ))
-        a_cvx = avp_step_flops(avp_cvx, backbone)
+        ), teacher_dim=D)
+        a_cvx = avp_step_flops(avp_cvx, backbone, scene_grid)
 
         # AVP convex + V MLP (default)
         avp_cvx_mlp = AVPViT(backbone, AVPConfig(
-            scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
+            glimpse_grid_size=GLIMPSE_GRID,
             n_scene_registers=N_REGISTERS,
             gating="full", layer_scale_init=1e-3,
-        ))
-        a_cvx_mlp = avp_step_flops(avp_cvx_mlp, backbone)
+        ), teacher_dim=D)
+        a_cvx_mlp = avp_step_flops(avp_cvx_mlp, backbone, scene_grid)
 
         print(
             f"{scene_grid}x{scene_grid:<7} "

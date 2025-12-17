@@ -15,7 +15,7 @@ from torchvision.datasets import ImageFolder
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
-ImageBatch: TypeAlias = tuple[Tensor, Tensor]
+ImageBatch: TypeAlias = tuple[Tensor, Tensor]  # (images, labels) batched
 
 
 def imagenet_normalize() -> transforms.Normalize:

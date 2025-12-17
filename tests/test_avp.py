@@ -26,23 +26,25 @@ def backbone(request: pytest.FixtureRequest) -> ViTBackbone:
 
 def test_avp_forward_shapes(backbone: ViTBackbone) -> None:
     """AVP forward produces correct output shapes."""
-    cfg = AVPConfig(scene_grid_size=8, glimpse_grid_size=7, n_scene_registers=0)
+    scene_grid_size = 8
+    cfg = AVPConfig(glimpse_grid_size=7, n_scene_registers=0)
     avp = AVPViT(backbone, cfg, teacher_dim=backbone.embed_dim)
 
     B = 2
     images = torch.randn(B, 3, 128, 128)
     viewpoints = [Viewpoint.full_scene(B, images.device)]
+    hidden = avp.init_hidden(B, scene_grid_size)
 
-    scene, hidden = avp(images, viewpoints)
+    scene, final_hidden = avp(images, viewpoints, hidden)
 
     assert scene.shape == (B, 64, backbone.embed_dim)
-    assert hidden.shape == (B, 64, backbone.embed_dim)
+    assert final_hidden.shape == (B, 64, backbone.embed_dim)
 
 
 def test_hidden_unchanged_at_init(backbone: ViTBackbone) -> None:
     """With γ=0 and no temporal gating, hidden should equal normalized spatial_init."""
+    scene_grid_size = 8
     cfg = AVPConfig(
-        scene_grid_size=8,
         glimpse_grid_size=7,
         layer_scale_init=0.0,
         n_scene_registers=0,
@@ -52,16 +54,18 @@ def test_hidden_unchanged_at_init(backbone: ViTBackbone) -> None:
     B = 2
     images = torch.randn(B, 3, 128, 128)
     viewpoints = [Viewpoint.full_scene(B, images.device)]
+    hidden = avp.init_hidden(B, scene_grid_size)
 
-    _, hidden = avp(images, viewpoints)
+    _, final_hidden = avp(images, viewpoints, hidden)
 
-    expected = avp._get_base_hidden(B)
-    assert torch.allclose(hidden, expected, atol=1e-5)
+    expected = avp._get_base_hidden(B, scene_grid_size)
+    assert torch.allclose(final_hidden, expected, atol=1e-5)
 
 
 def test_multi_viewpoint_forward(backbone: ViTBackbone) -> None:
     """Forward with multiple viewpoints processes all."""
-    cfg = AVPConfig(scene_grid_size=8, glimpse_grid_size=7, n_scene_registers=0)
+    scene_grid_size = 8
+    cfg = AVPConfig(glimpse_grid_size=7, n_scene_registers=0)
     avp = AVPViT(backbone, cfg, teacher_dim=backbone.embed_dim)
 
     B = 2
@@ -71,16 +75,18 @@ def test_multi_viewpoint_forward(backbone: ViTBackbone) -> None:
         Viewpoint.quadrant(B, images.device, 0, 0),
         Viewpoint.quadrant(B, images.device, 1, 1),
     ]
+    hidden = avp.init_hidden(B, scene_grid_size)
 
-    scene, hidden = avp(images, viewpoints)
+    scene, final_hidden = avp(images, viewpoints, hidden)
 
     assert scene.shape == (B, 64, backbone.embed_dim)
-    assert hidden.shape == (B, 64, backbone.embed_dim)
+    assert final_hidden.shape == (B, 64, backbone.embed_dim)
 
 
 def test_forward_loss(backbone: ViTBackbone) -> None:
     """forward_loss computes averaged MSE correctly."""
-    cfg = AVPConfig(scene_grid_size=8, glimpse_grid_size=7, n_scene_registers=0)
+    scene_grid_size = 8
+    cfg = AVPConfig(glimpse_grid_size=7, n_scene_registers=0)
     avp = AVPViT(backbone, cfg, teacher_dim=backbone.embed_dim)
 
     B = 2
@@ -90,8 +96,9 @@ def test_forward_loss(backbone: ViTBackbone) -> None:
         Viewpoint.quadrant(B, images.device, 0, 0),
     ]
     target = torch.randn(B, 64, backbone.embed_dim)
+    hidden = avp.init_hidden(B, scene_grid_size)
 
-    avg_loss, final_hidden = avp.forward_loss(images, viewpoints, target)
+    avg_loss, final_hidden = avp.forward_loss(images, viewpoints, target, hidden)
 
     assert avg_loss.shape == ()
     assert avg_loss.requires_grad

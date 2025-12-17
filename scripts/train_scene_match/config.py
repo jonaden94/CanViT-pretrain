@@ -20,7 +20,7 @@ class Config:
     student_ckpt: Path | None = None  # None = random init
     freeze_student_backbone: bool = False
     # AVP
-    avp: AVPConfig = field(default_factory=lambda: AVPConfig(scene_grid_size=64))
+    avp: AVPConfig = field(default_factory=AVPConfig)
     grid_sizes: tuple[int, ...] = (16, 32, 64)
     # Data
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
