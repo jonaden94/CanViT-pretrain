@@ -26,7 +26,7 @@ class Config:
     ref_lr: float = 8e-5
     weight_decay: float = 1e-5
     n_viewpoints_per_step: int = (
-        2  # Inner loop viewpoints (>=2 for length generalization)
+        4  # Inner loop viewpoints (>=2 for length generalization)
     )
     warmup_steps: int = 100_000
     grad_clip: float = 1.0
