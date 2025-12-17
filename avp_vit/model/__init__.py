@@ -70,9 +70,9 @@ class LossOutputs(NamedTuple):
 class AVPConfig:
     glimpse_grid_size: int = 8  # 256px^2
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
-    layer_scale_init: float = 0.1  # Init for LayerScale (reference: 0.01)
+    layer_scale_init: float = 1e-3  # Init for LayerScale (reference: 0.01)
     temporal_gate_init: float | None = (
-        0.1  # None=disabled, float=gate init (ref: 0.001)
+        1e-5  # None=disabled, float=gate init (ref: 0.001)
     )
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries
     gating: GatingMode = "none"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
@@ -454,7 +454,9 @@ class AVPViT(nn.Module):
 
             # CLS loss (if enabled) - student's glimpse CLS vs teacher's full-image CLS
             if self.cls_proj is not None:
-                assert cls_target is not None, "cls_target required when use_cls_loss=True"
+                assert cls_target is not None, (
+                    "cls_target required when use_cls_loss=True"
+                )
                 cls_pred = self.compute_cls(out.local)
                 step_cls = loss_fn(cls_pred, cls_target)
                 cls_loss_acc = (
