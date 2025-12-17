@@ -62,6 +62,7 @@ class LossOutputs(NamedTuple):
 
     scene: Tensor  # Scene loss (always computed)
     local: Tensor | None  # Local loss (None if use_local_loss=False)
+    cls: Tensor | None  # CLS loss (None if use_cls_loss=False)
 
 
 @final
@@ -79,6 +80,7 @@ class AVPConfig:
     attention: AttentionConfig = field(default_factory=AttentionConfig)
     mean_map_grid_size: int = 32  # Learnable spatial mean map size
     use_local_loss: bool = False  # Enable local loss (supervise glimpse predictions)
+    use_cls_loss: bool = True  # Enable CLS token loss (supervise CLS predictions)
 
 
 @final
@@ -205,6 +207,15 @@ class AVPViT(nn.Module):
         else:
             self.local_proj = None
 
+        # CLS projection (for CLS loss): projects CLS token to teacher_dim
+        if cfg.use_cls_loss:
+            self.cls_proj: nn.Sequential | None = nn.Sequential(
+                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, self.teacher_dim),
+            )
+        else:
+            self.cls_proj = None
+
         # Learnable spatial mean map: scene = mean + residual
         G_proto = cfg.mean_map_grid_size
         D = self.teacher_dim
@@ -295,6 +306,14 @@ class AVPViT(nn.Module):
         n_prefix = self.backbone.n_prefix_tokens
         patch_tokens = local[:, n_prefix:]  # [B, G², D_student]
         return self.local_proj(patch_tokens)  # [B, G², D_teacher]
+
+    def compute_cls(self, local: Tensor) -> Tensor:
+        """Project CLS token to teacher_dim. Returns [B, D_teacher]."""
+        assert self.cls_proj is not None, (
+            "cls_proj not initialized (use_cls_loss=False)"
+        )
+        cls_token = local[:, 0]  # [B, D_student]
+        return self.cls_proj(cls_token)  # [B, D_teacher]
 
     def _process_glimpse(
         self,
@@ -423,12 +442,17 @@ class AVPViT(nn.Module):
         target: Tensor,
         hidden: Tensor,
         *,
+        cls_target: Tensor | None = None,
         context: Tensor | None = None,
         loss_fn: Callable[[Tensor, Tensor], Tensor] = F.mse_loss,
     ) -> tuple[LossOutputs, Tensor]:
         """Compute losses across all viewpoints. Returns (LossOutputs, final_hidden).
 
-        LossOutputs contains scene loss (always) and local loss (if use_local_loss enabled).
+        Args:
+            target: Teacher's patch tokens [B, N, D] for scene/local loss
+            cls_target: Teacher's CLS token [B, D] for CLS loss (same for all viewpoints)
+
+        LossOutputs contains scene loss (always), local loss (if enabled), and cls loss (if enabled).
         Caller is responsible for combining losses as desired.
         """
         assert len(viewpoints) > 0
@@ -437,6 +461,7 @@ class AVPViT(nn.Module):
 
         scene_loss = torch.tensor(0.0, device=device)
         local_loss_acc: Tensor | None = None
+        cls_loss_acc: Tensor | None = None
 
         # Prepare target spatial for local loss (if enabled)
         B, N_target, D = target.shape
@@ -450,13 +475,12 @@ class AVPViT(nn.Module):
             # Scene loss (always)
             scene_loss = scene_loss + loss_fn(out.scene, target)
 
-            # Local loss (if enabled) - normalized using target's spatial stats
+            # Local loss (if enabled)
             if self.local_proj is not None:
                 local_pred = self.compute_local(out.local, vp)
                 G_glimpse = self.cfg.glimpse_grid_size
                 cropped = sample_at_viewpoint(target_spatial, vp, G_glimpse)
                 cropped = cropped.permute(0, 2, 3, 1).reshape(B, -1, D)
-                # Normalize both using target's per-dim stats across spatial positions
                 step_local = loss_fn(local_pred, cropped)
                 local_loss_acc = (
                     step_local
@@ -464,9 +488,19 @@ class AVPViT(nn.Module):
                     else local_loss_acc + step_local
                 )
 
+            # CLS loss (if enabled) - student's glimpse CLS vs teacher's full-image CLS
+            if self.cls_proj is not None:
+                assert cls_target is not None, "cls_target required when use_cls_loss=True"
+                cls_pred = self.compute_cls(out.local)
+                step_cls = loss_fn(cls_pred, cls_target)
+                cls_loss_acc = (
+                    step_cls if cls_loss_acc is None else cls_loss_acc + step_cls
+                )
+
         losses = LossOutputs(
             scene=scene_loss / n,
             local=local_loss_acc / n if local_loss_acc is not None else None,
+            cls=cls_loss_acc / n if cls_loss_acc is not None else None,
         )
         return losses, hidden
 

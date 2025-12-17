@@ -14,6 +14,7 @@ from ymc.lr import get_linear_scaled_lr
 from ytch.model import count_parameters
 
 from avp_vit import AVPViT
+from avp_vit.backbone.dinov3 import NormFeatures
 from avp_vit.train import InfiniteLoader, SurvivalBatch
 from avp_vit.train.viewpoint import random_viewpoint
 
@@ -29,7 +30,7 @@ log = logging.getLogger(__name__)
 def init_survival_batch(
     avp: AVPViT,
     train_loader: InfiniteLoader,
-    compute_targets: Callable[[Tensor], Tensor],
+    compute_targets: Callable[[Tensor], NormFeatures],
     batch_size: int,
     fresh_count: int,
     scene_grid_size: int,
@@ -39,18 +40,23 @@ def init_survival_batch(
     n_init_batches = (batch_size + fresh_count - 1) // fresh_count
     log.info(f"Initializing survival batch: batch_size={batch_size}, fresh_count={fresh_count}")
 
-    init_imgs_list, init_targets_list = [], []
+    init_imgs_list: list[Tensor] = []
+    init_patches_list: list[Tensor] = []
+    init_cls_list: list[Tensor] = []
     with torch.no_grad():
         for _ in range(n_init_batches):
             batch = train_loader.next_batch().to(device)
+            feats = compute_targets(batch)
             init_imgs_list.append(batch)
-            init_targets_list.append(compute_targets(batch))
+            init_patches_list.append(feats.patches)
+            init_cls_list.append(feats.cls)
 
     init_imgs = torch.cat(init_imgs_list, dim=0)[:batch_size]
-    init_targets = torch.cat(init_targets_list, dim=0)[:batch_size]
+    init_targets = torch.cat(init_patches_list, dim=0)[:batch_size]
+    init_cls_targets = torch.cat(init_cls_list, dim=0)[:batch_size]
     hidden_init = avp.init_hidden(batch_size, scene_grid_size)
 
-    return SurvivalBatch.init(init_imgs, init_targets, hidden_init)
+    return SurvivalBatch.init(init_imgs, init_targets, init_cls_targets, hidden_init)
 
 
 def _log_stage(stage: ResolutionStage) -> None:
@@ -132,9 +138,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}.pt"
 
-    def compute_targets(images: Tensor) -> Tensor:
+    def compute_targets(images: Tensor) -> NormFeatures:
         with torch.autocast(device_type=cfg.device.type, dtype=torch.bfloat16):
-            return teacher.forward_norm_patches(images).float()
+            feats = teacher.forward_norm_features(images)
+            return NormFeatures(patches=feats.patches.float(), cls=feats.cls.float())
 
     # Initialize all survival batches upfront
     log.info("Initializing survival batches...")
@@ -145,9 +152,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             stage.batch_size, stage.fresh_count, G, cfg.device,
         )
 
-    # EMA tracking for losses (scene, local, total)
+    # EMA tracking for losses (scene, local, cls, total)
     ema_scene_t = torch.tensor(0.0, device=cfg.device)
     ema_local_t = torch.tensor(0.0, device=cfg.device)
+    ema_cls_t = torch.tensor(0.0, device=cfg.device)
     ema_loss_t = torch.tensor(0.0, device=cfg.device)
     alpha = 2 / (cfg.log_every + 1)
 
@@ -164,7 +172,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         # Load fresh images
         fresh_imgs = train_loader.next_batch().to(cfg.device)
         with torch.no_grad():
-            fresh_targets = compute_targets(fresh_imgs)
+            fresh_feats = compute_targets(fresh_imgs)
 
         # Viewpoint scale bounds for current grid size
         min_scale = stage.min_viewpoint_scale
@@ -176,11 +184,20 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             for _ in range(cfg.n_viewpoints_per_step)
         ]
         losses, final_hidden = avp.forward_loss(
-            state.images, viewpoints, state.targets, state.hidden, loss_fn=loss_fn,
+            state.images,
+            viewpoints,
+            state.targets,
+            state.hidden,
+            cls_target=state.cls_targets,
+            loss_fn=loss_fn,
         )
 
         # Combine losses (trainer's responsibility)
-        total_loss = losses.scene + (losses.local if losses.local is not None else 0.0)
+        total_loss = losses.scene
+        if losses.local is not None:
+            total_loss = total_loss + losses.local
+        if losses.cls is not None:
+            total_loss = total_loss + losses.cls
 
         if not torch.isfinite(total_loss):
             log.warning(f"NaN/Inf loss at step {step}, pruning trial")
@@ -196,18 +213,21 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         # Update EMAs
         scene_t = losses.scene.detach()
         local_t = losses.local.detach() if losses.local is not None else torch.tensor(0.0, device=cfg.device)
+        cls_t = losses.cls.detach() if losses.cls is not None else torch.tensor(0.0, device=cfg.device)
         total_t = total_loss.detach()
         if step > 0:
             ema_scene_t = alpha * scene_t + (1 - alpha) * ema_scene_t
             ema_local_t = alpha * local_t + (1 - alpha) * ema_local_t
+            ema_cls_t = alpha * cls_t + (1 - alpha) * ema_cls_t
             ema_loss_t = alpha * total_t + (1 - alpha) * ema_loss_t
         else:
-            ema_scene_t, ema_local_t, ema_loss_t = scene_t, local_t, total_t
+            ema_scene_t, ema_local_t, ema_cls_t, ema_loss_t = scene_t, local_t, cls_t, total_t
 
         if step % cfg.log_every == 0:
             ema_loss = ema_loss_t.item()
             ema_scene = ema_scene_t.item()
             ema_local = ema_local_t.item()
+            ema_cls = ema_cls_t.item()
             grad_norm = grad_norm_t.item()
             lr = scheduler.get_last_lr()[0]
             metrics = {
@@ -223,6 +243,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             if losses.local is not None:
                 metrics[f"grid{G}/train/local_loss"] = ema_local
                 metrics["train/local_loss"] = ema_local
+            if losses.cls is not None:
+                metrics[f"grid{G}/train/cls_loss"] = ema_cls
+                metrics["train/cls_loss"] = ema_cls
             exp.log_metrics(metrics, step=step)
             pbar.set_postfix_str(f"G={G} loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}")
 
@@ -263,7 +286,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         hidden_init = avp.init_hidden(stage.fresh_count, G)
         states[G] = state.step(
             fresh_images=fresh_imgs,
-            fresh_targets=fresh_targets,
+            fresh_targets=fresh_feats.patches,
+            fresh_cls_targets=fresh_feats.cls,
             next_hidden=final_hidden,
             hidden_init=hidden_init,
         )

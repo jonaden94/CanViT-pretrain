@@ -9,8 +9,8 @@ from .data import create_resolution_stages
 def test_config_defaults() -> None:
     """Config defaults are valid."""
     cfg = Config()
-    assert cfg.max_grid_size == 64
-    assert cfg.warmup_steps == 1000
+    assert cfg.max_grid_size == 128
+    assert cfg.warmup_steps == 10_000
 
 
 def test_resolution_stages_creation() -> None:

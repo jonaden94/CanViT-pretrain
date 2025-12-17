@@ -15,17 +15,21 @@ class SurvivalBatch:
     """
 
     images: Tensor  # [B, C, H, W]
-    targets: Tensor  # [B, G*G, D]
+    targets: Tensor  # [B, G*G, D] - patch tokens for scene/local loss
+    cls_targets: Tensor  # [B, D] - CLS tokens for CLS loss
     hidden: Tensor  # [B, n_tokens, D]
 
     @staticmethod
-    def init(images: Tensor, targets: Tensor, hidden: Tensor) -> "SurvivalBatch":
+    def init(
+        images: Tensor, targets: Tensor, cls_targets: Tensor, hidden: Tensor
+    ) -> "SurvivalBatch":
         """Initialize with random permutation to avoid first-step position bias."""
         B = images.shape[0]
         perm = torch.randperm(B, device=images.device)
         return SurvivalBatch(
             images=images[perm],
             targets=targets[perm],
+            cls_targets=cls_targets[perm],
             hidden=hidden[perm],
         )
 
@@ -34,6 +38,7 @@ class SurvivalBatch:
         *,
         fresh_images: Tensor,
         fresh_targets: Tensor,
+        fresh_cls_targets: Tensor,
         next_hidden: Tensor,
         hidden_init: Tensor,
     ) -> "SurvivalBatch":
@@ -49,6 +54,7 @@ class SurvivalBatch:
         # Cat fresh + survivors (survivors = indices K: due to prior random order)
         images = torch.cat([fresh_images, self.images[K:]], dim=0)
         targets = torch.cat([fresh_targets, self.targets[K:]], dim=0)
+        cls_targets = torch.cat([fresh_cls_targets, self.cls_targets[K:]], dim=0)
         # hidden_init NOT detached (learnable), next_hidden IS detached (no BPTT)
         hidden = torch.cat([hidden_init, next_hidden[K:].detach()], dim=0)
 
@@ -57,5 +63,6 @@ class SurvivalBatch:
         return SurvivalBatch(
             images=images[perm],
             targets=targets[perm],
+            cls_targets=cls_targets[perm],
             hidden=hidden[perm],
         )

@@ -1,12 +1,19 @@
 """DINOv3 backbone wrapper for AVP."""
 
-from typing import Any, cast, override
+from typing import Any, NamedTuple, cast, override
 
 import torch
 from dinov3.models.vision_transformer import DinoVisionTransformer
 from torch import Tensor, nn
 
 from avp_vit.backbone import ViTBackbone
+
+
+class NormFeatures(NamedTuple):
+    """Normalized features from DINOv3 forward pass."""
+
+    patches: Tensor  # [B, H*W, D]
+    cls: Tensor  # [B, D]
 
 
 class DINOv3Backbone(ViTBackbone, nn.Module):
@@ -85,10 +92,10 @@ class DINOv3Backbone(ViTBackbone, nn.Module):
         """The LayerNorm applied to produce x_norm_patchtokens."""
         return self._backbone.norm
 
-    def forward_norm_patches(self, images: Tensor) -> Tensor:
-        """Forward pass returning normalized patch tokens [B, H*W, D]."""
+    def forward_norm_features(self, images: Tensor) -> NormFeatures:
+        """Forward pass returning normalized patches and cls token."""
         out = cast(dict[str, Any], self._backbone.forward_features(images))
-        return out["x_norm_patchtokens"]
+        return NormFeatures(patches=out["x_norm_patchtokens"], cls=out["x_norm_clstoken"])
 
     @override
     def prepare_tokens(self, images: Tensor) -> tuple[Tensor, int, int]:

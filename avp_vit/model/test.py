@@ -190,22 +190,23 @@ def test_forward_loss():
     cfg = AVPConfig(glimpse_grid_size=3, n_scene_registers=0)
     avp = AVPViT(MockBackbone(), cfg, teacher_dim=64)
 
-    B, G = 2, 4
+    B, G, D = 2, 4, 64
     images = torch.randn(B, 3, 64, 64)
-    target = torch.randn(B, G * G, 64)
+    target = torch.randn(B, G * G, D)
+    cls_target = torch.randn(B, D)
     hidden = avp.init_hidden(B, G)
     viewpoints = [Viewpoint.full_scene(B, images.device), Viewpoint.quadrant(B, images.device, 0, 0)]
 
-    losses, final_hidden = avp.forward_loss(images, viewpoints, target, hidden)
+    losses, final_hidden = avp.forward_loss(images, viewpoints, target, hidden, cls_target=cls_target)
 
     assert isinstance(losses, LossOutputs)
     assert losses.scene.shape == ()
     assert losses.scene.item() >= 0
-    # use_local_loss=True by default, so local should be present
-    assert losses.local is not None
-    assert losses.local.shape == ()
-    assert losses.local.item() >= 0
-    assert final_hidden.shape == (B, G * G, 64)
+    # use_cls_loss=True by default, so cls should be present
+    assert losses.cls is not None
+    assert losses.cls.shape == ()
+    assert losses.cls.item() >= 0
+    assert final_hidden.shape == (B, G * G, D)
 
 
 def test_step_output_type():

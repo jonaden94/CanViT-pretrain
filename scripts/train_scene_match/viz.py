@@ -15,13 +15,12 @@ from matplotlib.figure import Figure
 from torch import Tensor
 
 from avp_vit import AVPViT
-from avp_vit.backbone.dinov3 import DINOv3Backbone
+from avp_vit.backbone.dinov3 import DINOv3Backbone, NormFeatures
 from avp_vit.glimpse import Viewpoint, sample_at_viewpoint
 from avp_vit.train import (
     imagenet_denormalize,
     plot_mean_map,
     plot_multistep_pca,
-    plot_trajectory,
 )
 from avp_vit.train.viewpoint import make_eval_viewpoints
 
@@ -223,9 +222,9 @@ def viz_and_log(
             for out in outputs
         ]
         locals_teacher_raw = [
-            teacher.forward_norm_patches(
+            teacher.forward_norm_features(
                 out.glimpse[sample_idx : sample_idx + 1]
-            ).squeeze(0)
+            ).patches.squeeze(0)
             for out in outputs
         ]
 
@@ -293,7 +292,7 @@ def eval_and_log(
     step: int,
     avp: AVPViT,
     teacher: DINOv3Backbone,
-    compute_targets: Callable[[Tensor], Tensor],
+    compute_targets: Callable[[Tensor], "NormFeatures"],
     images: Tensor,
     scene_grid_size: int,
     prefix: str = "val",
@@ -306,7 +305,7 @@ def eval_and_log(
     viewpoints = make_eval_viewpoints(B, images.device)
 
     with torch.inference_mode():
-        target = compute_targets(images)
+        target = compute_targets(images).patches
         hidden = avp.init_hidden(B, scene_grid_size)
 
     l1_losses, mse_losses = viz_and_log(
