@@ -73,22 +73,39 @@ def imagenet_denormalize(t: Tensor) -> Tensor:
     return ((t * std + mean).clamp(0, 1)).permute(1, 2, 0)
 
 
-def plot_mean_map(mean_map: NDArray[np.floating]) -> Figure:
-    """Plot mean map amplitude heatmap.
+def plot_norm_stats(
+    mean: NDArray[np.floating],
+    std: NDArray[np.floating],
+    grid_size: int,
+) -> Figure:
+    """Plot normalizer running stats (mean and std amplitude heatmaps).
 
     Args:
-        mean_map: [G, G, D] numpy array
+        mean: [G*G, D] running mean per position
+        std: [G*G, D] running std per position
+        grid_size: G (spatial grid size)
 
     Returns:
-        matplotlib Figure with heatmap showing L2 norm at each position
+        matplotlib Figure with two heatmaps (mean L2 norm, std L2 norm)
     """
-    mean_amp = np.linalg.norm(mean_map, axis=-1)  # [G, G]
+    G = grid_size
+    mean_2d = mean.reshape(G, G, -1)
+    std_2d = std.reshape(G, G, -1)
 
-    fig, ax = plt.subplots(figsize=(5, 4))
-    im = ax.imshow(mean_amp, cmap="viridis")
-    ax.set_title(f"Mean amplitude (L2)\nmin={mean_amp.min():.3f}, max={mean_amp.max():.3f}")
-    ax.axis("off")
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    mean_amp = np.linalg.norm(mean_2d, axis=-1)
+    std_amp = np.linalg.norm(std_2d, axis=-1)
+
+    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+
+    im0 = axes[0].imshow(mean_amp, cmap="viridis")
+    axes[0].set_title(f"Mean L2\n[{mean_amp.min():.2f}, {mean_amp.max():.2f}]")
+    axes[0].axis("off")
+    fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+
+    im1 = axes[1].imshow(std_amp, cmap="viridis")
+    axes[1].set_title(f"Std L2\n[{std_amp.min():.2f}, {std_amp.max():.2f}]")
+    axes[1].axis("off")
+    fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
 
     plt.tight_layout()
     return fig

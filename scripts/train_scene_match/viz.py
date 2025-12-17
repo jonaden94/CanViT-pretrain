@@ -17,7 +17,7 @@ from torch import Tensor
 from avp_vit import AVPViT
 from avp_vit.backbone.dinov3 import DINOv3Backbone, NormFeatures
 from avp_vit.glimpse import Viewpoint, sample_at_viewpoint
-from avp_vit.train import imagenet_denormalize, plot_multistep_pca
+from avp_vit.train import imagenet_denormalize, plot_multistep_pca, plot_norm_stats
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import make_eval_viewpoints
 
@@ -428,7 +428,7 @@ def log_norm_stats(
     normalizers: dict[int, PositionAwareNorm],
     step: int,
 ) -> None:
-    """Log normalizer running stats to Comet (per grid size)."""
+    """Log normalizer running stats to Comet (per grid size): metrics and heatmaps."""
     for G, norm in normalizers.items():
         exp.log_metrics(
             {
@@ -438,3 +438,8 @@ def log_norm_stats(
             },
             step=step,
         )
+        # Plot spatial heatmaps of mean/std amplitude
+        mean_np = norm.mean.cpu().float().numpy()
+        std_np = norm.var.sqrt().cpu().float().numpy()
+        fig = plot_norm_stats(mean_np, std_np, G)
+        log_figure(exp, fig, f"norm/G{G}/spatial", step)
