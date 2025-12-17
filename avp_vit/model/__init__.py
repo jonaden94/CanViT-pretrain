@@ -63,7 +63,7 @@ class AVPConfig:
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
     layer_scale_init: float = 0.01  # Init for LayerScale (reference: 0.01)
     temporal_gate_init: float | None = 0.001  # None=disabled, float=gate init (ref: 0.001)
-    gradient_checkpointing: bool = True  # Checkpoint at timestep boundaries
+    gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries
     gating: GatingMode = "none"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
     adapter_stride: int = 1  # Adapters every N backbone blocks (reference: 1)
     attention: AttentionConfig = field(default_factory=AttentionConfig)

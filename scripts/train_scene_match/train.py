@@ -100,6 +100,13 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     avp = create_avp(student_backbone, teacher.embed_dim, cfg)
 
+    if cfg.compile and cfg.avp.gradient_checkpointing:
+        raise ValueError(
+            "compile=True and gradient_checkpointing=True may be incompatible. "
+            "This combination has caused CheckpointError (tensor metadata mismatch) in some configurations. "
+            "Disable one of them."
+        )
+
     if cfg.compile:
         log.info("Compiling teacher and AVP")
         compile_teacher(teacher)
