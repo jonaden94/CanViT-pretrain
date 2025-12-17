@@ -60,7 +60,7 @@ class StepOutput(NamedTuple):
 @final
 @dataclass
 class AVPConfig:
-    glimpse_grid_size: int = 7
+    glimpse_grid_size: int = 16  # 256px^2
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
     layer_scale_init: float = 0.01  # Init for LayerScale (reference: 0.01)
     temporal_gate_init: float | None = (
