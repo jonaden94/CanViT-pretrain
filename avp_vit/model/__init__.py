@@ -47,15 +47,11 @@ T = TypeVar("T")
 
 
 class StepOutput(NamedTuple):
-    """Output from a single AVPViT forward step.
-
-    - hidden: Internal state for CONTINUATION (student embed space)
-    - scene:  Projected output for LOSS/VIZ (teacher_dim space)
-    """
+    """Output from a single AVPViT forward step."""
 
     glimpse: Tensor  # [B, C, H, W]
     local: Tensor  # [B, N, student_embed_dim]
-    hidden: Tensor  # [B, n_persistent + G*G, student_embed_dim]
+    hidden: Tensor  # [B, n_registers + G*G, student_embed_dim]
     scene: Tensor  # [B, G*G, teacher_dim]
     context_out: Tensor | None  # [B, N_ctx, student_embed_dim] or None
 
@@ -77,44 +73,28 @@ class AVPConfig:
 class AVPViT(nn.Module):
     """Active Visual Pondering ViT.
 
-    Takes full images + viewpoints, handles glimpse extraction and tokenization internally.
-
-    ## Key Concepts
-
-    - **hidden**: [persistent_registers | spatial_hidden] - internal state for CONTINUATION
-    - **scene**: scene_proj(spatial_hidden) - projected output for LOSS/VIZ
-    - **scene_proj**: LayerNorm + Linear, maps embed_dim -> output_dim
-
-    State tokens use unit-norm scaling: randn / sqrt(D).
+    hidden = [scene_registers | spatial_hidden], shape [B, n_registers + G*G, D]
+    scene = scene_proj(spatial_hidden), shape [B, G*G, teacher_dim]
     """
 
     backbone: ViTBackbone
     cfg: AVPConfig
-    teacher_dim: int  # Dimension scene_proj projects to (for loss against teacher)
-    persistent_registers: nn.Parameter | None  # [1, n_persistent, D]
-    ephemeral_registers: nn.Parameter | None  # [1, n_ephemeral, D]
+    teacher_dim: int
+    scene_registers: nn.Parameter | None  # [1, n_registers, D]
     spatial_hidden_init: nn.Parameter  # [1, 1, D] -> broadcast to [B, G*G, D]
-    scene_temporal_gate: nn.Parameter | None  # [D] gate, or None if disabled
-    read_attn: nn.ModuleList  # Unified API: all handle residual/gating internally
+    register_temporal_gate: nn.Parameter | None  # [n_registers, D] per-position + per-dim
+    spatial_temporal_gate: nn.Parameter | None  # [D] per-dim only
+    read_attn: nn.ModuleList
     write_attn: nn.ModuleList
-    scene_proj: nn.Sequential  # LayerNorm + Linear: projects to teacher_dim
+    scene_proj: nn.Sequential
 
     @property
     def glimpse_size(self) -> int:
         return self.cfg.glimpse_grid_size * self.backbone.patch_size
 
     @property
-    def n_scene_registers(self) -> int:
-        """Total scene registers (persistent + ephemeral). Fixed count from config."""
+    def n_registers(self) -> int:
         return self.cfg.n_scene_registers
-
-    @property
-    def n_persistent_registers(self) -> int:
-        return self.n_scene_registers // 2
-
-    @property
-    def n_ephemeral_registers(self) -> int:
-        return self.n_scene_registers - self.n_persistent_registers
 
     @property
     def n_local_tokens(self) -> int:
@@ -130,24 +110,22 @@ class AVPViT(nn.Module):
     def _init_state_tokens(self, embed_dim: int) -> None:
         """Initialize learnable state tokens with unit-norm scaling (randn/sqrt(D))."""
         scale = 1.0 / math.sqrt(embed_dim)
-        n_persistent = self.n_persistent_registers
-        n_ephemeral = self.n_ephemeral_registers
+        n_reg = self.n_registers
+        gate_init = self.cfg.temporal_gate_init
 
         self.spatial_hidden_init = nn.Parameter(torch.randn(1, 1, embed_dim) * scale)
-        self.persistent_registers = (
-            nn.Parameter(torch.randn(1, n_persistent, embed_dim) * scale)
-            if n_persistent > 0
+        self.scene_registers = (
+            nn.Parameter(torch.randn(1, n_reg, embed_dim) * scale) if n_reg > 0 else None
+        )
+        # Temporal gates: hidden = base + gate * (prev - base)
+        self.register_temporal_gate = (
+            nn.Parameter(torch.full((n_reg, embed_dim), gate_init))
+            if gate_init is not None and n_reg > 0
             else None
         )
-        self.ephemeral_registers = (
-            nn.Parameter(torch.randn(1, n_ephemeral, embed_dim) * scale)
-            if n_ephemeral > 0
-            else None
-        )
-        # Scene temporal gate: hidden = base + gate * (prev - base)
-        self.scene_temporal_gate = (
-            nn.Parameter(torch.full((embed_dim,), self.cfg.temporal_gate_init))
-            if self.cfg.temporal_gate_init is not None
+        self.spatial_temporal_gate = (
+            nn.Parameter(torch.full((embed_dim,), gate_init))
+            if gate_init is not None
             else None
         )
 
@@ -192,21 +170,16 @@ class AVPViT(nn.Module):
         )
 
     def _get_base_hidden(self, B: int, scene_grid_size: int) -> Tensor:
-        """Get base hidden state (learnable inits expanded to batch size).
-
-        Returns: [B, n_persistent + G*G, D] = [persistent_registers | spatial_hidden]
-        """
+        """Base hidden: [scene_registers | spatial], shape [B, n_registers + G*G, D]."""
         n_spatial = scene_grid_size ** 2
-        spatial_hidden = self.spatial_hidden_init.expand(B, n_spatial, -1)
-        if self.persistent_registers is not None:
-            return torch.cat(
-                [self.persistent_registers.expand(B, -1, -1), spatial_hidden], dim=1
-            )
-        return spatial_hidden
+        spatial = self.spatial_hidden_init.expand(B, n_spatial, -1)
+        if self.scene_registers is not None:
+            return torch.cat([self.scene_registers.expand(B, -1, -1), spatial], dim=1)
+        return spatial
 
     def _infer_scene_grid_size(self, hidden: Tensor) -> int:
         """Infer scene grid size from hidden state shape."""
-        n_spatial = hidden.shape[1] - self.n_persistent_registers
+        n_spatial = hidden.shape[1] - self.n_registers
         G = int(math.sqrt(n_spatial))
         assert G * G == n_spatial, f"hidden spatial dim {n_spatial} is not a perfect square"
         return G
@@ -216,28 +189,25 @@ class AVPViT(nn.Module):
         return self._get_base_hidden(batch_size, scene_grid_size)
 
     def _apply_temporal_gate(self, hidden: Tensor) -> Tensor:
-        """Apply temporal gating to hidden state if enabled.
-
-        If temporal_gate_init is set: hidden = base + gate * (hidden - base)
-        Otherwise: passthrough
-        """
-        if self.scene_temporal_gate is None:
+        """Apply temporal gating: hidden = base + gate * (hidden - base)."""
+        if self.spatial_temporal_gate is None:
             return hidden
         B = hidden.shape[0]
         G = self._infer_scene_grid_size(hidden)
         base = self._get_base_hidden(B, G)
-        return base + self.scene_temporal_gate * (hidden - base)
+        n_reg = self.n_registers
+
+        if n_reg > 0 and self.register_temporal_gate is not None:
+            reg_gate = self.register_temporal_gate  # [n_reg, D]
+            spatial_gate = self.spatial_temporal_gate  # [D]
+            reg_out = base[:, :n_reg] + reg_gate * (hidden[:, :n_reg] - base[:, :n_reg])
+            spatial_out = base[:, n_reg:] + spatial_gate * (hidden[:, n_reg:] - base[:, n_reg:])
+            return torch.cat([reg_out, spatial_out], dim=1)
+        return base + self.spatial_temporal_gate * (hidden - base)
 
     def get_spatial(self, hidden: Tensor) -> Tensor:
-        """Extract spatial_hidden from full hidden state.
-
-        Args:
-            hidden: Full hidden state [B, n_persistent + G*G, D]
-
-        Returns:
-            Spatial hidden [B, G*G, D] (excludes persistent registers)
-        """
-        return hidden[:, self.n_persistent_registers :]
+        """Extract spatial from hidden: [B, n_registers + G*G, D] -> [B, G*G, D]."""
+        return hidden[:, self.n_registers:]
 
     def compute_scene(self, hidden: Tensor) -> Tensor:
         """Extract spatial tokens from hidden, project to teacher_dim."""
@@ -251,80 +221,40 @@ class AVPViT(nn.Module):
         hidden: Tensor,
         context: Tensor | None,
     ) -> StepOutput:
-        """Process one glimpse: read from hidden, forward through backbone, write to hidden.
-
-        Args:
-            glimpse: Extracted glimpse image [B, C, H, W]
-            centers: Viewpoint centers [B, 2]
-            scales: Viewpoint scales [B]
-            hidden: Hidden state [B, n_persistent + G*G, D] (use init_hidden to create)
-            context: External context tokens [B, N_ctx, D] or None. Participates in attention,
-                     returned transformed but NOT persisted in hidden state.
-
-        Returns:
-            StepOutput with both hidden (for continuation) and scene (for loss/viz)
-        """
+        """Process one glimpse: read from hidden, forward through backbone, write to hidden."""
         D = self.backbone.embed_dim
         B = hidden.shape[0]
         scene_grid_size = self._infer_scene_grid_size(hidden)
+        n_reg = self.n_registers
+        n_spatial = scene_grid_size ** 2
 
-        # Tokenize inside checkpoint so patch embedding activations aren't stored
-        local_fresh, H, W = self.backbone.prepare_tokens(glimpse)
-        glimpse_G = self.cfg.glimpse_grid_size
-        assert H == W == glimpse_G, f"backbone returned {H}x{W} but config expects {glimpse_G}x{glimpse_G}"
+        local, H, W = self.backbone.prepare_tokens(glimpse)
+        assert H == W == self.cfg.glimpse_grid_size
+        assert local.shape[0] == B
 
-        assert local_fresh.shape[0] == B, f"batch mismatch: glimpse {local_fresh.shape[0]} vs hidden {B}"
-        rope_dtype = self.backbone.rope_dtype
-        periods = self.backbone.rope_periods
-        n_ephemeral = self.n_ephemeral_registers
-
-        # Validate context shape if provided
+        # Validate context
         n_ctx = 0
         if context is not None:
-            assert context.ndim == 3, (
-                f"context must be [B, N_ctx, D], got {context.shape}"
-            )
-            assert context.shape[0] == B, (
-                f"context batch {context.shape[0]} != glimpse batch {B}"
-            )
-            assert context.shape[2] == D, (
-                f"context dim {context.shape[2]} != embed_dim {D}"
-            )
+            assert context.shape == (B, context.shape[1], D)
             n_ctx = context.shape[1]
 
-        local = local_fresh
-
-        # Apply temporal gating and build hidden_t: [context, ephemeral, persistent, spatial]
+        # Apply temporal gating: [registers | spatial]
         hidden_t = self._apply_temporal_gate(hidden)
-        n_persistent = self.n_persistent_registers
-        n_spatial = scene_grid_size ** 2
-        assert hidden_t.shape == (B, n_persistent + n_spatial, D), (
-            f"hidden shape {hidden_t.shape} != expected ({B}, {n_persistent + n_spatial}, {D})"
-        )
+        assert hidden_t.shape == (B, n_reg + n_spatial, D)
 
-        if self.ephemeral_registers is not None:
-            hidden_t = torch.cat(
-                [self.ephemeral_registers.expand(B, -1, -1), hidden_t], dim=1
-            )
-
+        # Prepend context if provided: [context | registers | spatial]
         if n_ctx > 0:
-            assert context is not None
             hidden_t = torch.cat([context, hidden_t], dim=1)
 
-        # Verify assembled shape before norm
-        expected_hidden_t = n_ctx + n_ephemeral + n_persistent + n_spatial
-        assert hidden_t.shape == (B, expected_hidden_t, D), (
-            f"assembled hidden_t {hidden_t.shape} != expected ({B}, {expected_hidden_t}, {D})"
-        )
-
-        local_pos = glimpse_positions(centers, scales, H, W, dtype=rope_dtype)
-        # Compute scene positions on-the-fly (cheap: O(G²) vs O(G² * D * layers) for attention)
+        # RoPE positions
+        local_pos = glimpse_positions(centers, scales, H, W, dtype=self.backbone.rope_dtype)
         scene_pos = make_grid_positions(
-            scene_grid_size, scene_grid_size, glimpse.device, dtype=rope_dtype
+            scene_grid_size, scene_grid_size, glimpse.device, dtype=self.backbone.rope_dtype
         ).unsqueeze(0).expand(B, -1, -1)
-        local_rope = compute_rope(local_pos, periods)
-        scene_rope = compute_rope(scene_pos, periods)
+        local_rope = compute_rope(local_pos, self.backbone.rope_periods)
+        scene_rope = compute_rope(scene_pos, self.backbone.rope_periods)
 
+        # Interleaved read/write attention
         stride = self.cfg.adapter_stride
         for i in range(self.backbone.n_blocks):
             if i % stride == 0:
@@ -335,31 +265,14 @@ class AVPViT(nn.Module):
                 a = i // stride
                 hidden_t = self.write_attn[a](hidden_t, local, scene_rope, local_rope)
 
-        # Verify shape unchanged after attention
-        assert hidden_t.shape == (B, expected_hidden_t, D), (
-            f"hidden_t after attention {hidden_t.shape} != expected ({B}, {expected_hidden_t}, {D})"
-        )
-
-        # Extract transformed context (if provided)
+        # Extract context if provided
         context_out: Tensor | None = None
         if n_ctx > 0:
             context_out = hidden_t[:, :n_ctx]
             hidden_t = hidden_t[:, n_ctx:]
-            assert isinstance(context_out, Tensor)
-            assert context_out.shape == (B, n_ctx, D), (
-                f"context_out {context_out.shape} != expected ({B}, {n_ctx}, {D})"
-            )
 
-        # Strip ephemeral registers -> persistent + spatial
-        hidden_out = hidden_t[:, n_ephemeral:]
-        assert hidden_out.shape == (B, n_persistent + n_spatial, D), (
-            f"hidden_out {hidden_out.shape} != expected ({B}, {n_persistent + n_spatial}, {D})"
-        )
-
-        # Scene output is spatial-only (exclude persistent registers)
-        scene_out = self.compute_scene(hidden_out)
-
-        return StepOutput(glimpse, local, hidden_out, scene_out, context_out)
+        scene_out = self.compute_scene(hidden_t)
+        return StepOutput(glimpse, local, hidden_t, scene_out, context_out)
 
     def forward_step(
         self,
@@ -368,22 +281,7 @@ class AVPViT(nn.Module):
         hidden: Tensor,
         context: Tensor | None = None,
     ) -> StepOutput:
-        """Process a single viewpoint.
-
-        Args:
-            images: Input images [B, C, H, W]
-            viewpoint: Where to look in the images
-            hidden: Hidden state [B, n_persistent + G*G, D] (use init_hidden to create initial)
-            context: External context tokens [B, N_ctx, D] or None. Pre-embedded by caller.
-                     Participates in attention, returned transformed in context_out.
-
-        Returns:
-            StepOutput containing:
-            - glimpse: Extracted glimpse image
-            - hidden: Updated hidden state (use for CONTINUATION)
-            - scene: Projected output (use for LOSS/VIZ)
-            - context_out: Transformed context tokens (if context provided)
-        """
+        """Process a single viewpoint."""
         glimpse = extract_glimpse(images, viewpoint, self.glimpse_size)
 
         if self.cfg.gradient_checkpointing and self.training:

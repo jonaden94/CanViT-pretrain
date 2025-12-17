@@ -82,7 +82,7 @@ def avp_step_flops(model: AVPViT, backbone: DINOv3Backbone, scene_grid_size: int
     glimpse_patches = cfg.glimpse_grid_size**2
     spatial_patches = scene_grid_size**2
     n_local = glimpse_patches + backbone.n_prefix_tokens
-    n_scene = model.n_ephemeral_registers + model.n_persistent_registers + spatial_patches
+    n_scene = model.n_registers + spatial_patches
 
     glimpse_embed = backbone.patch_embed_flops(glimpse_patches)
 

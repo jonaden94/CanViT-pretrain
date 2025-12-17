@@ -19,7 +19,7 @@ from avp_vit.backbone.dinov3 import DINOv3Backbone
 from avp_vit.glimpse import Viewpoint
 from avp_vit.train import imagenet_denormalize, plot_multistep_pca, plot_trajectory
 from avp_vit.train.norm import PositionAwareNorm
-from avp_vit.train.viewpoint import make_curriculum_eval_viewpoints
+from avp_vit.train.viewpoint import make_eval_viewpoints
 
 log = logging.getLogger(__name__)
 
@@ -107,9 +107,9 @@ def viz_and_log(
 
         if log_curves:
             hiddens = [initial_hidden] + [out.hidden for out in outputs]
-            n_persistent = avp.n_persistent_registers
+            n_reg = avp.n_registers
 
-            # Spatial hidden norm vs timestep (excludes persistent registers)
+            # Spatial hidden norm vs timestep (excludes registers)
             spatial_norms = [avp.get_spatial(h).norm(dim=-1).mean().item() for h in hiddens]
             exp.log_curve(
                 f"{prefix}/spatial_norm_vs_timestep",
@@ -118,9 +118,9 @@ def viz_and_log(
                 step=step,
             )
 
-            # Persistent register norm vs timestep (if enabled and any exist)
-            if log_register_curves and n_persistent > 0:
-                reg_norms = [h[:, :n_persistent].norm(dim=-1).mean().item() for h in hiddens]
+            # Register norm vs timestep (if enabled and any exist)
+            if log_register_curves and n_reg > 0:
+                reg_norms = [h[:, :n_reg].norm(dim=-1).mean().item() for h in hiddens]
                 exp.log_curve(
                     f"{prefix}/register_norm_vs_timestep",
                     x=list(range(len(reg_norms))),
@@ -264,10 +264,9 @@ def eval_and_log(
     log_curves: bool = True,
     loss_type: Literal["l1", "mse"] = "mse",
 ) -> float:
-    """Evaluate on one batch with curriculum viewpoints. Returns final L1 loss."""
+    """Evaluate on one batch. Returns final L1 loss."""
     B = images.shape[0]
-    g = avp.cfg.glimpse_grid_size
-    viewpoints = make_curriculum_eval_viewpoints(B, scene_grid_size, g, images.device)
+    viewpoints = make_eval_viewpoints(B, images.device)
 
     with torch.inference_mode():
         target = compute_targets(images)
