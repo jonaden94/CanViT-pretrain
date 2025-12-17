@@ -17,7 +17,12 @@ from torch import Tensor
 from avp_vit import AVPViT
 from avp_vit.backbone.dinov3 import DINOv3Backbone
 from avp_vit.glimpse import Viewpoint, sample_at_viewpoint
-from avp_vit.train import imagenet_denormalize, plot_mean_map, plot_multistep_pca, plot_trajectory
+from avp_vit.train import (
+    imagenet_denormalize,
+    plot_mean_map,
+    plot_multistep_pca,
+    plot_trajectory,
+)
 from avp_vit.train.viewpoint import make_eval_viewpoints
 
 log = logging.getLogger(__name__)
@@ -108,7 +113,9 @@ def viz_and_log(
             n_reg = avp.n_registers
 
             # Spatial hidden norm vs timestep (excludes registers)
-            spatial_norms = [avp.get_spatial(h).norm(dim=-1).mean().item() for h in hiddens]
+            spatial_norms = [
+                avp.get_spatial(h).norm(dim=-1).mean().item() for h in hiddens
+            ]
             exp.log_curve(
                 f"{prefix}/spatial_norm_vs_timestep",
                 x=list(range(len(spatial_norms))),
@@ -128,7 +135,10 @@ def viz_and_log(
 
             # Step-to-step spatial difference norm
             diff_norms = [
-                (avp.get_spatial(hiddens[i + 1]) - avp.get_spatial(hiddens[i])).norm(dim=-1).mean().item()
+                (avp.get_spatial(hiddens[i + 1]) - avp.get_spatial(hiddens[i]))
+                .norm(dim=-1)
+                .mean()
+                .item()
                 for i in range(len(hiddens) - 1)
             ]
             exp.log_curve(
@@ -181,13 +191,24 @@ def viz_and_log(
         teacher_np = (target[sample_idx] - mean_map_scene).cpu().float().numpy()
         initial_np = (initial_scene[sample_idx] - mean_map_scene).cpu().float().numpy()
 
-        scenes = [(out.scene[sample_idx] - mean_map_scene).cpu().float().numpy() for out in outputs]
+        scenes = [
+            (out.scene[sample_idx] - mean_map_scene).cpu().float().numpy()
+            for out in outputs
+        ]
 
         # Raw hidden spatials (before output_proj)
         if show_hidden:
-            initial_hidden_spatial = avp.get_spatial(initial_hidden[sample_idx : sample_idx + 1])[0].cpu().float().numpy()
+            initial_hidden_spatial = (
+                avp.get_spatial(initial_hidden[sample_idx : sample_idx + 1])[0]
+                .cpu()
+                .float()
+                .numpy()
+            )
             hidden_spatials = [
-                avp.get_spatial(out.hidden[sample_idx : sample_idx + 1])[0].cpu().float().numpy()
+                avp.get_spatial(out.hidden[sample_idx : sample_idx + 1])[0]
+                .cpu()
+                .float()
+                .numpy()
                 for out in outputs
             ]
         else:
@@ -209,22 +230,29 @@ def viz_and_log(
         ]
 
         locals_avp = [
-            (feat - avp.sample_mean_map_at_viewpoint(vp)[sample_idx]).cpu().float().numpy()
+            (feat).cpu().float().numpy()
             for feat, vp in zip(locals_avp_raw, viewpoints, strict=True)
         ]
         locals_teacher = [
-            (feat - avp.sample_mean_map_at_viewpoint(vp)[sample_idx]).cpu().float().numpy()
+            (feat).cpu().float().numpy()
             for feat, vp in zip(locals_teacher_raw, viewpoints, strict=True)
         ]
 
         # Cropped teacher: sample from full-image teacher at viewpoint positions
         # Shows "what teacher thinks at these positions with FULL image context"
         # No mean_map centering - this is raw teacher, PCA handles its own centering
-        target_spatial = target.view(target.shape[0], scene_grid_size, scene_grid_size, -1).permute(0, 3, 1, 2)
+        target_spatial = target.view(
+            target.shape[0], scene_grid_size, scene_grid_size, -1
+        ).permute(0, 3, 1, 2)
         locals_teacher_cropped = [
-            sample_at_viewpoint(target_spatial, vp, glimpse_grid_size)[sample_idx]  # [D, G, G]
-            .permute(1, 2, 0).reshape(-1, target.shape[-1])  # [G², D]
-            .cpu().float().numpy()
+            sample_at_viewpoint(target_spatial, vp, glimpse_grid_size)[
+                sample_idx
+            ]  # [D, G, G]
+            .permute(1, 2, 0)
+            .reshape(-1, target.shape[-1])  # [G², D]
+            .cpu()
+            .float()
+            .numpy()
             for vp in viewpoints
         ]
 
@@ -282,7 +310,15 @@ def eval_and_log(
         hidden = avp.init_hidden(B, scene_grid_size)
 
     l1_losses, mse_losses = viz_and_log(
-        exp, step, prefix, avp, teacher, images, viewpoints, target, hidden,
+        exp,
+        step,
+        prefix,
+        avp,
+        teacher,
+        images,
+        viewpoints,
+        target,
+        hidden,
         log_spatial_stats=log_spatial_stats,
         log_curves=log_curves,
         loss_type=loss_type,
@@ -315,7 +351,9 @@ def save_checkpoint(
     }
     torch.save(checkpoint, path)
     size_mb = path.stat().st_size / (1024 * 1024)
-    log.info(f"Saved checkpoint: {path} ({size_mb:.1f} MB), train_loss={train_loss:.4f}")
+    log.info(
+        f"Saved checkpoint: {path} ({size_mb:.1f} MB), train_loss={train_loss:.4f}"
+    )
     exp.log_metric("ckpt/train_loss", train_loss, step=step)
 
 
