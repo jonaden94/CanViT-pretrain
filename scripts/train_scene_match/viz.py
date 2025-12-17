@@ -214,7 +214,7 @@ def viz_and_log(
             initial_hidden_spatial = None
             hidden_spatials = None
 
-        # Local features - center by subtracting mean_map sampled at viewpoint
+        # Local features (no mean_map centering - local loss uses raw features)
         locals_avp_raw = [
             avp_backbone.output_norm(
                 out.local[sample_idx : sample_idx + 1, n_prefix:]

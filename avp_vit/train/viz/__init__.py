@@ -59,31 +59,6 @@ def pca_rgb(pca: PCA, features: NDArray[np.floating], H: int, W: int) -> NDArray
     return _pca_proj_to_rgb(proj, H, W)
 
 
-def pca_rgb_local_centered(
-    pca: PCA,
-    features: NDArray[np.floating],
-    H: int,
-    W: int,
-) -> NDArray[np.floating]:
-    """Project features using own mean but teacher's components and variance.
-
-    Centers with OWN mean (removes DC offset), then projects through teacher's
-    components and scales by teacher's explained variance. This reveals whether
-    features have teacher-like structure despite global mean shift.
-
-    Args:
-        pca: Fitted PCA (we use components_ and explained_variance_)
-        features: [H*W, D] numpy array
-
-    Returns:
-        [H, W, 3] numpy array with sigmoid-scaled values in [0, 1]
-    """
-    centered = features - features.mean(axis=0, keepdims=True)
-    proj = centered @ pca.components_.T
-    proj /= np.sqrt(pca.explained_variance_)
-    return _pca_proj_to_rgb(proj, H, W)
-
-
 def imagenet_denormalize(t: Tensor) -> Tensor:
     """Convert [3, H, W] ImageNet-normalized tensor to [H, W, 3] in [0, 1].
 
@@ -229,10 +204,10 @@ def plot_multistep_pca(
     Row 0 = "init": learned spatial_hidden_init projected through scene_proj, BEFORE any glimpses
     Row 1+ = "t=0, t=1, ...": scene state AFTER processing each glimpse
 
-    Columns: Trajectory | Glimpse | Teacher | Scene | Scene/local | [Hidden] | Local AVP | Local Teacher | [Cropped Teacher] | [Δ Hidden] | Δ Scene | Error
+    Columns: Trajectory | Glimpse | Teacher | Scene | [Hidden] | Local AVP | Local Teacher | [Cropped Teacher] | [Δ Hidden] | Δ Scene | Error
 
     PCA basis selection principle: use same basis to COMPARE, use own basis to see INTERNAL STRUCTURE.
-    - Teacher, Scene, Scene/local: teacher's PCA (comparable colors)
+    - Teacher, Scene: teacher's PCA (comparable colors)
     - Hidden: own PCA per timestep (different embedding space)
     - Local Teacher: own PCA (shows internal structure of local-context features)
     - Local AVP, Cropped Teacher: when use_local_loss=True, both use cropped teacher's PCA
@@ -282,7 +257,6 @@ def plot_multistep_pca(
     pca_teacher = fit_pca(teacher)
     teacher_rgb = pca_rgb(pca_teacher, teacher, S, S)
     initial_rgb = pca_rgb(pca_teacher, initial_scene, S, S)
-    initial_rgb_local = pca_rgb_local_centered(pca_teacher, initial_scene, S, S)
 
     # Hidden PCA for init (own basis)
     if show_hidden:
@@ -315,9 +289,9 @@ def plot_multistep_pca(
             prev_hidden = h
 
     # Column indices
-    # Trajectory | Glimpse | Teacher | Scene | Scene/local | [Hidden] | Local AVP | Local Teacher | [Cropped Teacher] | [Δ Hidden] | Δ Scene | Error
-    C_TRAJ, C_GLIMPSE, C_TEACHER, C_SCENE, C_SCENE_LOCAL = 0, 1, 2, 3, 4
-    c = 5
+    # Trajectory | Glimpse | Teacher | Scene | [Hidden] | Local AVP | Local Teacher | [Cropped Teacher] | [Δ Hidden] | Δ Scene | Error
+    C_TRAJ, C_GLIMPSE, C_TEACHER, C_SCENE = 0, 1, 2, 3
+    c = 4
     C_HIDDEN = c if show_hidden else None
     if show_hidden:
         c += 1
@@ -351,10 +325,6 @@ def plot_multistep_pca(
     axes[row, C_SCENE].set_title("Scene (init)")
     axes[row, C_SCENE].axis("off")
 
-    axes[row, C_SCENE_LOCAL].imshow(initial_rgb_local)
-    axes[row, C_SCENE_LOCAL].set_title("Scene/local (init)")
-    axes[row, C_SCENE_LOCAL].axis("off")
-
     if show_hidden:
         assert C_HIDDEN is not None and initial_hidden_rgb is not None
         axes[row, C_HIDDEN].imshow(initial_hidden_rgb)
@@ -386,7 +356,6 @@ def plot_multistep_pca(
     for t in range(n_views):
         row = t + 1
         scene_rgb = pca_rgb(pca_teacher, scenes[t], S, S)
-        scene_rgb_local = pca_rgb_local_centered(pca_teacher, scenes[t], S, S)
 
         # Hidden: own PCA per timestep
         if show_hidden:
@@ -447,11 +416,6 @@ def plot_multistep_pca(
         axes[row, C_SCENE].imshow(scene_rgb)
         axes[row, C_SCENE].set_title(f"Scene t={t}")
         axes[row, C_SCENE].axis("off")
-
-        # Col: Scene/local (teacher components, own mean)
-        axes[row, C_SCENE_LOCAL].imshow(scene_rgb_local)
-        axes[row, C_SCENE_LOCAL].set_title("Scene/local" if t == 0 else "")
-        axes[row, C_SCENE_LOCAL].axis("off")
 
         # Col: Hidden (own PCA per timestep)
         if show_hidden:

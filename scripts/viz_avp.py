@@ -47,11 +47,32 @@ def make_viewpoints(n: int, device: torch.device) -> list[Viewpoint]:
     return vps[:n]
 
 
-def pca_rgb(features: np.ndarray, H: int, W: int) -> np.ndarray:
-    """PCA -> RGB, fit on same features."""
+def pca_rgb_sigmoid(features: np.ndarray, H: int, W: int) -> np.ndarray:
+    """PCA -> RGB via sigmoid."""
     pca = PCA(n_components=3, whiten=True)
     proj = pca.fit_transform(features)
     return 1.0 / (1.0 + np.exp(-proj.reshape(H, W, 3) * 2.0))
+
+
+def pca_rgb_normalized(features: np.ndarray, H: int, W: int) -> np.ndarray:
+    """PCA -> RGB, centered and normalized to [0, 1]."""
+    pca = PCA(n_components=3, whiten=True)
+    proj = pca.fit_transform(features).reshape(H, W, 3)
+    # Per-channel min-max normalization
+    for c in range(3):
+        cmin, cmax = proj[:, :, c].min(), proj[:, :, c].max()
+        if cmax > cmin:
+            proj[:, :, c] = (proj[:, :, c] - cmin) / (cmax - cmin)
+        else:
+            proj[:, :, c] = 0.5
+    return proj
+
+
+def spatial_std(features: np.ndarray, H: int, W: int) -> np.ndarray:
+    """Per-token std across feature dimension, normalized for viz."""
+    std = features.std(axis=1).reshape(H, W)
+    std = (std - std.min()) / (std.max() - std.min() + 1e-8)
+    return std
 
 
 def main(args: Args) -> None:
@@ -86,19 +107,22 @@ def main(args: Args) -> None:
         hidden = avp.init_hidden(1, G)
         outputs, _ = avp.forward_trajectory_full(img, vps, hidden)
 
-    # Visualize: image + trajectory + PCA of final scene
+    # Visualize: image + trajectory + PCA variants + std
     final_scene = outputs[-1].scene[0].cpu().numpy()  # [G*G, D]
-    scene_rgb = pca_rgb(final_scene, G, G)
+    scene_sigmoid = pca_rgb_sigmoid(final_scene, G, G)
+    scene_norm = pca_rgb_normalized(final_scene, G, G)
+    scene_std = spatial_std(final_scene, G, G)
 
     # Denormalize image for display
     mean = torch.tensor(IMAGENET_MEAN).view(3, 1, 1)
     std = torch.tensor(IMAGENET_STD).view(3, 1, 1)
     img_np = ((img[0].cpu() * std + mean).clamp(0, 1)).permute(1, 2, 0).numpy()
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 12))
 
-    # Left: image with boxes
-    axes[0].imshow(img_np)
+    # Top-left: image with boxes
+    ax = axes[0, 0]
+    ax.imshow(img_np)
     cmap = plt.get_cmap("viridis")
     colors = [cmap(i / max(1, len(vps) - 1)) for i in range(len(vps))]
     for i, vp in enumerate(vps):
@@ -107,15 +131,25 @@ def main(args: Args) -> None:
             (box.left, box.top), box.width, box.height,
             linewidth=2, edgecolor=colors[i], facecolor="none",
         )
-        axes[0].add_patch(rect)
-        axes[0].plot(box.center_x, box.center_y, "o", color=colors[i], markersize=6)
-    axes[0].set_title("Glimpse trajectory")
-    axes[0].axis("off")
+        ax.add_patch(rect)
+        ax.plot(box.center_x, box.center_y, "o", color=colors[i], markersize=6)
+    ax.set_title("Glimpse trajectory")
+    ax.axis("off")
 
-    # Right: PCA of final scene
-    axes[1].imshow(scene_rgb)
-    axes[1].set_title(f"Final scene (PCA, G={G})")
-    axes[1].axis("off")
+    # Top-right: PCA sigmoid
+    axes[0, 1].imshow(scene_sigmoid)
+    axes[0, 1].set_title(f"PCA sigmoid (G={G})")
+    axes[0, 1].axis("off")
+
+    # Bottom-left: PCA normalized
+    axes[1, 0].imshow(scene_norm)
+    axes[1, 0].set_title(f"PCA normalized (G={G})")
+    axes[1, 0].axis("off")
+
+    # Bottom-right: spatial std
+    axes[1, 1].imshow(scene_std, cmap="inferno")
+    axes[1, 1].set_title(f"Spatial std (G={G})")
+    axes[1, 1].axis("off")
 
     plt.tight_layout()
     plt.show()

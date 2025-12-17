@@ -21,16 +21,16 @@ class Config:
     freeze_student_backbone: bool = False
     # AVP
     avp: AVPConfig = field(default_factory=AVPConfig)
-    grid_sizes: tuple[int, ...] = (16, 128)
-    batch_size: int = 8  # Max batch size (at max grid size)
-    ref_lr: float = 2e-5
+    grid_sizes: tuple[int, ...] = (32,)
+    batch_size: int = 16  # Max batch size (at max grid size)
+    ref_lr: float = 8e-5
     weight_decay: float = 1e-5
     n_viewpoints_per_step: int = (
         2  # Inner loop viewpoints (>=2 for length generalization)
     )
-    warmup_steps: int = 2000
+    warmup_steps: int = 100_000
     grad_clip: float = 1.0
-    n_steps: int = 200_000
+    n_steps: int = 1_000_000
     # Data
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
@@ -43,8 +43,10 @@ class Config:
     # Logging
     log_every: int = 20
     val_every: int = 500
-    curve_every: int = 5000  # Curves less often than val (Comet limit: 1000/experiment)
-    ckpt_every: int = 1000
+    curve_every: int = (
+        10_000  # Curves less often than val (Comet limit: 1000/experiment)
+    )
+    ckpt_every: int = 10_000
     log_spatial_stats: bool = True  # Log target/pred spatial mean/std
     # Compilation
     compile: bool = True

@@ -299,7 +299,7 @@ class AVPViT(nn.Module):
         return mean + residual
 
     def compute_local(self, local: Tensor, viewpoint: Viewpoint) -> Tensor:
-        """Project local patch tokens to teacher_dim: mean + residual."""
+        """Project local patch tokens to teacher_dim."""
         assert self.local_proj is not None, (
             "local_proj not initialized (use_local_loss=False)"
         )
