@@ -21,6 +21,8 @@ class AttentionConfig:
         False  # Identity-init V and O projections (content path, not Q/K)
     )
     write_v_expansion: int | None = None  # None = Linear, int = MLP with expansion
+    read_normalize_v: bool = True  # LayerNorm V input on read side
+    write_normalize_v: bool = True  # LayerNorm V input on write side (False = raw values)
 
 
 class RoPECrossAttention(nn.Module):
@@ -29,6 +31,7 @@ class RoPECrossAttention(nn.Module):
     dim: int
     num_heads: int
     cfg: AttentionConfig
+    normalize_v: bool
     post_rope_q: nn.Module
     post_rope_k: nn.Module
     q_transform: nn.Module
@@ -36,12 +39,13 @@ class RoPECrossAttention(nn.Module):
     v_transform: nn.Module
     out_transform: nn.Module
 
-    def __init__(self, dim: int, num_heads: int, cfg: AttentionConfig) -> None:
+    def __init__(self, dim: int, num_heads: int, cfg: AttentionConfig, *, normalize_v: bool) -> None:
         super().__init__()
         assert dim % num_heads == 0, f"dim {dim} not divisible by num_heads {num_heads}"
         self.dim = dim
         self.num_heads = num_heads
         self.cfg = cfg
+        self.normalize_v = normalize_v
 
         # Post-RoPE affines (operate on head_dim)
         head_dim = dim // num_heads
@@ -61,7 +65,8 @@ class RoPECrossAttention(nn.Module):
 
         q = to_multihead(self.q_transform(q_normed), self.num_heads)
         k = to_multihead(self.k_transform(kv_normed), self.num_heads)
-        v = to_multihead(self.v_transform(kv_normed), self.num_heads)
+        v_input = kv_normed if self.normalize_v else kv_in
+        v = to_multihead(self.v_transform(v_input), self.num_heads)
 
         q = self.post_rope_q(rope_apply_with_prefix(q, q_rope))
         k = self.post_rope_k(rope_apply_with_prefix(k, kv_rope))
@@ -102,7 +107,7 @@ class RoPEReadCrossAttention(RoPECrossAttention):
     """For reading: Q and O projected, K and V use EWA (or Identity)."""
 
     def __init__(self, dim: int, num_heads: int, cfg: AttentionConfig) -> None:
-        super().__init__(dim, num_heads, cfg)
+        super().__init__(dim, num_heads, cfg, normalize_v=cfg.read_normalize_v)
         self.q_transform = nn.Linear(dim, dim)
         self.k_transform = _ewa_or_identity(dim, cfg.use_ewa_transforms)
         self.v_transform = _ewa_or_identity(dim, cfg.use_ewa_transforms)
@@ -133,7 +138,7 @@ class RoPEWriteCrossAttention(RoPECrossAttention):
     """For writing: K and V projected, Q and O use EWA (or Identity)."""
 
     def __init__(self, dim: int, num_heads: int, cfg: AttentionConfig) -> None:
-        super().__init__(dim, num_heads, cfg)
+        super().__init__(dim, num_heads, cfg, normalize_v=cfg.write_normalize_v)
         self.q_transform = _ewa_or_identity(dim, cfg.use_ewa_transforms)
         self.k_transform = nn.Linear(dim, dim)
         self.v_transform = self._make_v_proj(dim, cfg)
