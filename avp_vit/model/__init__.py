@@ -57,6 +57,13 @@ class StepOutput(NamedTuple):
     context_out: Tensor | None  # [B, N_ctx, student_embed_dim] or None
 
 
+class LossOutputs(NamedTuple):
+    """Separate loss components from forward_loss. Trainer combines as needed."""
+
+    scene: Tensor  # Scene loss (always computed)
+    local: Tensor | None  # Local loss (None if use_local_loss=False)
+
+
 @final
 @dataclass
 class AVPConfig:
@@ -438,19 +445,18 @@ class AVPViT(nn.Module):
         *,
         context: Tensor | None = None,
         loss_fn: Callable[[Tensor, Tensor], Tensor] = F.mse_loss,
-    ) -> tuple[Tensor, Tensor]:
-        """Compute average loss across all viewpoints. Returns (loss, final_hidden).
+    ) -> tuple[LossOutputs, Tensor]:
+        """Compute losses across all viewpoints. Returns (LossOutputs, final_hidden).
 
-        If use_local_loss is enabled, also computes local loss:
-        local_pred = mean + scale * local_proj(student_local)
-        local_loss = loss_fn(local_pred, cropped_teacher)
+        LossOutputs contains scene loss (always) and local loss (if use_local_loss enabled).
+        Caller is responsible for combining losses as desired.
         """
         assert len(viewpoints) > 0
         n = len(viewpoints)
         device = images.device
 
         scene_loss = torch.tensor(0.0, device=device)
-        local_loss = torch.tensor(0.0, device=device)
+        local_loss_acc: Tensor | None = None
 
         # Prepare target spatial for local loss (if enabled)
         B, N_target, D = target.shape
@@ -470,10 +476,14 @@ class AVPViT(nn.Module):
                 G_glimpse = self.cfg.glimpse_grid_size
                 cropped = sample_at_viewpoint(target_spatial, vp, G_glimpse)
                 cropped = cropped.permute(0, 2, 3, 1).reshape(B, -1, D)
-                local_loss = local_loss + loss_fn(local_pred, cropped)
+                step_local = loss_fn(local_pred, cropped)
+                local_loss_acc = step_local if local_loss_acc is None else local_loss_acc + step_local
 
-        total_loss = (scene_loss + local_loss) / n
-        return total_loss, hidden
+        losses = LossOutputs(
+            scene=scene_loss / n,
+            local=local_loss_acc / n if local_loss_acc is not None else None,
+        )
+        return losses, hidden
 
     def forward_trajectory_full(
         self,

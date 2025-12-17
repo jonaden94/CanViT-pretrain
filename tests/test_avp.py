@@ -98,8 +98,12 @@ def test_forward_loss(backbone: ViTBackbone) -> None:
     target = torch.randn(B, 64, backbone.embed_dim)
     hidden = avp.init_hidden(B, scene_grid_size)
 
-    avg_loss, final_hidden = avp.forward_loss(images, viewpoints, target, hidden)
+    losses, final_hidden = avp.forward_loss(images, viewpoints, target, hidden)
 
-    assert avg_loss.shape == ()
-    assert avg_loss.requires_grad
+    assert losses.scene.shape == ()
+    assert losses.scene.requires_grad
+    # use_local_loss=True by default
+    assert losses.local is not None
+    assert losses.local.shape == ()
+    assert losses.local.requires_grad
     assert final_hidden.shape == (B, 64, backbone.embed_dim)

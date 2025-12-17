@@ -5,7 +5,7 @@ from torch import Tensor, nn
 
 from avp_vit.backbone import ViTBackbone
 from avp_vit.glimpse import Viewpoint
-from avp_vit.model import AVPConfig, AVPViT, StepOutput
+from avp_vit.model import AVPConfig, AVPViT, LossOutputs, StepOutput
 from avp_vit.rope import make_rope_periods
 
 
@@ -196,10 +196,15 @@ def test_forward_loss():
     hidden = avp.init_hidden(B, G)
     viewpoints = [Viewpoint.full_scene(B, images.device), Viewpoint.quadrant(B, images.device, 0, 0)]
 
-    loss, final_hidden = avp.forward_loss(images, viewpoints, target, hidden)
+    losses, final_hidden = avp.forward_loss(images, viewpoints, target, hidden)
 
-    assert loss.shape == ()
-    assert loss.item() >= 0
+    assert isinstance(losses, LossOutputs)
+    assert losses.scene.shape == ()
+    assert losses.scene.item() >= 0
+    # use_local_loss=True by default, so local should be present
+    assert losses.local is not None
+    assert losses.local.shape == ()
+    assert losses.local.item() >= 0
     assert final_hidden.shape == (B, G * G, 64)
 
 

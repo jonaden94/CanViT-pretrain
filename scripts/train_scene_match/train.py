@@ -141,6 +141,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             stage.batch_size, stage.fresh_count, G, cfg.device,
         )
 
+    # EMA tracking for losses (scene, local, total)
+    ema_scene_t = torch.tensor(0.0, device=cfg.device)
+    ema_local_t = torch.tensor(0.0, device=cfg.device)
     ema_loss_t = torch.tensor(0.0, device=cfg.device)
     alpha = 2 / (cfg.log_every + 1)
 
@@ -168,35 +171,55 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             random_viewpoint(stage.batch_size, cfg.device, min_scale, max_scale)
             for _ in range(cfg.n_viewpoints_per_step)
         ]
-        loss, final_hidden = avp.forward_loss(
+        losses, final_hidden = avp.forward_loss(
             state.images, viewpoints, state.targets, state.hidden, loss_fn=loss_fn,
         )
 
-        if not torch.isfinite(loss):
+        # Combine losses (trainer's responsibility)
+        total_loss = losses.scene + (losses.local if losses.local is not None else 0.0)
+
+        if not torch.isfinite(total_loss):
             log.warning(f"NaN/Inf loss at step {step}, pruning trial")
             exp.end()
             raise optuna.TrialPruned()
 
         optimizer.zero_grad()
-        loss.backward()
+        total_loss.backward()
         grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
         optimizer.step()
         scheduler.step()
 
-        ema_loss_t = alpha * loss.detach() + (1 - alpha) * ema_loss_t if step > 0 else loss.detach()
+        # Update EMAs
+        scene_t = losses.scene.detach()
+        local_t = losses.local.detach() if losses.local is not None else torch.tensor(0.0, device=cfg.device)
+        total_t = total_loss.detach()
+        if step > 0:
+            ema_scene_t = alpha * scene_t + (1 - alpha) * ema_scene_t
+            ema_local_t = alpha * local_t + (1 - alpha) * ema_local_t
+            ema_loss_t = alpha * total_t + (1 - alpha) * ema_loss_t
+        else:
+            ema_scene_t, ema_local_t, ema_loss_t = scene_t, local_t, total_t
 
         if step % cfg.log_every == 0:
             ema_loss = ema_loss_t.item()
+            ema_scene = ema_scene_t.item()
+            ema_local = ema_local_t.item()
             grad_norm = grad_norm_t.item()
             lr = scheduler.get_last_lr()[0]
-            exp.log_metrics({
+            metrics = {
                 f"grid{G}/train/loss": ema_loss,
+                f"grid{G}/train/scene_loss": ema_scene,
                 "train/loss": ema_loss,
+                "train/scene_loss": ema_scene,
                 "train/grad_norm": grad_norm,
                 "train/lr": lr,
                 "train/grid_size": G,
                 "train/spatial_hidden_init_norm": avp.spatial_hidden_init.norm().item(),
-            }, step=step)
+            }
+            if losses.local is not None:
+                metrics[f"grid{G}/train/local_loss"] = ema_local
+                metrics["train/local_loss"] = ema_local
+            exp.log_metrics(metrics, step=step)
             pbar.set_postfix_str(f"G={G} loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}")
 
         if step % cfg.val_every == 0:
