@@ -32,7 +32,7 @@ class ResolutionStage:
 
     @property
     def n_scene_tokens(self) -> int:
-        return self.scene_grid_size ** 2
+        return self.scene_grid_size**2
 
     @property
     def min_viewpoint_scale(self) -> float:
@@ -61,10 +61,12 @@ class ResolutionStage:
 
 def _n_eval_viewpoints(grid_size: int) -> int:
     """Expected viewpoints for evaluation. Linear in G since glimpses reuse hidden state."""
-    return max(2, round(5 * grid_size / 16))
+    return max(2, round(grid_size / 16))
 
 
-def _batch_size_for_grid(grid_size: int, max_grid_size: int, max_batch_size: int) -> int:
+def _batch_size_for_grid(
+    grid_size: int, max_grid_size: int, max_batch_size: int
+) -> int:
     """Batch size scales inversely with token count (∝ G²)."""
     ratio = max_grid_size / grid_size
     return max(1, round(max_batch_size * ratio * ratio))
@@ -85,7 +87,9 @@ def create_resolution_stage(
 ) -> ResolutionStage:
     """Create a resolution stage with computed batch size and fresh count."""
     batch_size = _batch_size_for_grid(scene_grid_size, max_grid_size, max_batch_size)
-    fresh_count = max(1, round(_fresh_ratio(scene_grid_size, n_viewpoints_per_step) * batch_size))
+    fresh_count = max(
+        1, round(_fresh_ratio(scene_grid_size, n_viewpoints_per_step) * batch_size)
+    )
     return ResolutionStage(
         scene_grid_size=scene_grid_size,
         glimpse_grid_size=glimpse_grid_size,
@@ -114,7 +118,9 @@ class SingleBatchDataset(Dataset[tuple[Tensor, int]]):
         return self._items[idx % len(self._items)]
 
 
-def create_resolution_stages(cfg: Config, patch_size: int) -> dict[int, ResolutionStage]:
+def create_resolution_stages(
+    cfg: Config, patch_size: int
+) -> dict[int, ResolutionStage]:
     """Create resolution stages for each grid size."""
     return {
         G: create_resolution_stage(
@@ -151,7 +157,8 @@ def create_loaders(
         )
 
         train_dataset: Dataset[Any] = ImageFolder(
-            str(cfg.train_dir), train_transform(scene_size_px, (cfg.crop_scale_min, 1.0))
+            str(cfg.train_dir),
+            train_transform(scene_size_px, (cfg.crop_scale_min, 1.0)),
         )
         val_dataset: Dataset[Any] = ImageFolder(
             str(cfg.val_dir), val_transform(scene_size_px)
