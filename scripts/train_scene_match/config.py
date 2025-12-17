@@ -21,22 +21,22 @@ class Config:
     freeze_student_backbone: bool = False
     # AVP
     avp: AVPConfig = field(default_factory=AVPConfig)
-    grid_sizes: tuple[int, ...] = (16, 32, 64)
+    grid_sizes: tuple[int, ...] = (96,)
+    batch_size: int = 16  # Max batch size (at max grid size)
+    ref_lr: float = 1e-5
+    weight_decay: float = 1e-3
+    n_viewpoints_per_step: int = (
+        2  # Inner loop viewpoints (>=2 for length generalization)
+    )
+    warmup_steps: int = 1000
+    grad_clip: float = 1.0
+    n_steps: int = 200000
     # Data
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
     ckpt_dir: Path = Path("checkpoints")
     # Training
-    n_viewpoints_per_step: int = (
-        2  # Inner loop viewpoints (>=2 for length generalization)
-    )
-    n_steps: int = 200000
-    batch_size: int = 16  # Max batch size (at max grid size)
     num_workers: int = 8
-    ref_lr: float = 1e-5
-    weight_decay: float = 1e-5
-    warmup_steps: int = 1000
-    grad_clip: float = 1.0
     crop_scale_min: float = 0.4
     loss: Literal["l1", "mse"] = "mse"
     # Logging
@@ -50,7 +50,9 @@ class Config:
     # Optuna
     n_trials: int = 100
     # Debug
-    debug_train_on_single_batch: bool = False  # Train on single repeated batch (for overfitting test)
+    debug_train_on_single_batch: bool = (
+        False  # Train on single repeated batch (for overfitting test)
+    )
     # Runtime
     device: torch.device = field(default_factory=get_sensible_device)
 
