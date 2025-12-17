@@ -234,6 +234,7 @@ def plot_multistep_pca(
     hidden_spatials: list[NDArray[np.floating]] | None = None,
     initial_hidden_spatial: NDArray[np.floating] | None = None,
     locals_teacher_cropped: list[NDArray[np.floating]] | None = None,
+    use_local_loss: bool = False,
 ) -> Figure:
     """Full multi-row visualization with all diagnostic columns.
 
@@ -245,7 +246,9 @@ def plot_multistep_pca(
     PCA basis selection principle: use same basis to COMPARE, use own basis to see INTERNAL STRUCTURE.
     - Teacher, Scene, Scene/local: teacher's PCA (comparable colors)
     - Hidden: own PCA per timestep (different embedding space)
-    - Local AVP, Local Teacher, Cropped Teacher: local teacher's PCA (compare local vs cropped)
+    - Local Teacher: own PCA (shows internal structure of local-context features)
+    - Local AVP, Cropped Teacher: when use_local_loss=True, both use cropped teacher's PCA
+      (makes them directly comparable since local loss supervises AVP against cropped teacher)
 
     Args:
         full_img: [H, W, 3] full image in [0, 1]
@@ -262,6 +265,7 @@ def plot_multistep_pca(
         hidden_spatials: Optional list of [S*S, D] raw hidden spatial per timestep (before scene_proj)
         initial_hidden_spatial: Optional [S*S, D] raw initial hidden spatial
         locals_teacher_cropped: Optional list of [G*G, D] teacher features cropped from full image (full context)
+        use_local_loss: If True and cropped available, Local AVP uses cropped teacher's PCA basis
 
     Returns:
         matplotlib Figure
@@ -404,11 +408,22 @@ def plot_multistep_pca(
         else:
             hidden_rgb = None
 
-        # Local AVP and Local Teacher: each uses own PCA
-        pca_local_avp = fit_pca(locals_avp[t])
+        # Local Teacher: own PCA (internal structure)
         pca_local_teacher = fit_pca(locals_teacher[t])
-        local_avp_rgb = pca_rgb(pca_local_avp, locals_avp[t], G, G)
         local_teacher_rgb = pca_rgb(pca_local_teacher, locals_teacher[t], G, G)
+
+        # Cropped teacher PCA (computed here to share with Local AVP when local loss enabled)
+        pca_cropped: PCA | None = None
+        if show_cropped:
+            assert locals_teacher_cropped is not None
+            pca_cropped = fit_pca(locals_teacher_cropped[t])
+
+        # Local AVP: use cropped teacher's PCA if local loss enabled, else own PCA
+        if use_local_loss and pca_cropped is not None:
+            local_avp_rgb = pca_rgb(pca_cropped, locals_avp[t], G, G)
+        else:
+            pca_local_avp = fit_pca(locals_avp[t])
+            local_avp_rgb = pca_rgb(pca_local_avp, locals_avp[t], G, G)
 
         # Col: Trajectory - cumulative boxes up to t
         ax = axes[row, C_TRAJ]
@@ -457,23 +472,26 @@ def plot_multistep_pca(
             axes[row, C_HIDDEN].set_title("Hidden" if t == 0 else "")
             axes[row, C_HIDDEN].axis("off")
 
-        # Col: Local AVP (own PCA)
+        # Col: Local AVP - header indicates PCA basis used
         axes[row, C_LOCAL_AVP].imshow(local_avp_rgb)
-        axes[row, C_LOCAL_AVP].set_title("Local AVP" if t == 0 else "")
+        if t == 0:
+            title = "Local AVP\n(cropped basis)" if (use_local_loss and show_cropped) else "Local AVP"
+            axes[row, C_LOCAL_AVP].set_title(title)
         axes[row, C_LOCAL_AVP].axis("off")
 
-        # Col: Local Teacher (own PCA)
+        # Col: Local Teacher (own PCA - internal structure)
         axes[row, C_LOCAL_TEACHER].imshow(local_teacher_rgb)
         axes[row, C_LOCAL_TEACHER].set_title("Local Teacher" if t == 0 else "")
         axes[row, C_LOCAL_TEACHER].axis("off")
 
-        # Col: Cropped Teacher (own PCA - raw crop from full-image teacher)
+        # Col: Cropped Teacher - uses same PCA as Local AVP when local loss enabled
         if show_cropped:
-            assert C_CROPPED_TEACHER is not None and locals_teacher_cropped is not None
-            pca_cropped = fit_pca(locals_teacher_cropped[t])
+            assert C_CROPPED_TEACHER is not None and locals_teacher_cropped is not None and pca_cropped is not None
             cropped_rgb = pca_rgb(pca_cropped, locals_teacher_cropped[t], G, G)
             axes[row, C_CROPPED_TEACHER].imshow(cropped_rgb)
-            axes[row, C_CROPPED_TEACHER].set_title("Cropped Teacher" if t == 0 else "")
+            if t == 0:
+                title = "Cropped (target)" if use_local_loss else "Cropped Teacher"
+                axes[row, C_CROPPED_TEACHER].set_title(title)
             axes[row, C_CROPPED_TEACHER].axis("off")
 
         # Col: Δ Hidden (if available)
