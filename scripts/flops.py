@@ -144,7 +144,6 @@ def print_detailed_breakdown(
             scene_grid_size=scene_grid,
             glimpse_grid_size=glimpse_grid,
             n_scene_registers=n_registers,
-            use_output_proj=True,
         ),
     )
     a = avp_step_flops(avp, backbone)
@@ -247,7 +246,7 @@ def main() -> None:
         # Base AVP (no convex, V=Linear)
         avp_base = AVPViT(backbone, AVPConfig(
             scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
-            n_scene_registers=N_REGISTERS, use_output_proj=True,
+            n_scene_registers=N_REGISTERS,
             attention=AttentionConfig(write_v_expansion=None),
         ))
         a_base = avp_step_flops(avp_base, backbone)
@@ -255,14 +254,14 @@ def main() -> None:
         # AVP with V MLP (2x expansion, the default)
         avp_mlp = AVPViT(backbone, AVPConfig(
             scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
-            n_scene_registers=N_REGISTERS, use_output_proj=True,
+            n_scene_registers=N_REGISTERS,
         ))
         a_mlp = avp_step_flops(avp_mlp, backbone)
 
         # AVP convex (V=Linear)
         avp_cvx = AVPViT(backbone, AVPConfig(
             scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
-            n_scene_registers=N_REGISTERS, use_output_proj=True,
+            n_scene_registers=N_REGISTERS,
             gating="full", layer_scale_init=1e-3,
             attention=AttentionConfig(write_v_expansion=None),
         ))
@@ -271,7 +270,7 @@ def main() -> None:
         # AVP convex + V MLP (default)
         avp_cvx_mlp = AVPViT(backbone, AVPConfig(
             scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
-            n_scene_registers=N_REGISTERS, use_output_proj=True,
+            n_scene_registers=N_REGISTERS,
             gating="full", layer_scale_init=1e-3,
         ))
         a_cvx_mlp = avp_step_flops(avp_cvx_mlp, backbone)

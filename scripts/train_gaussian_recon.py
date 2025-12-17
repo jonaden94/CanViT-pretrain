@@ -88,7 +88,6 @@ class Config:
             scene_grid_size=16,  # 16*14=224px scene
             glimpse_grid_size=4,  # 4*14=56px glimpse, min_scale=0.25
             layer_scale_init=1e-4,
-            use_output_proj=True,
             n_scene_registers=32,
             gradient_checkpointing=False,
         )

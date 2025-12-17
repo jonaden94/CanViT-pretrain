@@ -12,8 +12,13 @@ from avp_vit import AVPConfig
 
 @dataclass
 class Config:
-    # Paths
+    # Model architectures (required - no defaults to force explicit choice)
+    teacher_model: str = "dinov3_vits16"  # e.g., "dinov3_vits16", "dinov3_vitb16"
+    student_model: str = "dinov3_vits16"  # e.g., "dinov3_vits16"
+    # Checkpoints
     teacher_ckpt: Path = Path("dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
+    student_ckpt: Path | None = None  # None = random init with student_model template
+    # Paths
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
     ckpt_dir: Path = Path("checkpoints")

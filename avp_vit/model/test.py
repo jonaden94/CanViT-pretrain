@@ -187,7 +187,7 @@ def test_convex_init_passthrough():
         # AVPViT forward (same seed for prepare_tokens)
         torch.manual_seed(123)
         out = avp.forward_step(images, vp)
-        initial_scene = avp.output_proj(avp._get_base_hidden(B))
+        initial_scene = avp.scene_proj(avp.get_spatial(avp._get_base_hidden(B)))
 
     # Scene: write gate ≈ 0 → scene ≈ initial
     scene_diff = (out.scene - initial_scene).abs().mean()
@@ -228,7 +228,7 @@ def test_convex_gate_value_affects_output():
         out_lo = avp_lo.forward_step(images, vp)
         torch.manual_seed(123)
         out_hi = avp_hi.forward_step(images, vp)
-        initial = avp_lo.output_proj(avp_lo._get_base_hidden(B))
+        initial = avp_lo.scene_proj(avp_lo.get_spatial(avp_lo._get_base_hidden(B)))
 
     diff_lo = (out_lo.scene - initial).abs().mean()
     diff_hi = (out_hi.scene - initial).abs().mean()
@@ -332,12 +332,7 @@ def test_get_spatial_extracts_correctly():
 
 def test_compute_scene_matches_step_output():
     embed_dim = 64
-    cfg = AVPConfig(
-        scene_grid_size=4,
-        glimpse_grid_size=3,
-        n_scene_registers=8,
-        use_output_proj=True,
-    )
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=8)
     backbone = MockBackbone(embed_dim, 4, 2, 4, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
@@ -350,20 +345,37 @@ def test_compute_scene_matches_step_output():
     assert torch.allclose(scene_from_helper, out.scene)
 
 
-def test_output_proj_is_always_module():
-    cfg_no_proj = AVPConfig(
-        scene_grid_size=4, use_output_proj=False, n_scene_registers=0
-    )
-    cfg_with_proj = AVPConfig(
-        scene_grid_size=4, use_output_proj=True, n_scene_registers=0
-    )
+def test_scene_proj_is_layernorm_linear():
+    """scene_proj is always LayerNorm + Linear (no Identity fallback)."""
+    cfg = AVPConfig(scene_grid_size=4, n_scene_registers=0)
     backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
 
-    avp_no = AVPViT(backbone, cfg_no_proj)
-    avp_yes = AVPViT(backbone, cfg_with_proj)
+    assert isinstance(avp.scene_proj, nn.Sequential)
+    assert len(avp.scene_proj) == 2
+    assert isinstance(avp.scene_proj[0], nn.LayerNorm)
+    assert isinstance(avp.scene_proj[1], nn.Linear)
 
-    assert isinstance(avp_no.output_proj, torch.nn.Identity)
-    assert isinstance(avp_yes.output_proj, torch.nn.Sequential)
+
+def test_output_dim_projects_to_different_dimension():
+    """output_dim controls the scene projection output dimension."""
+    embed_dim = 64
+    output_dim = 128  # Different from embed_dim
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
+    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg, output_dim=output_dim)
+
+    assert avp.output_dim == output_dim
+    assert avp.scene_proj[1].in_features == embed_dim
+    assert avp.scene_proj[1].out_features == output_dim
+
+    B = 2
+    images = torch.randn(B, 3, 64, 64)
+    vp = Viewpoint.full_scene(B, images.device)
+
+    out = avp.forward_step(images, vp, None)
+    assert out.hidden.shape[-1] == embed_dim  # Internal state in embed_dim
+    assert out.scene.shape[-1] == output_dim  # Projected output in output_dim
 
 
 def test_multi_viewpoint_forward():
@@ -477,12 +489,7 @@ def test_gradient_checkpointing_smoke():
 
 def test_forward_loss_requires_viewpoints():
     embed_dim = 64
-    cfg = AVPConfig(
-        scene_grid_size=4,
-        glimpse_grid_size=3,
-        use_output_proj=True,
-        n_scene_registers=0,
-    )
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 

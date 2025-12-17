@@ -71,8 +71,6 @@ def main(args: Args) -> None:
         scene_grid_size=G,
         glimpse_grid_size=7,
         n_scene_registers=32,
-        use_output_proj=True,
-        use_output_proj_norm=False,
         gating="full",
     )
     avp = AVPViT(copy.deepcopy(backbone), cfg).to(device)

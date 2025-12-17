@@ -1,10 +1,17 @@
 """Model creation and loading utilities."""
 
-import copy
 import logging
+from collections.abc import Callable
 
 import torch
-from dinov3.hub.backbones import dinov3_vits16
+from dinov3.hub.backbones import (
+    dinov3_vitb16,  # pyright: ignore[reportAttributeAccessIssue]
+    dinov3_vitl16,  # pyright: ignore[reportAttributeAccessIssue]
+    dinov3_vitl16plus,  # pyright: ignore[reportAttributeAccessIssue]
+    dinov3_vits16,
+    dinov3_vits16plus,  # pyright: ignore[reportAttributeAccessIssue]
+)
+from dinov3.models.vision_transformer import DinoVisionTransformer
 
 from avp_vit import AVPViT
 from avp_vit.backbone.dinov3 import DINOv3Backbone
@@ -13,32 +20,85 @@ from .config import Config
 
 log = logging.getLogger(__name__)
 
+# Registry: model slug -> factory function
+MODEL_REGISTRY: dict[str, Callable[..., DinoVisionTransformer]] = {
+    "dinov3_vits16": dinov3_vits16,
+    "dinov3_vits16plus": dinov3_vits16plus,
+    "dinov3_vitb16": dinov3_vitb16,
+    "dinov3_vitl16": dinov3_vitl16,
+    "dinov3_vitl16plus": dinov3_vitl16plus,
+}
+
+
+def _load_dinov3(
+    model_slug: str,
+    checkpoint: str | None,
+    device: torch.device,
+) -> DinoVisionTransformer:
+    """Load a DINOv3 model by slug, optionally with pretrained weights."""
+    if model_slug not in MODEL_REGISTRY:
+        available = ", ".join(sorted(MODEL_REGISTRY.keys()))
+        raise ValueError(f"Unknown model: {model_slug!r}. Available: {available}")
+
+    factory = MODEL_REGISTRY[model_slug]
+
+    if checkpoint is None:
+        log.info(f"Creating {model_slug} with random initialization")
+        model = factory(pretrained=False)
+    else:
+        log.info(f"Loading {model_slug} from {checkpoint}")
+        model = factory(pretrained=True, weights=checkpoint)
+
+    return model.to(device)
+
 
 def load_teacher(cfg: Config) -> DINOv3Backbone:
     """Load frozen DINOv3 teacher backbone."""
-    log.info(f"Loading teacher from {cfg.teacher_ckpt}")
-    model = dinov3_vits16(weights=str(cfg.teacher_ckpt), pretrained=True)
-    backbone = DINOv3Backbone(model.eval().to(cfg.device))
+    model = _load_dinov3(cfg.teacher_model, str(cfg.teacher_ckpt), cfg.device)
+    backbone = DINOv3Backbone(model.eval())
     for p in backbone.parameters():
         p.requires_grad = False
-    log.info(f"Teacher loaded: {backbone.n_blocks} blocks, embed_dim={backbone.embed_dim}")
+    log.info(
+        f"Teacher ready: {cfg.teacher_model}, "
+        f"{backbone.n_blocks} blocks, embed_dim={backbone.embed_dim}"
+    )
     return backbone
 
 
-def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
-    """Create AVP model with copied backbone."""
-    patch_size = teacher.patch_size
+def load_student_backbone(cfg: Config) -> DINOv3Backbone:
+    """Load student DINOv3 backbone (pretrained or random init)."""
+    ckpt = str(cfg.student_ckpt) if cfg.student_ckpt is not None else None
+    model = _load_dinov3(cfg.student_model, ckpt, cfg.device)
+    backbone = DINOv3Backbone(model)
+    log.info(
+        f"Student backbone ready: {cfg.student_model}, "
+        f"{backbone.n_blocks} blocks, embed_dim={backbone.embed_dim}, "
+        f"pretrained={cfg.student_ckpt is not None}"
+    )
+    return backbone
+
+
+def create_avp(
+    student_backbone: DINOv3Backbone,
+    teacher_embed_dim: int,
+    cfg: Config,
+) -> AVPViT:
+    """Create AVP model wrapping student backbone, projecting to teacher dim."""
+    patch_size = student_backbone.patch_size
     scene_px = cfg.avp.scene_grid_size * patch_size
     glimpse_px = cfg.avp.glimpse_grid_size * patch_size
-    log.info(
-        f"Creating AVP: scene={cfg.avp.scene_grid_size}x{cfg.avp.scene_grid_size} ({scene_px}px), "
-        f"glimpse={cfg.avp.glimpse_grid_size}x{cfg.avp.glimpse_grid_size} ({glimpse_px}px)"
-    )
-    backbone_copy = copy.deepcopy(teacher)
-    for p in backbone_copy.parameters():
+
+    for p in student_backbone.parameters():
         p.requires_grad = not cfg.freeze_inner_backbone
-    avp = AVPViT(backbone_copy, cfg.avp).to(cfg.device)
-    log.info(f"AVP created: inner backbone frozen={cfg.freeze_inner_backbone}")
+
+    avp = AVPViT(student_backbone, cfg.avp, output_dim=teacher_embed_dim).to(cfg.device)
+
+    log.info(
+        f"AVP created: scene={cfg.avp.scene_grid_size}x{cfg.avp.scene_grid_size} ({scene_px}px), "
+        f"glimpse={cfg.avp.glimpse_grid_size}x{cfg.avp.glimpse_grid_size} ({glimpse_px}px), "
+        f"student_dim={student_backbone.embed_dim} -> output_dim={teacher_embed_dim}, "
+        f"backbone_frozen={cfg.freeze_inner_backbone}"
+    )
     return avp
 
 

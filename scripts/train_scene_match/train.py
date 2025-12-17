@@ -21,7 +21,7 @@ from avp_vit.train.viewpoint import random_viewpoint
 
 from .config import Config
 from .data import create_curriculum_stages, create_loaders_for_curriculum
-from .model import compile_avp, compile_teacher, create_avp, load_teacher
+from .model import compile_avp, compile_teacher, create_avp, load_student_backbone, load_teacher
 from .scheduler import create_scheduler
 from .viz import eval_and_log, save_checkpoint, viz_and_log
 
@@ -97,12 +97,13 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     exp.log_parameters(flatten_dict(asdict(cfg)))
     exp.log_parameters({"trial_number": trial.number})
 
-    log.info("Loading teacher...")
     teacher = load_teacher(cfg)
     log.info(f"Teacher params: {count_parameters(teacher):,}")
 
-    log.info("Creating AVP model...")
-    avp = create_avp(teacher, cfg)
+    student_backbone = load_student_backbone(cfg)
+    log.info(f"Student backbone params: {count_parameters(student_backbone):,}")
+
+    avp = create_avp(student_backbone, teacher.embed_dim, cfg)
 
     if cfg.compile:
         log.info("Compilation enabled - compiling teacher and AVP with dynamic=True")
