@@ -19,6 +19,15 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 
+def _strip_compiled_prefix(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Strip '_orig_mod.' prefix from keys (torch.compile artifact)."""
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        new_key = k.replace("._orig_mod", "")
+        new_state_dict[new_key] = v
+    return new_state_dict
+
+
 def load_avp(ckpt_path: Path, device: torch.device) -> tuple[AVPViT, DINOv3Backbone]:
     """Load AVP model and teacher from checkpoint."""
     from dinov3.hub.backbones import dinov3_vits16
@@ -35,7 +44,8 @@ def load_avp(ckpt_path: Path, device: torch.device) -> tuple[AVPViT, DINOv3Backb
     avp = AVPViT(student, avp_cfg, teacher.embed_dim).to(device)
 
     ckpt = torch.load(ckpt_path, weights_only=False, map_location=device)
-    avp.load_state_dict(ckpt["avp"])
+    state_dict = _strip_compiled_prefix(ckpt["avp"])
+    avp.load_state_dict(state_dict)
     avp.eval()
     log.info(f"Loaded AVP from {ckpt_path}")
 
