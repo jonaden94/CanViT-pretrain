@@ -1,6 +1,7 @@
 """Data loading with multi-resolution support."""
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from torch import Tensor
@@ -8,11 +9,61 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision.datasets import ImageFolder
 
 from avp_vit.train import InfiniteLoader, train_transform, val_transform
-from avp_vit.train.curriculum import CurriculumStage, create_curriculum_stage
 
 from .config import Config
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class ResolutionStage:
+    """Configuration for one resolution stage."""
+
+    scene_grid_size: int
+    glimpse_grid_size: int
+    patch_size: int
+    batch_size: int
+    fresh_count: int
+    n_viewpoints_per_step: int
+
+    @property
+    def scene_size_px(self) -> int:
+        return self.scene_grid_size * self.patch_size
+
+    @property
+    def n_scene_tokens(self) -> int:
+        return self.scene_grid_size ** 2
+
+    @property
+    def min_viewpoint_scale(self) -> float:
+        return self.glimpse_grid_size / self.scene_grid_size
+
+
+def _batch_size_for_grid(grid_size: int, max_grid_size: int, max_batch_size: int) -> int:
+    """Batch size scales inversely with token count (∝ G²)."""
+    ratio = max_grid_size // grid_size
+    return max(1, max_batch_size * ratio * ratio)
+
+
+def create_resolution_stage(
+    scene_grid_size: int,
+    glimpse_grid_size: int,
+    patch_size: int,
+    max_grid_size: int,
+    max_batch_size: int,
+    n_viewpoints_per_step: int,
+) -> ResolutionStage:
+    """Create a resolution stage with computed batch size."""
+    batch_size = _batch_size_for_grid(scene_grid_size, max_grid_size, max_batch_size)
+    fresh_count = max(1, batch_size // 2)  # 50% fresh ratio
+    return ResolutionStage(
+        scene_grid_size=scene_grid_size,
+        glimpse_grid_size=glimpse_grid_size,
+        patch_size=patch_size,
+        batch_size=batch_size,
+        fresh_count=fresh_count,
+        n_viewpoints_per_step=n_viewpoints_per_step,
+    )
 
 
 class SingleImageDataset(Dataset[tuple[Tensor, int]]):
@@ -23,17 +74,16 @@ class SingleImageDataset(Dataset[tuple[Tensor, int]]):
         log.info(f"DEBUG: Cached single image from dataset (index 0, label={self._item[1]})")
 
     def __len__(self) -> int:
-        return 1_000_000  # Large enough for any training run
+        return 1_000_000
 
     def __getitem__(self, _idx: int) -> tuple[Tensor, int]:
         return self._item
 
 
-def create_curriculum_stages(cfg: Config, patch_size: int) -> dict[int, CurriculumStage]:
-    """Create curriculum stages for each grid size."""
-    stages: dict[int, CurriculumStage] = {}
-    for G in cfg.grid_sizes:
-        stages[G] = create_curriculum_stage(
+def create_resolution_stages(cfg: Config, patch_size: int) -> dict[int, ResolutionStage]:
+    """Create resolution stages for each grid size."""
+    return {
+        G: create_resolution_stage(
             scene_grid_size=G,
             glimpse_grid_size=cfg.avp.glimpse_grid_size,
             patch_size=patch_size,
@@ -41,16 +91,14 @@ def create_curriculum_stages(cfg: Config, patch_size: int) -> dict[int, Curricul
             max_batch_size=cfg.batch_size,
             n_viewpoints_per_step=cfg.n_viewpoints_per_step,
         )
-    return stages
+        for G in cfg.grid_sizes
+    }
 
 
-def create_loaders_for_curriculum(
-    cfg: Config, stages: dict[int, CurriculumStage]
+def create_loaders(
+    cfg: Config, stages: dict[int, ResolutionStage]
 ) -> tuple[dict[int, InfiniteLoader], dict[int, InfiniteLoader]]:
-    """Create train/val loaders for each resolution stage.
-
-    Returns: (train_loaders, val_loaders) dicts keyed by grid size.
-    """
+    """Create train/val loaders for each resolution stage."""
     if cfg.debug_train_on_single_image:
         log.warning("=" * 60)
         log.warning("DEBUG MODE: Training on single repeated image (index 0)")

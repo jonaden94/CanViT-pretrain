@@ -15,12 +15,11 @@ from ytch.model import count_parameters
 
 from avp_vit import AVPViT
 from avp_vit.train import InfiniteLoader, SurvivalBatch
-from avp_vit.train.curriculum import CurriculumStage, log_curriculum_stage
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import random_viewpoint
 
 from .config import Config
-from .data import create_curriculum_stages, create_loaders_for_curriculum
+from .data import ResolutionStage, create_loaders, create_resolution_stages
 from .model import compile_avp, compile_teacher, create_avp, load_student_backbone, load_teacher
 from .scheduler import create_scheduler
 from .viz import eval_and_log, save_checkpoint, viz_and_log
@@ -29,17 +28,13 @@ log = logging.getLogger(__name__)
 
 
 def create_norms(
-    stages: dict[int, CurriculumStage], embed_dim: int, device: torch.device
+    stages: dict[int, ResolutionStage], embed_dim: int, device: torch.device
 ) -> dict[int, PositionAwareNorm]:
     """Create position-aware norms for each grid size."""
-    norms: dict[int, PositionAwareNorm] = {}
-    for G, stage in stages.items():
-        norms[G] = PositionAwareNorm(
-            n_tokens=stage.n_scene_tokens,
-            embed_dim=embed_dim,
-            grid_size=G,
-        ).to(device)
-    return norms
+    return {
+        G: PositionAwareNorm(n_tokens=stage.n_scene_tokens, embed_dim=embed_dim, grid_size=G).to(device)
+        for G, stage in stages.items()
+    }
 
 
 def init_survival_batch(
@@ -53,12 +48,9 @@ def init_survival_batch(
 ) -> SurvivalBatch:
     """Initialize survival batch by loading fresh_count images at a time."""
     n_init_batches = (batch_size + fresh_count - 1) // fresh_count
-    log.info(
-        f"Initializing survival batch: batch_size={batch_size}, fresh_count={fresh_count}, "
-        f"loading {n_init_batches} mini-batches"
-    )
-    init_imgs_list, init_targets_list = [], []
+    log.info(f"Initializing survival batch: batch_size={batch_size}, fresh_count={fresh_count}")
 
+    init_imgs_list, init_targets_list = [], []
     with torch.no_grad():
         for _ in range(n_init_batches):
             batch = train_loader.next_batch().to(device)
@@ -69,10 +61,14 @@ def init_survival_batch(
     init_targets = torch.cat(init_targets_list, dim=0)[:batch_size]
     hidden_init = avp.init_hidden(batch_size, scene_grid_size)
 
-    log.info(
-        f"Survival batch initialized: images={init_imgs.shape}, targets={init_targets.shape}"
-    )
     return SurvivalBatch.init(init_imgs, init_targets, hidden_init)
+
+
+def _log_stage(stage: ResolutionStage) -> None:
+    log.info(
+        f"  G={stage.scene_grid_size}: batch={stage.batch_size}, fresh={stage.fresh_count}, "
+        f"min_scale={stage.min_viewpoint_scale:.2f}"
+    )
 
 
 def train(cfg: Config, trial: optuna.Trial) -> float:
@@ -80,9 +76,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     log.info(f"Starting trial {trial.number}")
     log.info(f"Device: {cfg.device}")
 
-    exp = comet_ml.Experiment(
-        project_name="avp-vit-scene-match", auto_metric_logging=False
-    )
+    exp = comet_ml.Experiment(project_name="avp-vit-scene-match", auto_metric_logging=False)
     from dataclasses import asdict
 
     def flatten_dict(d: dict, prefix: str = "") -> dict[str, object]:
@@ -107,31 +101,27 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     avp = create_avp(student_backbone, teacher.embed_dim, cfg)
 
     if cfg.compile:
-        log.info("Compilation enabled - compiling teacher and AVP with dynamic=True")
+        log.info("Compiling teacher and AVP")
         compile_teacher(teacher)
         compile_avp(avp)
-    else:
-        log.info("Compilation disabled")
 
     loss_fn = {"l1": l1_loss, "mse": mse_loss}[cfg.loss]
     log.info(f"Loss function: {cfg.loss}")
 
-    # Create curriculum stages and resources
+    # Create resolution stages and resources
     patch_size = teacher.patch_size
-    stages = create_curriculum_stages(cfg, patch_size)
+    stages = create_resolution_stages(cfg, patch_size)
+    log.info("Resolution stages:")
     for stage in stages.values():
-        log_curriculum_stage(stage, log)
+        _log_stage(stage)
 
-    train_loaders, val_loaders = create_loaders_for_curriculum(cfg, stages)
+    train_loaders, val_loaders = create_loaders(cfg, stages)
     norms = create_norms(stages, teacher.embed_dim, cfg.device)
 
     trainable = [p for p in avp.parameters() if p.requires_grad]
     n_trainable = sum(p.numel() for p in trainable)
     n_total = count_parameters(avp)
-    log.info(
-        f"AVP total: {n_total:,}, trainable: {n_trainable:,} "
-        f"({100 * n_trainable / n_total:.1f}%)"
-    )
+    log.info(f"AVP total: {n_total:,}, trainable: {n_trainable:,} ({100 * n_trainable / n_total:.1f}%)")
     exp.log_parameters({"trainable_params": n_trainable, "total_params": n_total})
 
     peak_lr = get_linear_scaled_lr(cfg.ref_lr, cfg.batch_size)
@@ -148,23 +138,15 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             return norm(teacher_patches.float())
         return compute_targets
 
-    # Cache target functions per grid size (avoid creating closures every step)
-    target_fns: dict[int, Callable[[Tensor], Tensor]] = {
-        G: make_target_fn(norms[G]) for G in cfg.grid_sizes
-    }
+    target_fns: dict[int, Callable[[Tensor], Tensor]] = {G: make_target_fn(norms[G]) for G in cfg.grid_sizes}
 
     # Initialize all survival batches upfront
-    log.info("Initializing survival batches for all grid sizes...")
+    log.info("Initializing survival batches...")
     states: dict[int, SurvivalBatch] = {}
     for G, stage in stages.items():
         states[G] = init_survival_batch(
-            avp,
-            train_loaders[G],
-            target_fns[G],
-            stage.batch_size,
-            stage.fresh_count,
-            G,
-            cfg.device,
+            avp, train_loaders[G], target_fns[G],
+            stage.batch_size, stage.fresh_count, G, cfg.device,
         )
 
     ema_loss_t = torch.tensor(0.0, device=cfg.device)
@@ -197,11 +179,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             for _ in range(cfg.n_viewpoints_per_step)
         ]
         loss, final_hidden = avp.forward_loss(
-            state.images,
-            viewpoints,
-            state.targets,
-            state.hidden,
-            loss_fn=loss_fn,
+            state.images, viewpoints, state.targets, state.hidden, loss_fn=loss_fn,
         )
 
         if not torch.isfinite(loss):
@@ -215,11 +193,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         optimizer.step()
         scheduler.step()
 
-        ema_loss_t = (
-            alpha * loss.detach() + (1 - alpha) * ema_loss_t
-            if step > 0
-            else loss.detach()
-        )
+        ema_loss_t = alpha * loss.detach() + (1 - alpha) * ema_loss_t if step > 0 else loss.detach()
 
         if step % cfg.log_every == 0:
             ema_loss = ema_loss_t.item()
@@ -233,31 +207,19 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 "train/grid_size": G,
                 "train/spatial_hidden_init_norm": avp.spatial_hidden_init.norm().item(),
             }, step=step)
-            pbar.set_postfix_str(
-                f"G={G} loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}"
-            )
+            pbar.set_postfix_str(f"G={G} loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}")
 
         if step % cfg.val_every == 0:
             # Training viz (no curves)
             train_l1, train_mse = viz_and_log(
-                exp,
-                step,
-                f"grid{G}/train",
-                avp,
-                teacher,
-                state.images,
-                viewpoints,
-                state.targets,
-                state.hidden,
-                norm,
-                log_spatial_stats=cfg.log_spatial_stats,
-                log_curves=False,
-                loss_type=cfg.loss,
+                exp, step, f"grid{G}/train", avp, teacher,
+                state.images, viewpoints, state.targets, state.hidden, norm,
+                log_spatial_stats=cfg.log_spatial_stats, log_curves=False, loss_type=cfg.loss,
             )
             exp.log_metric(f"grid{G}/train/viz_l1", train_l1[-1], step=step)
             exp.log_metric(f"grid{G}/train/viz_mse", train_mse[-1], step=step)
 
-            # Validation (curves at curve_every intervals)
+            # Validation
             val_images = val_loader.next_batch().to(cfg.device)
             norm.eval()
             val_loss = eval_and_log(
