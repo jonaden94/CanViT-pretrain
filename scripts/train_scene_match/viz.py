@@ -3,7 +3,6 @@
 import gc
 import io
 import logging
-import math
 from collections.abc import Callable
 from typing import NamedTuple
 
@@ -28,14 +27,6 @@ class VizResult(NamedTuple):
 
     losses: dict[str, list[float]]  # {loss_name: [loss_t0, loss_t1, ...]}
     outputs: list[StepOutput]  # Model outputs at each timestep
-
-
-def _infer_scene_grid_size(target: Tensor) -> int:
-    """Infer scene grid size from target shape [B, G², D]."""
-    n_tokens = target.shape[1]
-    G = int(math.sqrt(n_tokens))
-    assert G * G == n_tokens, f"target has {n_tokens} tokens, not a perfect square"
-    return G
 
 
 def compute_spatial_stats(x: Tensor) -> dict[str, float]:
@@ -93,7 +84,7 @@ def viz_and_log(
     """Run forward trajectory and log visualization."""
     assert isinstance(avp.backbone, DINOv3Backbone)
     avp_backbone = avp.backbone
-    scene_grid_size = _infer_scene_grid_size(target)
+    scene_grid_size = avp._infer_scene_grid_size(hidden)
     glimpse_grid_size = avp.cfg.glimpse_grid_size
 
     with torch.inference_mode():
