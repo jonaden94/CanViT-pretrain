@@ -102,6 +102,8 @@ def test_forward_loss(backbone: ViTBackbone) -> None:
 
     losses, final_hidden = avp.forward_loss(images, viewpoints, target, hidden)
 
+    # use_scene_loss=True by default
+    assert losses.scene is not None
     assert losses.scene.shape == ()
     assert losses.scene.requires_grad
     # use_cls_loss=False in config

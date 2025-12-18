@@ -61,7 +61,7 @@ class StepOutput(NamedTuple):
 class LossOutputs(NamedTuple):
     """Separate loss components from forward_loss. Trainer combines as needed."""
 
-    scene: Tensor  # Scene loss (always computed)
+    scene: Tensor | None  # Scene loss (None if use_scene_loss=False)
     cls: Tensor | None  # CLS loss (None if use_cls_loss=False)
 
 
@@ -82,6 +82,7 @@ class AVPConfig:
         # Enable high-magnitude writes to the scene stream
         default_factory=lambda: CrossAttentionConfig(normalize_v=False)
     )
+    use_scene_loss: bool = True  # Enable scene loss (supervise spatial predictions)
     use_cls_loss: bool = True  # Enable CLS token loss (supervise CLS predictions)
 
 
@@ -410,7 +411,9 @@ class AVPViT(nn.Module):
         n = len(viewpoints)
 
         # Initial hidden loss (aligns init with output space)
-        scene_loss = loss_fn(self.compute_scene(hidden), target)
+        scene_loss_acc: Tensor | None = None
+        if self.cfg.use_scene_loss:
+            scene_loss_acc = loss_fn(self.compute_scene(hidden), target)
         cls_loss_acc: Tensor | None = None
         if self.cls_proj is not None:
             assert cls_target is not None, "cls_target required when use_cls_loss=True"
@@ -419,7 +422,9 @@ class AVPViT(nn.Module):
         for vp in viewpoints:
             out = self.forward_step(images, vp, hidden, context)
             hidden = out.hidden
-            scene_loss = scene_loss + loss_fn(out.scene, target)
+            if self.cfg.use_scene_loss:
+                assert scene_loss_acc is not None
+                scene_loss_acc = scene_loss_acc + loss_fn(out.scene, target)
             if self.cls_proj is not None:
                 assert cls_target is not None and cls_loss_acc is not None
                 cls_loss_acc = cls_loss_acc + loss_fn(
@@ -427,7 +432,7 @@ class AVPViT(nn.Module):
                 )
 
         losses = LossOutputs(
-            scene=scene_loss / (n + 1),
+            scene=scene_loss_acc / (n + 1) if scene_loss_acc is not None else None,
             cls=cls_loss_acc / (n + 1) if cls_loss_acc is not None else None,
         )
         return losses, hidden

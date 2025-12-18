@@ -208,9 +208,11 @@ def test_forward_loss():
     losses, final_hidden = avp.forward_loss(images, viewpoints, target, hidden, cls_target=cls_target)
 
     assert isinstance(losses, LossOutputs)
+    # use_scene_loss=True by default
+    assert losses.scene is not None
     assert losses.scene.shape == ()
     assert losses.scene.item() >= 0
-    # use_cls_loss=True by default, so cls should be present
+    # use_cls_loss=True by default
     assert losses.cls is not None
     assert losses.cls.shape == ()
     assert losses.cls.item() >= 0
