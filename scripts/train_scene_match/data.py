@@ -54,7 +54,8 @@ def create_resolution_stages(cfg: Config, patch_size: int) -> dict[int, Resoluti
             t = (G**2 - cfg.min_grid_size**2) / (cfg.max_grid_size**2 - cfg.min_grid_size**2)
             bs = max(2, round(bs_at_min + t * (cfg.batch_size - bs_at_min)))
 
-        fresh_count = max(1, min(bs - 1, round(cfg.fresh_ratio * bs)))
+        fresh_count = max(1, round(cfg.fresh_ratio * bs))
+        fresh_count = min(fresh_count, bs)  # cap at batch size
 
         stages[G] = ResolutionStage(
             scene_grid_size=G,
