@@ -75,7 +75,7 @@ class AVPConfig:
     use_recurrence_ln: bool = False  # LN at recurrence boundary (False = Identity)
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries
     gating: GatingMode = "none"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
-    adapter_stride: int = 4  # Adapters every N backbone blocks (reference: 1)
+    adapter_stride: int = 2  # Adapters every N backbone blocks (reference: 1)
     read_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
     write_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
     use_local_loss: bool = False  # Enable local loss (supervise glimpse predictions)
