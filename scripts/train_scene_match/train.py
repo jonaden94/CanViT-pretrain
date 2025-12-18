@@ -330,11 +330,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         # Validation (metrics only, fast)
         if step % cfg.val_every == 0:
             val_images = val_loader.next_batch().to(cfg.device)
-            val_loss = val_metrics_only(
+            val_scene_l1 = val_metrics_only(
                 exp, step, avp, compute_raw_targets, scene_norm, cls_norm,
                 val_images, G, f"grid{G}/val",
             )
-            exp.log_metric("val/loss", val_loss, step=step)
+            exp.log_metric("val/scene_l1", val_scene_l1, step=step)
 
             # Log gradient norms by module
             for name, norm in grad_norms_by_module(avp, depth=1).items():
