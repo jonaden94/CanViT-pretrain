@@ -23,6 +23,15 @@ from avp_vit.train.data import IMAGENET_MEAN, IMAGENET_STD
 RGBA = tuple[float, float, float, float]
 
 
+def _cosine_dissimilarity(a: NDArray, b: NDArray) -> NDArray:
+    """Compute 1 - cosine_similarity along last axis. Returns [N] for [N, D] inputs."""
+    dot = (a * b).sum(axis=-1)
+    norm_a = np.linalg.norm(a, axis=-1)
+    norm_b = np.linalg.norm(b, axis=-1)
+    cos_sim = dot / (norm_a * norm_b + 1e-8)
+    return 1 - cos_sim
+
+
 def timestep_colors(n: int) -> list[RGBA]:
     """Get n distinct colors from viridis colormap."""
     cmap = plt.get_cmap("viridis")
@@ -283,16 +292,15 @@ def plot_multistep_pca(
     else:
         initial_hidden_rgb = None
 
-    # Precompute error maps (including initial)
-    initial_error = ((initial_scene - teacher) ** 2).mean(axis=-1).reshape(S, S)
-    error_maps = [initial_error] + [((s - teacher) ** 2).mean(axis=-1).reshape(S, S) for s in scenes]
-    error_vmax = max(e.max() for e in error_maps)
+    # Precompute error maps (cosine dissimilarity, per-row scaling)
+    initial_error = _cosine_dissimilarity(initial_scene, teacher).reshape(S, S)
+    error_maps = [initial_error] + [_cosine_dissimilarity(s, teacher).reshape(S, S) for s in scenes]
 
-    # Compute delta maps for scene predictions
+    # Compute delta maps for scene predictions (cosine dissimilarity from prev)
     delta_scene_maps: list[NDArray[np.floating]] = [np.zeros((S, S))]
     prev_scene = initial_scene
     for scene in scenes:
-        delta_scene_maps.append(((scene - prev_scene) ** 2).mean(axis=-1).reshape(S, S))
+        delta_scene_maps.append(_cosine_dissimilarity(scene, prev_scene).reshape(S, S))
         prev_scene = scene
 
     # Compute delta maps for hidden states (if available)
@@ -302,7 +310,7 @@ def plot_multistep_pca(
         delta_hidden_maps = [np.zeros((S, S))]
         prev_hidden = initial_hidden_spatial
         for h in hidden_spatials:
-            delta_hidden_maps.append(((h - prev_hidden) ** 2).mean(axis=-1).reshape(S, S))
+            delta_hidden_maps.append(_cosine_dissimilarity(h, prev_hidden).reshape(S, S))
             prev_hidden = h
 
     # Column indices
@@ -363,9 +371,9 @@ def plot_multistep_pca(
     axes[row, C_DELTA_SCENE].axis("off")
     axes[row, C_DELTA_SCENE].set_title("Δ Scene")
 
-    im_err = axes[row, C_ERROR].imshow(error_maps[0], cmap="hot", vmin=0, vmax=error_vmax)
-    mse = float(error_maps[0].mean())
-    axes[row, C_ERROR].set_title(f"Err ({mse:.4f})")
+    im_err = axes[row, C_ERROR].imshow(error_maps[0], cmap="hot")
+    cos_dis = float(error_maps[0].mean())
+    axes[row, C_ERROR].set_title(f"CosDis ({cos_dis:.4f})")
     axes[row, C_ERROR].axis("off")
     fig.colorbar(im_err, ax=axes[row, C_ERROR], fraction=0.046, pad=0.04)
 
@@ -477,10 +485,10 @@ def plot_multistep_pca(
         axes[row, C_DELTA_SCENE].axis("off")
         fig.colorbar(im_ds, ax=axes[row, C_DELTA_SCENE], fraction=0.046, pad=0.04)
 
-        # Col: Error
-        im_err = axes[row, C_ERROR].imshow(error_maps[row], cmap="hot", vmin=0, vmax=error_vmax)
-        mse = float(error_maps[row].mean())
-        axes[row, C_ERROR].set_title(f"Err ({mse:.4f})")
+        # Col: Error (cosine dissimilarity, per-row scaling)
+        im_err = axes[row, C_ERROR].imshow(error_maps[row], cmap="hot")
+        cos_dis = float(error_maps[row].mean())
+        axes[row, C_ERROR].set_title(f"CosDis ({cos_dis:.4f})")
         axes[row, C_ERROR].axis("off")
         fig.colorbar(im_err, ax=axes[row, C_ERROR], fraction=0.046, pad=0.04)
 
