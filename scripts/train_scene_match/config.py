@@ -21,8 +21,8 @@ class Config:
     freeze_student_backbone: bool = False
     # AVP
     avp: AVPConfig = field(default_factory=AVPConfig)
-    grid_sizes: tuple[int, ...] = (16, 128)
-    batch_size: int = 2  # Max batch size (at max grid size)
+    grid_sizes: tuple[int, ...] = (64,)
+    batch_size: int = 16  # Max batch size (at max grid size)
     ref_lr: float = 1e-5
     weight_decay: float = 1e-5
     n_viewpoints_per_step: int = (
