@@ -140,12 +140,12 @@ def viz_and_log(
                 step=step,
             )
 
-            # Loss vs timestep (t=0 is initial scene before any viewpoint)
+            # Scene loss vs timestep (t=0 is initial scene before any viewpoint)
             initial_scene = avp.compute_scene(initial_hidden)
             initial_loss = LOSS_FNS[loss_type](initial_scene, target).item()
             losses = all_losses[loss_type]
             exp.log_curve(
-                f"{prefix}/loss_vs_timestep",
+                f"{prefix}/scene_loss_vs_timestep",
                 x=list(range(len(losses) + 1)),
                 y=[initial_loss] + losses,
                 step=step,
@@ -294,9 +294,9 @@ def val_metrics_only(
         # Scene metrics (normalized + raw)
         norms = {name: fn(final_scene, target).item() for name, fn in LOSS_FNS.items()}
         for name, val in norms.items():
-            exp.log_metric(f"{prefix}/{name}", val, step=step)
+            exp.log_metric(f"{prefix}/scene_{name}", val, step=step)
         for name, fn in LOSS_FNS.items():
-            exp.log_metric(f"{prefix}/{name}_raw", fn(final_scene, raw_feats.patches).item(), step=step)
+            exp.log_metric(f"{prefix}/scene_{name}_raw", fn(final_scene, raw_feats.patches).item(), step=step)
 
         # CLS metrics (if enabled)
         if avp.cls_proj is not None:
@@ -338,20 +338,20 @@ def eval_and_log(
         log_spatial_stats=log_spatial_stats, log_curves=log_curves, loss_type=loss_type,
     )
 
-    # Log normalized metrics - per timestep and final
+    # Log normalized scene metrics - per timestep and final
     n_timesteps = len(all_losses["l1"])
     for t in range(n_timesteps):
         for name, losses in all_losses.items():
-            exp.log_metric(f"{prefix}/{name}_t{t}", losses[t], step=step)
+            exp.log_metric(f"{prefix}/scene_{name}_t{t}", losses[t], step=step)
     for name, losses in all_losses.items():
-        exp.log_metric(f"{prefix}/{name}", losses[-1], step=step)
+        exp.log_metric(f"{prefix}/scene_{name}", losses[-1], step=step)
 
-    # Raw metrics (for cross-run comparison)
+    # Raw scene metrics (for cross-run comparison)
     with torch.inference_mode():
         outputs, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
         final_scene = outputs[-1].scene
         for name, fn in LOSS_FNS.items():
-            exp.log_metric(f"{prefix}/{name}_raw", fn(final_scene, raw_feats.patches).item(), step=step)
+            exp.log_metric(f"{prefix}/scene_{name}_raw", fn(final_scene, raw_feats.patches).item(), step=step)
 
         # CLS metrics (if enabled)
         if avp.cls_proj is not None:
