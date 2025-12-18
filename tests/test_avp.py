@@ -104,8 +104,7 @@ def test_forward_loss(backbone: ViTBackbone) -> None:
 
     assert losses.scene.shape == ()
     assert losses.scene.requires_grad
-    # use_local_loss=False by default, use_cls_loss=False in config
-    assert losses.local is None
+    # use_cls_loss=False in config
     assert losses.cls is None
     # hidden = [cls | registers | spatial], CLS always present
     assert final_hidden.shape == (B, avp.n_cls + 64, backbone.embed_dim)

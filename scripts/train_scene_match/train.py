@@ -232,9 +232,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             stage.batch_size, stage.fresh_count, G, cfg.device,
         )
 
-    # EMA tracking for losses (scene, local, cls, total)
+    # EMA tracking for losses (scene, cls, total)
     ema_scene_t = torch.tensor(0.0, device=cfg.device)
-    ema_local_t = torch.tensor(0.0, device=cfg.device)
     ema_cls_t = torch.tensor(0.0, device=cfg.device)
     ema_loss_t = torch.tensor(0.0, device=cfg.device)
     alpha = 2 / (cfg.log_every + 1)
@@ -278,8 +277,6 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
         # Combine losses (trainer's responsibility)
         total_loss = losses.scene
-        if losses.local is not None:
-            total_loss = total_loss + losses.local
         if losses.cls is not None:
             total_loss = total_loss + losses.cls
 
@@ -296,21 +293,18 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
         # Update EMAs
         scene_t = losses.scene.detach()
-        local_t = losses.local.detach() if losses.local is not None else torch.tensor(0.0, device=cfg.device)
         cls_t = losses.cls.detach() if losses.cls is not None else torch.tensor(0.0, device=cfg.device)
         total_t = total_loss.detach()
         if step > 0:
             ema_scene_t = alpha * scene_t + (1 - alpha) * ema_scene_t
-            ema_local_t = alpha * local_t + (1 - alpha) * ema_local_t
             ema_cls_t = alpha * cls_t + (1 - alpha) * ema_cls_t
             ema_loss_t = alpha * total_t + (1 - alpha) * ema_loss_t
         else:
-            ema_scene_t, ema_local_t, ema_cls_t, ema_loss_t = scene_t, local_t, cls_t, total_t
+            ema_scene_t, ema_cls_t, ema_loss_t = scene_t, cls_t, total_t
 
         if step % cfg.log_every == 0:
             ema_loss = ema_loss_t.item()
             ema_scene = ema_scene_t.item()
-            ema_local = ema_local_t.item()
             ema_cls = ema_cls_t.item()
             grad_norm = grad_norm_t.item()
             lr = scheduler.get_last_lr()[0]
@@ -329,9 +323,6 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 cls_linear = avp.cls_proj[1]
                 assert isinstance(cls_linear, torch.nn.Linear)
                 metrics["train/cls_proj_weight_norm"] = cls_linear.weight.norm().item()
-            if losses.local is not None:
-                metrics[f"grid{G}/train/local_loss"] = ema_local
-                metrics["train/local_loss"] = ema_local
             if losses.cls is not None:
                 metrics[f"grid{G}/train/cls_loss"] = ema_cls
                 metrics["train/cls_loss"] = ema_cls
