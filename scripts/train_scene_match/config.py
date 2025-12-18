@@ -21,9 +21,6 @@ class Config:
     freeze_student_backbone: bool = False
     # AVP
     avp: AVPConfig = field(default_factory=AVPConfig)
-    # grid_sizes: tuple[int, ...] = (64,)
-
-    # Low-res, many-images pretraining: glimpse at 8, scene at 16
     grid_sizes: tuple[int, ...] = (16,)
     batch_size: int = 128  # Batch size at max grid size
     batch_size_at_min_grid: int | None = (
