@@ -2,7 +2,6 @@
 
 import torch
 
-from avp_vit.glimpse import Viewpoint
 from avp_vit.train.norm import PositionAwareNorm
 
 
@@ -55,32 +54,6 @@ def test_eval_mode_no_update():
 
     # Mean should NOT have changed
     assert torch.allclose(norm.mean, mean_after_train)
-
-
-def test_normalize_at_viewpoint_shape():
-    norm = PositionAwareNorm(n_tokens=16, embed_dim=64, grid_size=4)
-    norm.train()
-    norm(torch.randn(8, 16, 64))  # Initialize stats
-
-    glimpse_grid_size = 3
-    x = torch.randn(glimpse_grid_size ** 2, 64)
-    vp = Viewpoint.full_scene(1, x.device)
-
-    y = norm.normalize_at_viewpoint(x, vp, glimpse_grid_size)
-    assert y.shape == x.shape
-
-
-def test_normalize_at_viewpoint_quadrant():
-    norm = PositionAwareNorm(n_tokens=64, embed_dim=32, grid_size=8)
-    norm.train()
-    norm(torch.randn(4, 64, 32))
-
-    glimpse_grid_size = 4
-    x = torch.randn(glimpse_grid_size ** 2, 32)
-    vp = Viewpoint.quadrant(1, x.device, 0, 0)  # Top-left quadrant
-
-    y = norm.normalize_at_viewpoint(x, vp, glimpse_grid_size)
-    assert y.shape == x.shape
 
 
 def test_state_dict_contains_buffers():
