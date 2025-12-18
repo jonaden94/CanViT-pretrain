@@ -75,8 +75,13 @@ class AVPConfig:
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries
     gating: GatingMode = "none"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
     adapter_stride: int = 2  # Adapters every N backbone blocks (reference: 1)
-    read_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
-    write_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
+    read_attention: CrossAttentionConfig = field(
+        default_factory=lambda: CrossAttentionConfig()
+    )
+    write_attention: CrossAttentionConfig = field(
+        # Enable high-magnitude writes to the scene stream
+        default_factory=lambda: CrossAttentionConfig(normalize_v=False)
+    )
     use_cls_loss: bool = True  # Enable CLS token loss (supervise CLS predictions)
 
 
