@@ -71,7 +71,7 @@ class LossOutputs(NamedTuple):
 class AVPConfig:
     glimpse_grid_size: int = 8  # 256px^2
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
-    layer_scale_init: float = 1e-6  # Init for LayerScale (reference: 0.01)
+    layer_scale_init: float = 1e-3  # Init for LayerScale (reference: 0.01)
     use_recurrence_ln: bool = True  # LN at recurrence boundary (False = Identity)
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries
     gating: GatingMode = "cheap"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
