@@ -20,7 +20,12 @@ def random_viewpoint(
 
 
 def make_eval_viewpoints(B: int, device: torch.device) -> list[Viewpoint]:
-    """Full scene followed by 4 quadrants in shuffled order."""
+    """Full scene followed by 4 quadrants in shuffled order.
+
+    Intentionally non-deterministic: quadrant order varies each call to test
+    that the model generalizes across orderings, not just a fixed sequence.
+    Uses Python random (not torch) since reproducibility is NOT desired here.
+    """
     vps = [Viewpoint.full_scene(B, device)]
     quadrants = [(0, 0), (0, 1), (1, 0), (1, 1)]
     random.shuffle(quadrants)
