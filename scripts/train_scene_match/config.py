@@ -41,7 +41,7 @@ class Config:
     resume_ckpt: Path | None = None  # AVP checkpoint to resume from
     # Training
     num_workers: int = 8
-    crop_scale_min: float = 0.4
+    crop_scale_min: float = 0.8
     loss: Literal["l1", "mse", "cos"] = "mse"
     # Logging
     log_every: int = 20
