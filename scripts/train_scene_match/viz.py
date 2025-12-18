@@ -374,32 +374,24 @@ def eval_and_log(
 
 def log_norm_stats(
     exp: comet_ml.Experiment,
-    normalizers: dict[int, PositionAwareNorm],
-    cls_normalizer: PositionAwareNorm,
+    scene_normalizers: dict[int, PositionAwareNorm],
+    cls_normalizers: dict[int, PositionAwareNorm],
     step: int,
 ) -> None:
     """Log normalizer running stats to Comet: metrics and spatial heatmaps."""
-    # Scene normalizers (per grid size)
-    for G, norm in normalizers.items():
+    for G, scene_norm in scene_normalizers.items():
+        cls_norm = cls_normalizers[G]
         exp.log_metrics(
             {
-                f"norm/G{G}/mean_norm": norm.mean.norm().item(),
-                f"norm/G{G}/var_mean": norm.var.mean().item(),
-                f"norm/G{G}/var_std": norm.var.std().item(),
+                f"norm/G{G}/scene_mean_norm": scene_norm.mean.norm().item(),
+                f"norm/G{G}/scene_var_mean": scene_norm.var.mean().item(),
+                f"norm/G{G}/cls_mean_norm": cls_norm.mean.norm().item(),
+                f"norm/G{G}/cls_var_mean": cls_norm.var.mean().item(),
             },
             step=step,
         )
-        # Plot spatial heatmaps of mean/std amplitude
-        mean_np = norm.mean.cpu().float().numpy()
-        std_np = norm.var.sqrt().cpu().float().numpy()
+        # Spatial heatmap for scene normalizer only (CLS has no spatial structure)
+        mean_np = scene_norm.mean.cpu().float().numpy()
+        std_np = scene_norm.var.sqrt().cpu().float().numpy()
         fig = plot_norm_stats(mean_np, std_np, G)
         log_figure(exp, fig, f"norm/G{G}/spatial", step)
-
-    # CLS normalizer (single token, no spatial heatmap)
-    exp.log_metrics(
-        {
-            "norm/cls/mean_norm": cls_normalizer.mean.norm().item(),
-            "norm/cls/var_mean": cls_normalizer.var.mean().item(),
-        },
-        step=step,
-    )
