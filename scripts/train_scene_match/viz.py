@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import torch
 from matplotlib.figure import Figure
 from torch import Tensor
+from torch.nn.functional import cosine_similarity, l1_loss, mse_loss
 
 from avp_vit import AVPViT
 from avp_vit.backbone.dinov3 import DINOv3Backbone, NormFeatures
@@ -21,6 +22,13 @@ from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import make_eval_viewpoints
 
 log = logging.getLogger(__name__)
+
+
+def cos_dissim(pred: Tensor, target: Tensor) -> Tensor:
+    return (1 - cosine_similarity(pred, target, dim=-1)).mean()
+
+
+LOSS_FNS = {"l1": l1_loss, "mse": mse_loss, "cos": cos_dissim}
 
 
 def _infer_scene_grid_size(target: Tensor) -> int:
@@ -83,17 +91,8 @@ def viz_and_log(
     log_curves: bool = True,
     loss_type: Literal["l1", "mse", "cos"] = "mse",
     log_register_curves: bool = False,
-) -> tuple[list[float], list[float]]:
-    """Run forward trajectory and log visualization.
-
-    Args:
-        target: Already-normalized targets [B, N, D]
-        normalizer: Used for normalizing cropped teacher features for local comparison
-
-    Returns (l1_losses, mse_losses) per timestep.
-    """
-    from torch.nn.functional import l1_loss, mse_loss
-
+) -> dict[str, list[float]]:
+    """Run forward trajectory and log visualization. Returns {l1, mse, cos} losses per timestep."""
     assert isinstance(avp.backbone, DINOv3Backbone)
     avp_backbone = avp.backbone
     scene_grid_size = _infer_scene_grid_size(target)
@@ -101,8 +100,10 @@ def viz_and_log(
 
     with torch.inference_mode():
         outputs, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
-        l1_losses = [l1_loss(out.scene, target).item() for out in outputs]
-        mse_losses = [mse_loss(out.scene, target).item() for out in outputs]
+        all_losses = {
+            name: [fn(out.scene, target).item() for out in outputs]
+            for name, fn in LOSS_FNS.items()
+        }
 
         # Compute hidden states for logging and visualization
         # t=0 = initial hidden before any viewpoint, t=1,2,... = after each viewpoint
@@ -150,12 +151,8 @@ def viz_and_log(
 
             # Loss vs timestep (t=0 is initial scene before any viewpoint)
             initial_scene = avp.compute_scene(initial_hidden)
-            if loss_type == "l1":
-                initial_loss = l1_loss(initial_scene, target).item()
-                losses = l1_losses
-            else:
-                initial_loss = mse_loss(initial_scene, target).item()
-                losses = mse_losses
+            initial_loss = LOSS_FNS[loss_type](initial_scene, target).item()
+            losses = all_losses[loss_type]
             exp.log_curve(
                 f"{prefix}/loss_vs_timestep",
                 x=list(range(len(losses) + 1)),
@@ -278,10 +275,7 @@ def viz_and_log(
     )
     log_figure(exp, fig_pca, f"{prefix}/pca", step)
 
-    # fig_traj = plot_trajectory(full_img, boxes, names)
-    # log_figure(exp, fig_traj, f"{prefix}/trajectory", step)
-
-    return l1_losses, mse_losses
+    return all_losses
 
 
 def val_metrics_only(
@@ -295,17 +289,7 @@ def val_metrics_only(
     scene_grid_size: int,
     prefix: str = "val",
 ) -> float:
-    """Fast validation: compute and log metrics without expensive PCA visualization.
-
-    Logs both normalized and raw metrics for cross-run comparison:
-    - {prefix}/l1, {prefix}/mse: scene loss vs normalized targets
-    - {prefix}/l1_raw, {prefix}/mse_raw: scene loss vs raw targets
-    - {prefix}/cls_l1, {prefix}/cls_mse: CLS loss vs normalized targets (if enabled)
-
-    Returns final scene l1 loss (normalized).
-    """
-    from torch.nn.functional import l1_loss, mse_loss
-
+    """Fast validation without PCA. Returns final scene l1 loss (normalized)."""
     B = images.shape[0]
     viewpoints = make_eval_viewpoints(B, images.device)
 
@@ -316,24 +300,21 @@ def val_metrics_only(
         outputs, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
         final_scene = outputs[-1].scene
 
-        # Scene metrics (normalized - what we train on)
-        l1_norm = l1_loss(final_scene, target).item()
-        mse_norm = mse_loss(final_scene, target).item()
-        exp.log_metric(f"{prefix}/l1", l1_norm, step=step)
-        exp.log_metric(f"{prefix}/mse", mse_norm, step=step)
-
-        # Scene metrics (raw - for cross-run comparison)
-        exp.log_metric(f"{prefix}/l1_raw", l1_loss(final_scene, raw_feats.patches).item(), step=step)
-        exp.log_metric(f"{prefix}/mse_raw", mse_loss(final_scene, raw_feats.patches).item(), step=step)
+        # Scene metrics (normalized + raw)
+        norms = {name: fn(final_scene, target).item() for name, fn in LOSS_FNS.items()}
+        for name, val in norms.items():
+            exp.log_metric(f"{prefix}/{name}", val, step=step)
+        for name, fn in LOSS_FNS.items():
+            exp.log_metric(f"{prefix}/{name}_raw", fn(final_scene, raw_feats.patches).item(), step=step)
 
         # CLS metrics (if enabled)
         if avp.cls_proj is not None:
             cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
             cls_pred = avp.compute_cls(outputs[-1].hidden)
-            exp.log_metric(f"{prefix}/cls_l1", l1_loss(cls_pred, cls_target).item(), step=step)
-            exp.log_metric(f"{prefix}/cls_mse", mse_loss(cls_pred, cls_target).item(), step=step)
+            for name, fn in LOSS_FNS.items():
+                exp.log_metric(f"{prefix}/cls_{name}", fn(cls_pred, cls_target).item(), step=step)
 
-    return l1_norm
+    return norms["l1"]
 
 
 def eval_and_log(
@@ -351,15 +332,7 @@ def eval_and_log(
     log_curves: bool = True,
     loss_type: Literal["l1", "mse", "cos"] = "mse",
 ) -> float:
-    """Full evaluation with PCA visualization (expensive). Returns final scene l1 loss (normalized).
-
-    Logs both normalized and raw metrics for cross-run comparison:
-    - {prefix}/l1, {prefix}/mse: scene loss vs normalized targets
-    - {prefix}/l1_raw, {prefix}/mse_raw: scene loss vs raw targets
-    - {prefix}/cls_l1, {prefix}/cls_mse: CLS loss vs normalized targets (if enabled)
-    """
-    from torch.nn.functional import l1_loss, mse_loss
-
+    """Full evaluation with PCA visualization (expensive). Returns final scene l1 loss (normalized)."""
     B = images.shape[0]
     viewpoints = make_eval_viewpoints(B, images.device)
 
@@ -368,47 +341,35 @@ def eval_and_log(
         target = scene_normalizer(raw_feats.patches)
         hidden = avp.init_hidden(B, scene_grid_size)
 
-    # Full viz with PCA (expensive)
-    l1_losses, mse_losses = viz_and_log(
-        exp,
-        step,
-        prefix,
-        avp,
-        teacher,
-        scene_normalizer,
-        images,
-        viewpoints,
-        target,
-        hidden,
-        log_spatial_stats=log_spatial_stats,
-        log_curves=log_curves,
-        loss_type=loss_type,
+    all_losses = viz_and_log(
+        exp, step, prefix, avp, teacher, scene_normalizer,
+        images, viewpoints, target, hidden,
+        log_spatial_stats=log_spatial_stats, log_curves=log_curves, loss_type=loss_type,
     )
 
-    # Log normalized metrics (what we train on) - per timestep
-    for t, (l1, mse) in enumerate(zip(l1_losses, mse_losses, strict=True)):
-        exp.log_metric(f"{prefix}/l1_t{t}", l1, step=step)
-        exp.log_metric(f"{prefix}/mse_t{t}", mse, step=step)
-    exp.log_metric(f"{prefix}/l1", l1_losses[-1], step=step)
-    exp.log_metric(f"{prefix}/mse", mse_losses[-1], step=step)
+    # Log normalized metrics - per timestep and final
+    n_timesteps = len(all_losses["l1"])
+    for t in range(n_timesteps):
+        for name, losses in all_losses.items():
+            exp.log_metric(f"{prefix}/{name}_t{t}", losses[t], step=step)
+    for name, losses in all_losses.items():
+        exp.log_metric(f"{prefix}/{name}", losses[-1], step=step)
 
     # Raw metrics (for cross-run comparison)
     with torch.inference_mode():
         outputs, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
         final_scene = outputs[-1].scene
-        exp.log_metric(f"{prefix}/l1_raw", l1_loss(final_scene, raw_feats.patches).item(), step=step)
-        exp.log_metric(f"{prefix}/mse_raw", mse_loss(final_scene, raw_feats.patches).item(), step=step)
+        for name, fn in LOSS_FNS.items():
+            exp.log_metric(f"{prefix}/{name}_raw", fn(final_scene, raw_feats.patches).item(), step=step)
 
         # CLS metrics (if enabled)
         if avp.cls_proj is not None:
             cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
             cls_pred = avp.compute_cls(outputs[-1].hidden)
-            exp.log_metric(f"{prefix}/cls_l1", l1_loss(cls_pred, cls_target).item(), step=step)
-            exp.log_metric(f"{prefix}/cls_mse", mse_loss(cls_pred, cls_target).item(), step=step)
+            for name, fn in LOSS_FNS.items():
+                exp.log_metric(f"{prefix}/cls_{name}", fn(cls_pred, cls_target).item(), step=step)
 
-    return l1_losses[-1]
-
-
+    return all_losses["l1"][-1]
 
 
 def log_norm_stats(

@@ -380,13 +380,13 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
         # Full viz with PCA (expensive, less frequent)
         if step % cfg.viz_every == 0:
-            train_l1, train_mse = viz_and_log(
+            train_losses = viz_and_log(
                 exp, step, f"grid{G}/train", avp, teacher, normalizer,
                 state.images, viewpoints, state.targets, state.hidden,
                 log_spatial_stats=cfg.log_spatial_stats, log_curves=False, loss_type=cfg.loss,
             )
-            exp.log_metric(f"grid{G}/train/viz_l1", train_l1[-1], step=step)
-            exp.log_metric(f"grid{G}/train/viz_mse", train_mse[-1], step=step)
+            for name, losses in train_losses.items():
+                exp.log_metric(f"grid{G}/train/viz_{name}", losses[-1], step=step)
 
             val_images = val_loader.next_batch().to(cfg.device)
             eval_and_log(
