@@ -12,27 +12,14 @@ from ytch.nn.layer_scale import LayerScale
 from canvit.rope import rope_apply_with_prefix
 
 
-# === Cross-attention ===
-
-
 @final
 @dataclass
 class CrossAttentionConfig:
-    """Config for a single cross-attention module (read OR write)."""
-
     pre_proj_q_ln: bool = True
     pre_proj_k_ln: bool = True
     pre_proj_v_ln: bool = True
     post_proj_qk_ln: bool = False
-    use_ewa_transforms: bool = False
-
-
-def _ln_or_identity(dim: int, normalize: bool) -> nn.Module:
-    return nn.LayerNorm(dim, elementwise_affine=False) if normalize else nn.Identity()
-
-
-def _ewa_or_identity(dim: int, use_ewa: bool) -> nn.Module:
-    return ElementwiseAffine(dim) if use_ewa else nn.Identity()
+    use_ewa_transforms: bool = True
 
 
 class CanvasCrossAttention(nn.Module):
@@ -51,11 +38,15 @@ class CanvasCrossAttention(nn.Module):
         self.dim = dim
         self.num_heads = num_heads
         head_dim = dim // num_heads
-        self.pre_proj_q_ln = _ln_or_identity(dim=dim, normalize=cfg.pre_proj_q_ln)
-        self.pre_proj_k_ln = _ln_or_identity(dim=dim, normalize=cfg.pre_proj_k_ln)
-        self.pre_proj_v_ln = _ln_or_identity(dim=dim, normalize=cfg.pre_proj_v_ln)
-        self.post_proj_q_ln = _ln_or_identity(dim=head_dim, normalize=cfg.post_proj_qk_ln)
-        self.post_proj_k_ln = _ln_or_identity(dim=head_dim, normalize=cfg.post_proj_qk_ln)
+
+        def ln_or_id(d: int, use: bool) -> nn.Module:
+            return nn.LayerNorm(d, elementwise_affine=False) if use else nn.Identity()
+
+        self.pre_proj_q_ln = ln_or_id(dim, cfg.pre_proj_q_ln)
+        self.pre_proj_k_ln = ln_or_id(dim, cfg.pre_proj_k_ln)
+        self.pre_proj_v_ln = ln_or_id(dim, cfg.pre_proj_v_ln)
+        self.post_proj_q_ln = ln_or_id(head_dim, cfg.post_proj_qk_ln)
+        self.post_proj_k_ln = ln_or_id(head_dim, cfg.post_proj_qk_ln)
 
     def forward(
         self,
@@ -102,26 +93,26 @@ class CanvasCrossAttention(nn.Module):
 
 @final
 class ReadCrossAttention(CanvasCrossAttention):
-    """Read: Q, O are Linear on local; K, V are EWA on canvas."""
+    """Read: local queries canvas. Q/O Linear on local, K/V on canvas."""
 
     def __init__(self, dim: int, num_heads: int, cfg: CrossAttentionConfig) -> None:
         super().__init__(dim, num_heads, cfg)
         self.q_transform = nn.Linear(dim, dim)
-        self.k_transform = _ewa_or_identity(dim=dim, use_ewa=cfg.use_ewa_transforms)
-        self.v_transform = _ewa_or_identity(dim=dim, use_ewa=cfg.use_ewa_transforms)
+        self.k_transform = ElementwiseAffine(dim) if cfg.use_ewa_transforms else nn.Identity()
+        self.v_transform = ElementwiseAffine(dim) if cfg.use_ewa_transforms else nn.Identity()
         self.out_transform = nn.Linear(dim, dim)
 
 
 @final
 class WriteCrossAttention(CanvasCrossAttention):
-    """Write: K, V are Linear on local; Q, O are EWA on canvas."""
+    """Write: canvas queries local. K/V Linear on local, Q/O on canvas."""
 
     def __init__(self, dim: int, num_heads: int, cfg: CrossAttentionConfig) -> None:
         super().__init__(dim, num_heads, cfg)
-        self.q_transform = _ewa_or_identity(dim=dim, use_ewa=cfg.use_ewa_transforms)
+        self.q_transform = ElementwiseAffine(dim) if cfg.use_ewa_transforms else nn.Identity()
         self.k_transform = nn.Linear(dim, dim)
         self.v_transform = nn.Linear(dim, dim)
-        self.out_transform = _ewa_or_identity(dim=dim, use_ewa=cfg.use_ewa_transforms)
+        self.out_transform = ElementwiseAffine(dim) if cfg.use_ewa_transforms else nn.Identity()
 
 
 @final
