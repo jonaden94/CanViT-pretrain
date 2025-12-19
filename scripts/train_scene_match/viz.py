@@ -339,10 +339,11 @@ def eval_and_log(
 
     # CLS metrics (if enabled)
     if avp.cls_proj is not None:
-        cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
-        cls_pred = avp.compute_cls(viz.outputs[-1].hidden)
-        for name, fn in LOSS_FNS.items():
-            exp.log_metric(f"{prefix}/cls_{name}", fn(cls_pred, cls_target).item(), step=step)
+        with torch.inference_mode():
+            cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
+            cls_pred = avp.compute_cls(viz.outputs[-1].hidden)
+            for name, fn in LOSS_FNS.items():
+                exp.log_metric(f"{prefix}/cls_{name}", fn(cls_pred, cls_target).item(), step=step)
 
     return viz.losses["l1"][-1]
 
