@@ -79,8 +79,7 @@ class AVPConfig:
         default_factory=lambda: CrossAttentionConfig()
     )
     write_attention: CrossAttentionConfig = field(
-        # Enable high-magnitude writes to the scene stream
-        default_factory=lambda: CrossAttentionConfig(normalize_v=False)
+        default_factory=lambda: CrossAttentionConfig(pre_proj_v_ln=False)
     )
     use_scene_loss: bool = True  # Enable scene loss (supervise spatial predictions)
     use_cls_loss: bool = True  # Enable CLS token loss (supervise CLS predictions)

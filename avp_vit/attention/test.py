@@ -93,52 +93,40 @@ def test_ewa_transforms_disabled():
     assert isinstance(write.out_transform, nn.Identity)
 
 
-def test_normalize_q_enabled():
-    """Q normalization uses LayerNorm when enabled."""
+def test_pre_proj_ln_enabled():
     D = 64
-    cfg = CrossAttentionConfig(normalize_q=True)
+    cfg = CrossAttentionConfig(pre_proj_q_ln=True, pre_proj_k_ln=True, pre_proj_v_ln=True)
     attn = RoPEReadCrossAttention(D, 4, cfg)
-    assert isinstance(attn.q_norm, nn.LayerNorm)
+    assert isinstance(attn.pre_proj_q_ln, nn.LayerNorm)
+    assert isinstance(attn.pre_proj_k_ln, nn.LayerNorm)
+    assert isinstance(attn.pre_proj_v_ln, nn.LayerNorm)
 
 
-def test_normalize_q_disabled():
-    """Q normalization is Identity when disabled."""
+def test_pre_proj_ln_disabled():
     D = 64
-    cfg = CrossAttentionConfig(normalize_q=False)
+    cfg = CrossAttentionConfig(pre_proj_q_ln=False, pre_proj_k_ln=False, pre_proj_v_ln=False)
     attn = RoPEReadCrossAttention(D, 4, cfg)
-    assert isinstance(attn.q_norm, nn.Identity)
+    assert isinstance(attn.pre_proj_q_ln, nn.Identity)
+    assert isinstance(attn.pre_proj_k_ln, nn.Identity)
+    assert isinstance(attn.pre_proj_v_ln, nn.Identity)
 
 
-def test_normalize_k_enabled():
-    """K normalization uses LayerNorm when enabled."""
+def test_post_proj_qk_ln_enabled():
+    D, heads = 64, 4
+    head_dim = D // heads
+    cfg = CrossAttentionConfig(post_proj_qk_ln=True)
+    attn = RoPEReadCrossAttention(D, heads, cfg)
+    assert isinstance(attn.post_proj_q_ln, nn.LayerNorm)
+    assert isinstance(attn.post_proj_k_ln, nn.LayerNorm)
+    assert attn.post_proj_q_ln.normalized_shape == (head_dim,)
+
+
+def test_post_proj_qk_ln_disabled():
     D = 64
-    cfg = CrossAttentionConfig(normalize_k=True)
+    cfg = CrossAttentionConfig(post_proj_qk_ln=False)
     attn = RoPEReadCrossAttention(D, 4, cfg)
-    assert isinstance(attn.k_norm, nn.LayerNorm)
-
-
-def test_normalize_k_disabled():
-    """K normalization is Identity when disabled."""
-    D = 64
-    cfg = CrossAttentionConfig(normalize_k=False)
-    attn = RoPEReadCrossAttention(D, 4, cfg)
-    assert isinstance(attn.k_norm, nn.Identity)
-
-
-def test_normalize_v_enabled():
-    """V normalization uses LayerNorm when enabled."""
-    D = 64
-    cfg = CrossAttentionConfig(normalize_v=True)
-    attn = RoPEReadCrossAttention(D, 4, cfg)
-    assert isinstance(attn.v_norm, nn.LayerNorm)
-
-
-def test_normalize_v_disabled():
-    """V normalization is Identity when disabled."""
-    D = 64
-    cfg = CrossAttentionConfig(normalize_v=False)
-    attn = RoPEReadCrossAttention(D, 4, cfg)
-    assert isinstance(attn.v_norm, nn.Identity)
+    assert isinstance(attn.post_proj_q_ln, nn.Identity)
+    assert isinstance(attn.post_proj_k_ln, nn.Identity)
 
 
 # ==================== ScaledResidualAttention ====================

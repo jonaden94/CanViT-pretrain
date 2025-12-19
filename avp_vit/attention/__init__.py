@@ -15,9 +15,10 @@ from avp_vit.rope import rope_apply_with_prefix
 class CrossAttentionConfig:
     """Config for a single cross-attention module (read OR write)."""
 
-    normalize_q: bool = True  # LayerNorm Q input before projection
-    normalize_k: bool = True  # LayerNorm K input before projection
-    normalize_v: bool = True  # LayerNorm V input before projection
+    pre_proj_q_ln: bool = True
+    pre_proj_k_ln: bool = True
+    pre_proj_v_ln: bool = True
+    post_proj_qk_ln: bool = False  # LayerNorm Q and K after projection (per head)
     use_ewa_transforms: bool = True  # EWA instead of Identity for unprojected streams
 
 
@@ -30,9 +31,11 @@ class RoPECrossAttention(nn.Module):
 
     dim: int
     num_heads: int
-    q_norm: nn.Module
-    k_norm: nn.Module
-    v_norm: nn.Module
+    pre_proj_q_ln: nn.Module
+    pre_proj_k_ln: nn.Module
+    pre_proj_v_ln: nn.Module
+    post_proj_q_ln: nn.Module
+    post_proj_k_ln: nn.Module
     q_transform: nn.Module
     k_transform: nn.Module
     v_transform: nn.Module
@@ -48,9 +51,12 @@ class RoPECrossAttention(nn.Module):
         assert dim % num_heads == 0, f"dim {dim} not divisible by num_heads {num_heads}"
         self.dim = dim
         self.num_heads = num_heads
-        self.q_norm = _ln_or_identity(dim, cfg.normalize_q)
-        self.k_norm = _ln_or_identity(dim, cfg.normalize_k)
-        self.v_norm = _ln_or_identity(dim, cfg.normalize_v)
+        head_dim = dim // num_heads
+        self.pre_proj_q_ln = _ln_or_identity(dim, cfg.pre_proj_q_ln)
+        self.pre_proj_k_ln = _ln_or_identity(dim, cfg.pre_proj_k_ln)
+        self.pre_proj_v_ln = _ln_or_identity(dim, cfg.pre_proj_v_ln)
+        self.post_proj_q_ln = _ln_or_identity(head_dim, cfg.post_proj_qk_ln)
+        self.post_proj_k_ln = _ln_or_identity(head_dim, cfg.post_proj_qk_ln)
 
     def forward(
         self,
@@ -59,9 +65,12 @@ class RoPECrossAttention(nn.Module):
         q_rope: tuple[Tensor, Tensor],
         kv_rope: tuple[Tensor, Tensor],
     ) -> Tensor:
-        q = to_multihead(self.q_transform(self.q_norm(q_in)), self.num_heads)
-        k = to_multihead(self.k_transform(self.k_norm(kv_in)), self.num_heads)
-        v = to_multihead(self.v_transform(self.v_norm(kv_in)), self.num_heads)
+        q = to_multihead(self.q_transform(self.pre_proj_q_ln(q_in)), self.num_heads)
+        k = to_multihead(self.k_transform(self.pre_proj_k_ln(kv_in)), self.num_heads)
+        v = to_multihead(self.v_transform(self.pre_proj_v_ln(kv_in)), self.num_heads)
+
+        q = self.post_proj_q_ln(q)
+        k = self.post_proj_k_ln(k)
 
         q = rope_apply_with_prefix(q, q_rope)
         k = rope_apply_with_prefix(k, kv_rope)
