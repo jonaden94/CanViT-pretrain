@@ -86,17 +86,6 @@ class ActiveCanViT(nn.Module):
             else None
         )
 
-        # Scale down output projection weights
-        scale = 1.0 / math.sqrt(dim)
-        scene_linear = self.scene_proj[1]
-        assert isinstance(scene_linear, nn.Linear)
-        with torch.no_grad():
-            scene_linear.weight.mul_(scale)
-            if self.cls_proj is not None:
-                cls_linear = self.cls_proj[1]
-                assert isinstance(cls_linear, nn.Linear)
-                cls_linear.weight.mul_(scale)
-
     @property
     def backbone(self) -> ViTBackbone:
         return self.canvit.backbone

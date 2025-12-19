@@ -4,6 +4,7 @@ Resolution-decoupled ViT backbone using asymmetric cross-attention
 between a small local stream and a large canvas state.
 """
 
+import math
 from dataclasses import dataclass, field
 from typing import NamedTuple, final
 
@@ -89,15 +90,19 @@ class CanViT(nn.Module):
             for _ in range(n_adapters)
         ])
 
-        # Canvas init
-        self.cls_init = nn.Parameter(torch.randn(1, 1, dim))
-        self.spatial_init = nn.Parameter(torch.randn(1, 1, dim))
-        self.registers = nn.Parameter(torch.randn(1, cfg.n_canvas_registers, dim))
+        # Canvas init (1/sqrt(dim) for unit L2 norm)
+        scale = 1.0 / math.sqrt(dim)
+        self.cls_init = nn.Parameter(torch.randn(1, 1, dim) * scale)
+        self.spatial_init = nn.Parameter(torch.randn(1, 1, dim) * scale)
+        self.registers = nn.Parameter(torch.randn(1, cfg.n_canvas_registers, dim) * scale)
 
-        # Canvas normalization
+        # Canvas normalization (gamma = 1/sqrt(dim) to preserve scale)
         self.cls_ln = nn.LayerNorm(dim)
         self.reg_ln = nn.LayerNorm(dim)
         self.spatial_ln = nn.LayerNorm(dim)
+        nn.init.constant_(self.cls_ln.weight, scale)
+        nn.init.constant_(self.reg_ln.weight, scale)
+        nn.init.constant_(self.spatial_ln.weight, scale)
 
     @property
     def n_canvas_registers(self) -> int:
