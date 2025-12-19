@@ -88,6 +88,9 @@ def viz_and_log(
     glimpse_grid_size = model.cfg.glimpse_grid_size
 
     with torch.inference_mode():
+        # Compute initial scene BEFORE any forward pass
+        initial_scene = model.compute_scene(canvas)
+
         outputs, _ = model.forward_trajectory_full(images, viewpoints, canvas)
         all_losses = {
             name: [fn(out.scene, target).item() for out in outputs]
@@ -95,8 +98,8 @@ def viz_and_log(
         }
 
         if log_curves:
-            # Canvas states after each viewpoint (no initial state - normalization is internal)
-            canvases = [out.canvas for out in outputs]
+            # Canvas states: initial + after each viewpoint
+            canvases = [canvas] + [out.canvas for out in outputs]
 
             # Spatial canvas norm vs timestep
             spatial_norms = [
@@ -157,13 +160,19 @@ def viz_and_log(
 
         # Target is already normalized; model predicts normalized features directly
         teacher_np = target[sample_idx].cpu().float().numpy()
-        # Use first output's scene as "initial" for viz (no t=0 pre-normalization state)
-        initial_np = outputs[0].scene[sample_idx].cpu().float().numpy()
+        # Initial scene from canvas BEFORE any forward pass
+        initial_np = initial_scene[sample_idx].cpu().float().numpy()
 
         scenes = [out.scene[sample_idx].cpu().float().numpy() for out in outputs]
 
-        # Raw canvas spatials (before scene_proj)
+        # Raw canvas spatials (before scene_proj): initial + after each viewpoint
         if show_canvas:
+            initial_canvas_spatial = (
+                model.get_spatial(canvas[sample_idx : sample_idx + 1])[0]
+                .cpu()
+                .float()
+                .numpy()
+            )
             canvas_spatials = [
                 model.get_spatial(out.canvas[sample_idx : sample_idx + 1])[0]
                 .cpu()
@@ -171,8 +180,6 @@ def viz_and_log(
                 .numpy()
                 for out in outputs
             ]
-            # Use first canvas as "initial" for viz
-            initial_canvas_spatial = canvas_spatials[0] if canvas_spatials else None
         else:
             canvas_spatials = None
             initial_canvas_spatial = None
