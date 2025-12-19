@@ -13,7 +13,7 @@ from typing import NamedTuple
 import torch
 from torch import Tensor, nn
 
-from avp_vit.rope import grid_offsets
+from canvit.rope import grid_offsets
 
 
 class PixelBox(NamedTuple):
