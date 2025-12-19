@@ -27,10 +27,6 @@ class ResolutionStage:
         return self.scene_grid_size * self.patch_size
 
     @property
-    def min_viewpoint_scale(self) -> float:
-        return self.glimpse_grid_size / self.scene_grid_size
-
-    @property
     def fresh_ratio(self) -> float:
         return self.fresh_count / self.batch_size
 

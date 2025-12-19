@@ -82,7 +82,7 @@ def init_survival_batch(
 def _log_stage(stage: ResolutionStage) -> None:
     log.info(
         f"  G={stage.scene_grid_size}: batch={stage.batch_size}, fresh={stage.fresh_count}, "
-        f"fresh_ratio={stage.fresh_ratio:.2f}, min_scale={stage.min_viewpoint_scale:.2f}"
+        f"fresh_ratio={stage.fresh_ratio:.2f}"
     )
 
 
@@ -252,8 +252,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             fresh_patches_norm = scene_norm(fresh_feats.patches)
             fresh_cls_norm = cls_norm(fresh_feats.cls.unsqueeze(1)).squeeze(1)
 
-        # Viewpoint scale bounds for current grid size
-        min_scale = stage.min_viewpoint_scale
+        min_scale = cfg.min_viewpoint_scale
         max_scale = 1.0
 
         # Inner loop: multiple viewpoints per optimizer step
