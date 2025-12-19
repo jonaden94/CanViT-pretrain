@@ -36,9 +36,11 @@ class Config:
     n_viewpoints_per_step: int = (
         4  # Inner loop viewpoints (>=2 for length generalization)
     )
-    warmup_steps: int = 2000
+    warmup_steps: int = 100_000
     grad_clip: float = 1.0
-    n_steps: int = 500_000
+    # at 128 fresh images per optimizer step, that's
+    # ~100 IN1k epochs
+    n_steps: int = 1_000_000
     # Target normalization
     norm_warmup_images: int = 256  # Images to warm up running stats before training
     norm_momentum: float = 0.1  # Momentum for running mean/var updates
