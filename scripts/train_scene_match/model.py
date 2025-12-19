@@ -13,8 +13,8 @@ from dinov3.hub.backbones import (
 )
 from dinov3.models.vision_transformer import DinoVisionTransformer
 
-from avp_vit import AVPViT
-from avp_vit.backbone.dinov3 import DINOv3Backbone
+from avp_vit import ActiveCanViT
+from canvit.backbone.dinov3 import DINOv3Backbone
 
 from .config import Config
 
@@ -78,27 +78,27 @@ def load_student_backbone(cfg: Config) -> DINOv3Backbone:
     return backbone
 
 
-def create_avp(
+def create_model(
     student_backbone: DINOv3Backbone,
     teacher_dim: int,
     cfg: Config,
-) -> AVPViT:
-    """Create AVP model wrapping student backbone, projecting to teacher_dim."""
-    patch_size = student_backbone.patch_size
-    glimpse_px = cfg.avp.glimpse_grid_size * patch_size
+) -> ActiveCanViT:
+    """Create ActiveCanViT wrapping student backbone, projecting to teacher_dim."""
+    patch_size = student_backbone.patch_size_px
+    glimpse_px = cfg.model.glimpse_grid_size * patch_size
 
     for p in student_backbone.parameters():
         p.requires_grad = not cfg.freeze_student_backbone
 
-    avp = AVPViT(student_backbone, cfg.avp, teacher_dim).to(cfg.device)
+    model = ActiveCanViT(student_backbone, cfg.model, teacher_dim).to(cfg.device)
 
     log.info(
-        f"AVP created: grid_sizes={cfg.grid_sizes}, "
-        f"glimpse={cfg.avp.glimpse_grid_size}x{cfg.avp.glimpse_grid_size} ({glimpse_px}px), "
+        f"Model created: grid_sizes={cfg.grid_sizes}, "
+        f"glimpse={cfg.model.glimpse_grid_size}x{cfg.model.glimpse_grid_size} ({glimpse_px}px), "
         f"student_dim={student_backbone.embed_dim} -> teacher_dim={teacher_dim}, "
         f"freeze_student_backbone={cfg.freeze_student_backbone}"
     )
-    return avp
+    return model
 
 
 def compile_teacher(teacher: DINOv3Backbone) -> None:
@@ -113,21 +113,22 @@ def compile_teacher(teacher: DINOv3Backbone) -> None:
     log.info("Teacher compilation complete")
 
 
-def compile_avp(avp: AVPViT) -> None:
-    """Compile AVP DINOv3 blocks and cross-attention in-place."""
-    n_blocks = avp.backbone.n_blocks
-    n_adapters = avp.n_adapters
+def compile_model(model: ActiveCanViT) -> None:
+    """Compile ActiveCanViT DINOv3 blocks and cross-attention in-place."""
+    canvit = model.canvit
+    n_blocks = canvit.backbone.n_blocks
+    n_adapters = canvit.n_adapters
     log.info(
-        f"Compiling AVP: {n_blocks} backbone blocks + {n_adapters} read/write attention pairs"
+        f"Compiling model: {n_blocks} backbone blocks + {n_adapters} read/write attention pairs"
     )
 
-    assert isinstance(avp.backbone, DINOv3Backbone)
-    blocks = avp.backbone._backbone.blocks
+    assert isinstance(canvit.backbone, DINOv3Backbone)
+    blocks = canvit.backbone._backbone.blocks
     for i in range(n_blocks):
         blocks[i].compile(dynamic=True)
 
     for i in range(n_adapters):
-        avp.read_attn[i].compile(dynamic=True)
-        avp.write_attn[i].compile(dynamic=True)
+        canvit.read_attn[i].compile(dynamic=True)
+        canvit.write_attn[i].compile(dynamic=True)
 
-    log.info("AVP compilation complete")
+    log.info("Model compilation complete")

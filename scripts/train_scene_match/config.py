@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 from ytch.device import get_sensible_device
 
-from avp_vit import AVPConfig
+from avp_vit import ActiveCanViTConfig
 from avp_vit.train import LossType
 
 
@@ -19,8 +19,8 @@ class Config:
     student_model: str = "dinov3_vits16"
     student_ckpt: Path | None = None  # None = random init
     freeze_student_backbone: bool = False
-    # AVP
-    avp: AVPConfig = field(default_factory=AVPConfig)
+    # Model
+    model: ActiveCanViTConfig = field(default_factory=ActiveCanViTConfig)
     grid_sizes: tuple[int, ...] = (16,)
     batch_size: int = 128  # Batch size at max grid size
     batch_size_at_min_grid: int | None = (

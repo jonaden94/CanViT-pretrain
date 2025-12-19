@@ -33,7 +33,7 @@ class ResolutionStage:
 
 def create_resolution_stages(cfg: Config, patch_size: int) -> dict[int, ResolutionStage]:
     assert len(cfg.grid_sizes) > 0
-    assert cfg.avp.glimpse_grid_size <= cfg.min_grid_size
+    assert cfg.model.glimpse_grid_size <= cfg.min_grid_size
 
     ratio = cfg.max_grid_size / cfg.min_grid_size
     bs_at_min = cfg.batch_size_at_min_grid or round(cfg.batch_size * ratio * ratio)
@@ -54,7 +54,7 @@ def create_resolution_stages(cfg: Config, patch_size: int) -> dict[int, Resoluti
 
         stages[G] = ResolutionStage(
             scene_grid_size=G,
-            glimpse_grid_size=cfg.avp.glimpse_grid_size,
+            glimpse_grid_size=cfg.model.glimpse_grid_size,
             patch_size=patch_size,
             batch_size=bs,
             fresh_count=fresh_count,

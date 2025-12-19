@@ -12,8 +12,8 @@ from tqdm import tqdm
 from ymc.lr import get_linear_scaled_lr
 from ytch.model import count_parameters
 
-from avp_vit import AVPConfig, AVPViT
-from avp_vit.backbone.dinov3 import NormFeatures
+from avp_vit import ActiveCanViT, ActiveCanViTConfig
+from canvit.backbone.dinov3 import NormFeatures
 from avp_vit.checkpoint import load as load_checkpoint
 from avp_vit.checkpoint import save as save_checkpoint
 from avp_vit.train import InfiniteLoader, SurvivalBatch, get_loss_fn, warmup_cosine_scheduler
@@ -22,7 +22,7 @@ from avp_vit.train.viewpoint import random_viewpoint
 
 from .config import Config
 from .data import ResolutionStage, create_loaders, create_resolution_stages
-from .model import compile_avp, compile_teacher, create_avp, load_student_backbone, load_teacher
+from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher
 from .viz import eval_and_log, log_norm_stats, val_metrics_only, viz_and_log
 
 log = logging.getLogger(__name__)
@@ -44,14 +44,14 @@ def grad_norms_by_module(model: nn.Module, depth: int = 1) -> dict[str, float]:
 
 
 def init_survival_batch(
-    avp: AVPViT,
+    model: ActiveCanViT,
     train_loader: InfiniteLoader,
     compute_targets: Callable[[Tensor], NormFeatures],
     scene_normalizer: PositionAwareNorm,
     cls_normalizer: PositionAwareNorm,
     batch_size: int,
     fresh_count: int,
-    scene_grid_size: int,
+    canvas_grid_size: int,
     device: torch.device,
 ) -> SurvivalBatch:
     """Initialize survival batch. Normalizers expected to be in eval mode."""
@@ -74,9 +74,9 @@ def init_survival_batch(
     init_imgs = torch.cat(init_imgs_list, dim=0)[:batch_size]
     init_targets = torch.cat(init_patches_list, dim=0)[:batch_size]
     init_cls_targets = torch.cat(init_cls_list, dim=0)[:batch_size]
-    hidden_init = avp.init_hidden(batch_size, scene_grid_size)
+    canvas_init = model.init_canvas(batch_size, canvas_grid_size)
 
-    return SurvivalBatch.init(init_imgs, init_targets, init_cls_targets, hidden_init)
+    return SurvivalBatch.init(init_imgs, init_targets, init_cls_targets, canvas_init)
 
 
 def _log_stage(stage: ResolutionStage) -> None:
@@ -149,9 +149,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     student_backbone = load_student_backbone(cfg)
     log.info(f"Student backbone params: {count_parameters(student_backbone):,}")
 
-    avp = create_avp(student_backbone, teacher.embed_dim, cfg)
+    model = create_model(student_backbone, teacher.embed_dim, cfg)
 
-    if cfg.compile and cfg.avp.gradient_checkpointing:
+    if cfg.compile and cfg.model.gradient_checkpointing:
         raise ValueError(
             "compile=True and gradient_checkpointing=True may be incompatible. "
             "This combination has caused CheckpointError (tensor metadata mismatch) in some configurations. "
@@ -159,15 +159,15 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         )
 
     if cfg.compile:
-        log.info("Compiling teacher and AVP")
+        log.info("Compiling teacher and model")
         compile_teacher(teacher)
-        compile_avp(avp)
+        compile_model(model)
 
     loss_fn = get_loss_fn(cfg.loss)
     log.info(f"Loss function: {cfg.loss}")
 
     # Create resolution stages and resources
-    patch_size = teacher.patch_size
+    patch_size = teacher.patch_size_px
     stages = create_resolution_stages(cfg, patch_size)
     log.info("Resolution stages:")
     for stage in stages.values():
@@ -175,10 +175,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     train_loaders, val_loaders = create_loaders(cfg, stages)
 
-    trainable = [p for p in avp.parameters() if p.requires_grad]
+    trainable = [p for p in model.parameters() if p.requires_grad]
     n_trainable = sum(p.numel() for p in trainable)
-    n_total = count_parameters(avp)
-    log.info(f"AVP total: {n_total:,}, trainable: {n_trainable:,} ({100 * n_trainable / n_total:.1f}%)")
+    n_total = count_parameters(model)
+    log.info(f"Model total: {n_total:,}, trainable: {n_trainable:,} ({100 * n_trainable / n_total:.1f}%)")
     exp.log_parameters({"trainable_params": n_trainable, "total_params": n_total})
 
     peak_lr = get_linear_scaled_lr(cfg.ref_lr, cfg.batch_size)
@@ -186,15 +186,15 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     scheduler = warmup_cosine_scheduler(optimizer, cfg.n_steps, cfg.warmup_steps)
     log.info(f"Optimizer: AdamW, peak_lr={peak_lr:.2e}, weight_decay={cfg.weight_decay:.2e}")
 
-    # Load AVP weights from checkpoint if specified
+    # Load model weights from checkpoint if specified
     if cfg.resume_ckpt is not None:
         ckpt_data = load_checkpoint(cfg.resume_ckpt, cfg.device)
-        ckpt_cfg = AVPConfig(**ckpt_data["avp_config"])
-        if ckpt_cfg != cfg.avp:
+        ckpt_cfg = ActiveCanViTConfig(**ckpt_data["model_config"])
+        if ckpt_cfg != cfg.model:
             log.warning("Checkpoint config differs from current config!")
             log.warning(f"  Checkpoint: {ckpt_cfg}")
-            log.warning(f"  Current: {cfg.avp}")
-        avp.load_state_dict(ckpt_data["state_dict"])
+            log.warning(f"  Current: {cfg.model}")
+        model.load_state_dict(ckpt_data["state_dict"])
 
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}.pt"
 
@@ -223,7 +223,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     states: dict[int, SurvivalBatch] = {}
     for G, stage in stages.items():
         states[G] = init_survival_batch(
-            avp, train_loaders[G], compute_raw_targets, scene_normalizers[G], cls_normalizers[G],
+            model, train_loaders[G], compute_raw_targets, scene_normalizers[G], cls_normalizers[G],
             stage.batch_size, stage.fresh_count, G, cfg.device,
         )
 
@@ -260,11 +260,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             random_viewpoint(stage.batch_size, cfg.device, min_scale, max_scale)
             for _ in range(cfg.n_viewpoints_per_step)
         ]
-        losses, final_hidden = avp.forward_loss(
+        losses, final_canvas = model.forward_loss(
             state.images,
             viewpoints,
             state.targets,
-            state.hidden,
+            state.canvas,
             cls_target=state.cls_targets,
             loss_fn=loss_fn,
         )
@@ -310,11 +310,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 "train/grad_norm": grad_norm,
                 "train/lr": lr,
                 "train/grid_size": G,
-                "train/spatial_hidden_init_norm": avp.hidden_stream.spatial_init.norm().item(),
-                "train/cls_hidden_init_norm": avp.hidden_stream.cls_init.norm().item(),
+                "train/spatial_canvas_init_norm": model.canvit.spatial_init.norm().item(),
+                "train/cls_canvas_init_norm": model.canvit.cls_init.norm().item(),
             }
-            if avp.cls_proj is not None:
-                cls_linear = avp.cls_proj[1]
+            if model.cls_proj is not None:
+                cls_linear = model.cls_proj[1]
                 assert isinstance(cls_linear, torch.nn.Linear)
                 metrics["train/cls_proj_weight_norm"] = cls_linear.weight.norm().item()
             if losses.scene is not None:
@@ -328,14 +328,14 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
         # Validation - always log gradient norms and report to Optuna at val_every
         if step % cfg.val_every == 0:
-            for name, norm in grad_norms_by_module(avp, depth=1).items():
+            for name, norm in grad_norms_by_module(model, depth=1).items():
                 exp.log_metric(f"grad_norm/{name}", norm, step=step)
 
             # Fast validation (skip at viz_every - eval_and_log covers the same metrics)
             if step % cfg.viz_every != 0:
                 val_images = val_loader.next_batch().to(cfg.device)
                 val_scene_l1 = val_metrics_only(
-                    exp, step, avp, compute_raw_targets, scene_norm, cls_norm,
+                    exp, step, model, compute_raw_targets, scene_norm, cls_norm,
                     val_images, G, f"grid{G}/val",
                 )
                 exp.log_metric("val/scene_l1", val_scene_l1, step=step)
@@ -349,8 +349,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         # Full viz with PCA (expensive, less frequent)
         if step % cfg.viz_every == 0:
             train_viz = viz_and_log(
-                exp, step, f"grid{G}/train", avp, teacher, scene_norm,
-                state.images, viewpoints, state.targets, state.hidden,
+                exp, step, f"grid{G}/train", model, teacher, scene_norm,
+                state.images, viewpoints, state.targets, state.canvas,
                 log_spatial_stats=cfg.log_spatial_stats, log_curves=False, loss_type=cfg.loss,
             )
             for name, losses in train_viz.losses.items():
@@ -358,7 +358,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
             val_images = val_loader.next_batch().to(cfg.device)
             val_scene_l1 = eval_and_log(
-                exp, step, avp, teacher, compute_raw_targets, scene_norm, cls_norm,
+                exp, step, model, teacher, compute_raw_targets, scene_norm, cls_norm,
                 val_images, G, f"grid{G}/val",
                 log_spatial_stats=cfg.log_spatial_stats,
                 log_curves=(step % cfg.curve_every == 0),
@@ -369,24 +369,24 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         # Checkpointing
         if step % cfg.ckpt_every == 0:
             save_checkpoint(
-                ckpt_path, avp, cfg.student_model,
+                ckpt_path, model, cfg.student_model,
                 step=step, train_loss=ema_loss_t.item(), comet_id=exp.get_key(),
             )
             log_norm_stats(exp, scene_normalizers, cls_normalizers, step)
 
         # Fresh ratio survival: permute batch, replace first K with fresh (normalized targets)
-        hidden_init = avp.init_hidden(stage.fresh_count, G)
+        canvas_init = model.init_canvas(stage.fresh_count, G)
         states[G] = state.step(
             fresh_images=fresh_imgs,
             fresh_targets=fresh_patches_norm,
             fresh_cls_targets=fresh_cls_norm,
-            next_hidden=final_hidden,
-            hidden_init=hidden_init,
+            next_canvas=final_canvas,
+            canvas_init=canvas_init,
         )
 
     # Final checkpoint
     save_checkpoint(
-        ckpt_path, avp, cfg.student_model,
+        ckpt_path, model, cfg.student_model,
         step=cfg.n_steps, train_loss=ema_loss_t.item(), comet_id=exp.get_key(),
     )
 

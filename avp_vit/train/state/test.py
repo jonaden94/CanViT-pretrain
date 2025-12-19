@@ -16,12 +16,12 @@ class TestSurvivalBatch:
         images = torch.randn(B, C, H, W)
         targets = torch.randn(B, G * G, D)
         cls_targets = _make_cls_targets(B, D)
-        hidden = torch.randn(B, G * G, D)
-        state = SurvivalBatch.init(images, targets, cls_targets, hidden)
+        canvas = torch.randn(B, G * G, D)
+        state = SurvivalBatch.init(images, targets, cls_targets, canvas)
         assert state.images.shape == images.shape
         assert state.targets.shape == targets.shape
         assert state.cls_targets.shape == cls_targets.shape
-        assert state.hidden.shape == hidden.shape
+        assert state.canvas.shape == canvas.shape
 
     def test_init_permutes(self) -> None:
         """init() should permute to avoid first-step position bias."""
@@ -30,13 +30,13 @@ class TestSurvivalBatch:
         images = torch.arange(B).view(B, 1, 1, 1).expand(B, C, H, W).float()
         targets = torch.randn(B, G * G, D)
         cls_targets = _make_cls_targets(B, D)
-        hidden = torch.randn(B, G * G, D)
+        canvas = torch.randn(B, G * G, D)
 
         # Run multiple times - should get different orders
         orders = []
         for _ in range(5):
             state = SurvivalBatch.init(
-                images.clone(), targets.clone(), cls_targets.clone(), hidden.clone()
+                images.clone(), targets.clone(), cls_targets.clone(), canvas.clone()
             )
             order = state.images[:, 0, 0, 0].tolist()
             orders.append(tuple(order))
@@ -44,21 +44,21 @@ class TestSurvivalBatch:
         assert len(set(orders)) > 1, "init should permute randomly"
 
     def test_init_preserves_alignment(self) -> None:
-        """init() permutation must keep images/targets/cls_targets/hidden aligned."""
+        """init() permutation must keep images/targets/cls_targets/canvas aligned."""
         B, C, H, W, D, G = 4, 3, 64, 64, 128, 16
         # Tag each sample with its index in all tensors
         images = torch.arange(B).view(B, 1, 1, 1).expand(B, C, H, W).float()
         targets = torch.arange(B).view(B, 1, 1).expand(B, G * G, D).float()
         cls_targets = torch.arange(B).view(B, 1).expand(B, D).float()
-        hidden = torch.arange(B).view(B, 1, 1).expand(B, G * G, D).float()
+        canvas = torch.arange(B).view(B, 1, 1).expand(B, G * G, D).float()
 
-        state = SurvivalBatch.init(images, targets, cls_targets, hidden)
+        state = SurvivalBatch.init(images, targets, cls_targets, canvas)
 
         # All tensors should have same sample ordering
         img_ids = state.images[:, 0, 0, 0]
         tgt_ids = state.targets[:, 0, 0]
         cls_ids = state.cls_targets[:, 0]
-        hid_ids = state.hidden[:, 0, 0]
+        hid_ids = state.canvas[:, 0, 0]
         assert torch.equal(img_ids, tgt_ids)
         assert torch.equal(img_ids, cls_ids)
         assert torch.equal(img_ids, hid_ids)
@@ -76,13 +76,13 @@ class TestSurvivalBatch:
             fresh_images=torch.randn(K, C, H, W),
             fresh_targets=torch.randn(K, G * G, D),
             fresh_cls_targets=_make_cls_targets(K, D),
-            next_hidden=torch.randn(B, G * G, D),
-            hidden_init=torch.randn(K, G * G, D),
+            next_canvas=torch.randn(B, G * G, D),
+            canvas_init=torch.randn(K, G * G, D),
         )
         assert new_state.images.shape == (B, C, H, W)
         assert new_state.targets.shape == (B, G * G, D)
         assert new_state.cls_targets.shape == (B, D)
-        assert new_state.hidden.shape == (B, G * G, D)
+        assert new_state.canvas.shape == (B, G * G, D)
 
     def test_fresh_count_equals_batch_resets_all(self) -> None:
         """K=B means all items are replaced (content matches, order may differ)."""
@@ -95,22 +95,22 @@ class TestSurvivalBatch:
 
         fresh_images = torch.randn(B, C, H, W)
         fresh_targets = torch.randn(B, G * G, D)
-        hidden_init = torch.randn(B, G * G, D)
+        canvas_init = torch.randn(B, G * G, D)
 
         new_state = state.step(
             fresh_images=fresh_images,
             fresh_targets=fresh_targets,
             fresh_cls_targets=_make_cls_targets(B, D),
-            next_hidden=torch.randn(B, G * G, D),
-            hidden_init=hidden_init,
+            next_canvas=torch.randn(B, G * G, D),
+            canvas_init=canvas_init,
         )
         # All items replaced - check set equality (order may differ due to permutation)
         assert set(new_state.images.view(B, -1).sum(1).tolist()) == set(
             fresh_images.view(B, -1).sum(1).tolist()
         )
 
-    def test_hidden_detached_for_survivors(self) -> None:
-        """Surviving hidden states are detached to cut BPTT across optimizer steps."""
+    def test_canvas_detached_for_survivors(self) -> None:
+        """Surviving canvas states are detached to cut BPTT across optimizer steps."""
         B, K, C, H, W, D, G = 4, 1, 3, 64, 64, 128, 16
         state = SurvivalBatch.init(
             torch.randn(B, C, H, W),
@@ -118,21 +118,21 @@ class TestSurvivalBatch:
             _make_cls_targets(B, D),
             torch.randn(B, G * G, D),
         )
-        next_hidden = torch.randn(B, G * G, D, requires_grad=True)
-        hidden_init = torch.randn(K, G * G, D, requires_grad=False)
+        next_canvas = torch.randn(B, G * G, D, requires_grad=True)
+        canvas_init = torch.randn(K, G * G, D, requires_grad=False)
 
         new_state = state.step(
             fresh_images=torch.randn(K, C, H, W),
             fresh_targets=torch.randn(K, G * G, D),
             fresh_cls_targets=_make_cls_targets(K, D),
-            next_hidden=next_hidden,
-            hidden_init=hidden_init,
+            next_canvas=next_canvas,
+            canvas_init=canvas_init,
         )
         # Result should not require grad (survivors detached, fresh was already detached)
-        assert not new_state.hidden.requires_grad
+        assert not new_state.canvas.requires_grad
 
-    def test_hidden_init_grad_preserved(self) -> None:
-        """hidden_init gradients should flow through (learnable spatial_hidden_init)."""
+    def test_canvas_init_grad_preserved(self) -> None:
+        """canvas_init gradients should flow through (learnable spatial_canvas_init)."""
         B, K, C, H, W, D, G = 4, 2, 3, 64, 64, 128, 16
         state = SurvivalBatch.init(
             torch.randn(B, C, H, W),
@@ -140,63 +140,63 @@ class TestSurvivalBatch:
             _make_cls_targets(B, D),
             torch.randn(B, G * G, D),
         )
-        # Simulate learnable hidden_init (like spatial_hidden_init.expand())
-        hidden_init = torch.randn(K, G * G, D, requires_grad=True)
+        # Simulate learnable canvas_init (like spatial_canvas_init.expand())
+        canvas_init = torch.randn(K, G * G, D, requires_grad=True)
 
         new_state = state.step(
             fresh_images=torch.randn(K, C, H, W),
             fresh_targets=torch.randn(K, G * G, D),
             fresh_cls_targets=_make_cls_targets(K, D),
-            next_hidden=torch.randn(B, G * G, D),
-            hidden_init=hidden_init,
+            next_canvas=torch.randn(B, G * G, D),
+            canvas_init=canvas_init,
         )
-        # Should require grad because hidden_init does
-        assert new_state.hidden.requires_grad
+        # Should require grad because canvas_init does
+        assert new_state.canvas.requires_grad
 
     def test_step_preserves_alignment(self) -> None:
-        """step() must keep images/targets/cls_targets/hidden aligned after permutation."""
+        """step() must keep images/targets/cls_targets/canvas aligned after permutation."""
         B, K, C, H, W, D, G = 8, 2, 3, 64, 64, 128, 16
 
         # Tag survivors with indices 100+i, fresh with indices 0..K-1
         old_images = (100 + torch.arange(B)).view(B, 1, 1, 1).expand(B, C, H, W).float()
         old_targets = (100 + torch.arange(B)).view(B, 1, 1).expand(B, G * G, D).float()
         old_cls_targets = (100 + torch.arange(B)).view(B, 1).expand(B, D).float()
-        old_hidden = (100 + torch.arange(B)).view(B, 1, 1).expand(B, G * G, D).float()
+        old_canvas = (100 + torch.arange(B)).view(B, 1, 1).expand(B, G * G, D).float()
         state = SurvivalBatch(
             images=old_images,
             targets=old_targets,
             cls_targets=old_cls_targets,
-            hidden=old_hidden,
+            canvas=old_canvas,
         )
 
         fresh_images = torch.arange(K).view(K, 1, 1, 1).expand(K, C, H, W).float()
         fresh_targets = torch.arange(K).view(K, 1, 1).expand(K, G * G, D).float()
         fresh_cls_targets = torch.arange(K).view(K, 1).expand(K, D).float()
-        hidden_init = torch.arange(K).view(K, 1, 1).expand(K, G * G, D).float()
-        # Survivor hidden should use next_hidden[K:], tag those
-        next_hidden = (200 + torch.arange(B)).view(B, 1, 1).expand(B, G * G, D).float()
+        canvas_init = torch.arange(K).view(K, 1, 1).expand(K, G * G, D).float()
+        # Survivor canvas should use next_canvas[K:], tag those
+        next_canvas = (200 + torch.arange(B)).view(B, 1, 1).expand(B, G * G, D).float()
 
         new_state = state.step(
             fresh_images=fresh_images,
             fresh_targets=fresh_targets,
             fresh_cls_targets=fresh_cls_targets,
-            next_hidden=next_hidden,
-            hidden_init=hidden_init,
+            next_canvas=next_canvas,
+            canvas_init=canvas_init,
         )
 
         # Extract IDs from each tensor
         img_ids = new_state.images[:, 0, 0, 0]
         tgt_ids = new_state.targets[:, 0, 0]
         cls_ids = new_state.cls_targets[:, 0]
-        hid_ids = new_state.hidden[:, 0, 0]
+        hid_ids = new_state.canvas[:, 0, 0]
 
         # images, targets, and cls_targets must be aligned
         assert torch.equal(img_ids, tgt_ids), "images/targets misaligned"
         assert torch.equal(img_ids, cls_ids), "images/cls_targets misaligned"
 
-        # hidden alignment is trickier:
-        # - fresh samples: img_id in [0, K), hid_id = img_id (from hidden_init)
-        # - survivors: img_id in [100+K, 100+B), hid_id = 200 + (img_id - 100) from next_hidden[K:]
+        # canvas alignment is trickier:
+        # - fresh samples: img_id in [0, K), hid_id = img_id (from canvas_init)
+        # - survivors: img_id in [100+K, 100+B), hid_id = 200 + (img_id - 100) from next_canvas[K:]
         for i in range(B):
             img_id = img_ids[i].item()
             hid_id = hid_ids[i].item()
@@ -204,7 +204,7 @@ class TestSurvivalBatch:
                 # Fresh sample
                 assert hid_id == img_id, f"Fresh sample {i}: img={img_id}, hid={hid_id}"
             else:
-                # Survivor: hidden comes from next_hidden, offset by 100
+                # Survivor: canvas comes from next_canvas, offset by 100
                 expected_hid = 200 + (img_id - 100)
                 assert hid_id == expected_hid, (
                     f"Survivor {i}: img={img_id}, hid={hid_id}, expected={expected_hid}"
@@ -223,7 +223,7 @@ class TestSurvivalBatch:
             images=old_images,
             targets=torch.randn(B, G * G, D),
             cls_targets=_make_cls_targets(B, D),
-            hidden=torch.randn(B, G * G, D),
+            canvas=torch.randn(B, G * G, D),
         )
 
         fresh_marker = -1.0
@@ -237,8 +237,8 @@ class TestSurvivalBatch:
                 fresh_images=fresh_images,
                 fresh_targets=torch.randn(K, G * G, D),
                 fresh_cls_targets=_make_cls_targets(K, D),
-                next_hidden=torch.randn(B, G * G, D),
-                hidden_init=torch.randn(K, G * G, D),
+                next_canvas=torch.randn(B, G * G, D),
+                canvas_init=torch.randn(K, G * G, D),
             )
             if new_state.images[0, 0, 0, 0].item() == fresh_marker:
                 fresh_at_idx0 += 1
@@ -254,7 +254,7 @@ class TestSurvivalBatch:
         assert fresh_at_idx0 > 0, "Fresh never at index 0 - permutation may be broken"
 
     def test_survivor_sometimes_at_idx0(self) -> None:
-        """Survivors should sometimes appear at index 0 (for viz to show carried-over hidden)."""
+        """Survivors should sometimes appear at index 0 (for viz to show carried-over canvas)."""
         B, K, C, H, W, D, G = 8, 2, 3, 64, 64, 128, 16
 
         survivor_marker = 999.0
@@ -263,7 +263,7 @@ class TestSurvivalBatch:
             images=old_images,
             targets=torch.randn(B, G * G, D),
             cls_targets=_make_cls_targets(B, D),
-            hidden=torch.randn(B, G * G, D),
+            canvas=torch.randn(B, G * G, D),
         )
 
         fresh_images = torch.zeros(K, C, H, W)  # Fresh = 0, survivor = 999
@@ -275,8 +275,8 @@ class TestSurvivalBatch:
                 fresh_images=fresh_images,
                 fresh_targets=torch.randn(K, G * G, D),
                 fresh_cls_targets=_make_cls_targets(K, D),
-                next_hidden=torch.randn(B, G * G, D),
-                hidden_init=torch.randn(K, G * G, D),
+                next_canvas=torch.randn(B, G * G, D),
+                canvas_init=torch.randn(K, G * G, D),
             )
             if new_state.images[0, 0, 0, 0].item() == survivor_marker:
                 survivor_at_idx0 += 1
@@ -297,15 +297,15 @@ class TestSurvivalBatch:
             images=torch.full((B, C, H, W), survivor_marker),
             targets=torch.randn(B, G * G, D),
             cls_targets=_make_cls_targets(B, D),
-            hidden=torch.randn(B, G * G, D),
+            canvas=torch.randn(B, G * G, D),
         )
 
         new_state = state.step(
             fresh_images=torch.full((K, C, H, W), fresh_marker),
             fresh_targets=torch.randn(K, G * G, D),
             fresh_cls_targets=_make_cls_targets(K, D),
-            next_hidden=torch.randn(B, G * G, D),
-            hidden_init=torch.randn(K, G * G, D),
+            next_canvas=torch.randn(B, G * G, D),
+            canvas_init=torch.randn(K, G * G, D),
         )
 
         n_fresh = (new_state.images[:, 0, 0, 0] == fresh_marker).sum().item()
@@ -314,8 +314,8 @@ class TestSurvivalBatch:
         assert n_fresh == K, f"Expected {K} fresh, got {n_fresh}"
         assert n_survivors == B - K, f"Expected {B-K} survivors, got {n_survivors}"
 
-    def test_shape_mismatch_hidden_raises(self) -> None:
-        """Catch shape mismatch between next_hidden and hidden_init."""
+    def test_shape_mismatch_canvas_raises(self) -> None:
+        """Catch shape mismatch between next_canvas and canvas_init."""
         B, K, C, H, W, D, G = 4, 2, 3, 64, 64, 128, 16
         N_REGISTERS = 42
         state = SurvivalBatch.init(
@@ -330,10 +330,10 @@ class TestSurvivalBatch:
             fresh_images=torch.randn(K, C, H, W),
             fresh_targets=torch.randn(K, G * G, D),
             fresh_cls_targets=_make_cls_targets(K, D),
-            next_hidden=torch.randn(B, N_REGISTERS + G * G, D),
-            hidden_init=torch.randn(K, N_REGISTERS + G * G, D),
+            next_canvas=torch.randn(B, N_REGISTERS + G * G, D),
+            canvas_init=torch.randn(K, N_REGISTERS + G * G, D),
         )
-        assert new_state.hidden.shape == (B, N_REGISTERS + G * G, D)
+        assert new_state.canvas.shape == (B, N_REGISTERS + G * G, D)
 
         # Mismatched - should fail
         try:
@@ -341,8 +341,8 @@ class TestSurvivalBatch:
                 fresh_images=torch.randn(K, C, H, W),
                 fresh_targets=torch.randn(K, G * G, D),
                 fresh_cls_targets=_make_cls_targets(K, D),
-                next_hidden=torch.randn(B, N_REGISTERS + G * G, D),
-                hidden_init=torch.randn(K, G * G, D),  # Wrong shape!
+                next_canvas=torch.randn(B, N_REGISTERS + G * G, D),
+                canvas_init=torch.randn(K, G * G, D),  # Wrong shape!
             )
             assert False, "Should have raised"
         except RuntimeError:

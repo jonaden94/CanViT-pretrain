@@ -1,4 +1,4 @@
-"""Checkpoint serialization for AVP models."""
+"""Checkpoint serialization for ActiveCanViT models."""
 
 import logging
 import subprocess
@@ -10,8 +10,8 @@ from typing import TypedDict
 import torch
 from torch import Tensor
 
-from avp_vit import AVPConfig, AVPViT
-from avp_vit.attention import CrossAttentionConfig
+from avp_vit import ActiveCanViT
+from canvit.attention import CrossAttentionConfig
 
 # Field renames for legacy checkpoint migration
 _CROSS_ATTN_RENAMES = {
@@ -28,7 +28,7 @@ class CheckpointData(TypedDict):
     """Checkpoint structure. All fields required for model reconstruction."""
 
     state_dict: dict[str, Tensor]
-    avp_config: dict
+    model_config: dict
     teacher_dim: int
     backbone: str
     timestamp: str
@@ -66,7 +66,7 @@ def _strip_orig_mod(state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
 
 def save(
     path: Path,
-    avp: AVPViT,
+    model: ActiveCanViT,
     backbone: str,
     *,
     step: int | None = None,
@@ -78,9 +78,9 @@ def save(
     git_commit, git_dirty = _git_info()
 
     data: CheckpointData = {
-        "state_dict": avp.state_dict(),
-        "avp_config": asdict(avp.cfg),
-        "teacher_dim": avp.teacher_dim,
+        "state_dict": model.state_dict(),
+        "model_config": asdict(model.cfg),
+        "teacher_dim": model.teacher_dim,
         "backbone": backbone,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "git_commit": git_commit,
@@ -94,8 +94,8 @@ def save(
     size_mb = path.stat().st_size / (1024 * 1024)
 
     log.info(f"Checkpoint saved: {path} ({size_mb:.1f} MB)")
-    log.info(f"  backbone={backbone}, teacher_dim={avp.teacher_dim}")
-    log.info(f"  gating={avp.cfg.gating}, use_recurrence_ln={avp.cfg.use_recurrence_ln}")
+    log.info(f"  backbone={backbone}, teacher_dim={model.teacher_dim}")
+    log.info(f"  glimpse_grid_size={model.cfg.glimpse_grid_size}, n_registers={model.n_registers}")
     if step is not None:
         log.info(f"  step={step}, train_loss={train_loss:.4e}" if train_loss else f"  step={step}")
     if git_commit:
@@ -108,28 +108,31 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
 
     raw = torch.load(path, weights_only=False, map_location=device)
 
-    # Detect old format (missing avp_config)
-    if "avp_config" not in raw:
+    # Detect old format (missing model_config and avp_config)
+    if "model_config" not in raw and "avp_config" not in raw:
         raise ValueError(f"Legacy checkpoint without config. Keys: {list(raw.keys())}")
 
     # Handle key rename: old="avp", new="state_dict"
     if "avp" in raw and "state_dict" not in raw:
         raw["state_dict"] = raw.pop("avp")
 
-    # Reconstruct nested dataclasses in avp_config (migrate renamed fields from legacy checkpoints)
-    avp_config = raw["avp_config"].copy()
+    # Handle config key rename: old="avp_config", new="model_config"
+    config_key = "model_config" if "model_config" in raw else "avp_config"
+    model_config = raw[config_key].copy()
+
+    # Reconstruct nested dataclasses in canvit config (migrate renamed fields)
+    canvit_config = model_config.get("canvit", {})
     for key in ("read_attention", "write_attention"):
-        if isinstance(avp_config.get(key), dict):
-            old_dict = avp_config[key]
-            # Rename old fields to new names
+        if isinstance(canvit_config.get(key), dict):
+            old_dict = canvit_config[key]
             migrated = {_CROSS_ATTN_RENAMES.get(k, k): v for k, v in old_dict.items()}
-            # Filter to valid fields only (in case of truly removed fields)
             filtered = {k: v for k, v in migrated.items() if k in _CROSS_ATTN_FIELDS}
-            avp_config[key] = CrossAttentionConfig(**filtered)
+            canvit_config[key] = CrossAttentionConfig(**filtered)
+    model_config["canvit"] = canvit_config
 
     data: CheckpointData = {
         "state_dict": _strip_orig_mod(raw["state_dict"]),
-        "avp_config": avp_config,
+        "model_config": model_config,
         "teacher_dim": raw["teacher_dim"],
         "backbone": raw["backbone"],
         "timestamp": raw.get("timestamp", "unknown"),
@@ -140,9 +143,8 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
         "comet_id": raw.get("comet_id"),
     }
 
-    cfg = AVPConfig(**data["avp_config"])
     log.info(f"  backbone={data['backbone']}, teacher_dim={data['teacher_dim']}")
-    log.info(f"  gating={cfg.gating}, use_recurrence_ln={cfg.use_recurrence_ln}, registers={cfg.n_scene_registers}")
+    log.info(f"  glimpse_grid_size={model_config.get('glimpse_grid_size')}")
     if data["step"] is not None:
         log.info(f"  step={data['step']}, train_loss={data['train_loss']:.4e}" if data["train_loss"] else f"  step={data['step']}")
     if data["git_commit"]:

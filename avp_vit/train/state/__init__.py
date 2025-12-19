@@ -10,18 +10,18 @@ from torch import Tensor
 class SurvivalBatch:
     """Batch state for fresh-ratio survival.
 
-    Replaces a fraction of batch each step; surviving samples keep hidden for continuation.
+    Replaces a fraction of batch each step; surviving samples keep canvas for continuation.
     Fresh and survivor samples are randomly distributed (no deterministic positions).
     """
 
     images: Tensor  # [B, C, H, W]
     targets: Tensor  # [B, G*G, D] - patch tokens for scene/local loss
     cls_targets: Tensor  # [B, D] - CLS tokens for CLS loss
-    hidden: Tensor  # [B, n_tokens, D]
+    canvas: Tensor  # [B, n_tokens, D]
 
     @staticmethod
     def init(
-        images: Tensor, targets: Tensor, cls_targets: Tensor, hidden: Tensor
+        images: Tensor, targets: Tensor, cls_targets: Tensor, canvas: Tensor
     ) -> "SurvivalBatch":
         """Initialize with random permutation to avoid first-step position bias."""
         B = images.shape[0]
@@ -30,7 +30,7 @@ class SurvivalBatch:
             images=images[perm],
             targets=targets[perm],
             cls_targets=cls_targets[perm],
-            hidden=hidden[perm],
+            canvas=canvas[perm],
         )
 
     def step(
@@ -39,8 +39,8 @@ class SurvivalBatch:
         fresh_images: Tensor,
         fresh_targets: Tensor,
         fresh_cls_targets: Tensor,
-        next_hidden: Tensor,
-        hidden_init: Tensor,
+        next_canvas: Tensor,
+        canvas_init: Tensor,
     ) -> "SurvivalBatch":
         """Replace K samples with fresh, permute to randomize positions.
 
@@ -55,8 +55,8 @@ class SurvivalBatch:
         images = torch.cat([fresh_images, self.images[K:]], dim=0)
         targets = torch.cat([fresh_targets, self.targets[K:]], dim=0)
         cls_targets = torch.cat([fresh_cls_targets, self.cls_targets[K:]], dim=0)
-        # hidden_init NOT detached (learnable), next_hidden IS detached (no BPTT)
-        hidden = torch.cat([hidden_init, next_hidden[K:].detach()], dim=0)
+        # canvas_init NOT detached (learnable), next_canvas IS detached (no BPTT)
+        canvas = torch.cat([canvas_init, next_canvas[K:].detach()], dim=0)
 
         # Permute to randomize final positions
         perm = torch.randperm(B, device=self.images.device)
@@ -64,5 +64,5 @@ class SurvivalBatch:
             images=images[perm],
             targets=targets[perm],
             cls_targets=cls_targets[perm],
-            hidden=hidden[perm],
+            canvas=canvas[perm],
         )

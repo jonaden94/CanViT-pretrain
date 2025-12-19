@@ -12,9 +12,9 @@ import torch
 from matplotlib.figure import Figure
 from torch import Tensor
 
-from avp_vit import AVPViT, StepOutput
-from avp_vit.backbone.dinov3 import DINOv3Backbone, NormFeatures
+from avp_vit import ActiveCanViT, StepOutput
 from avp_vit.glimpse import Viewpoint, sample_at_viewpoint
+from canvit.backbone.dinov3 import DINOv3Backbone, NormFeatures
 from avp_vit.train import LOSS_FNS, LossType, imagenet_denormalize, plot_multistep_pca, plot_norm_stats
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import make_eval_viewpoints
@@ -69,41 +69,38 @@ def viz_and_log(
     exp: comet_ml.Experiment,
     step: int,
     prefix: str,
-    avp: AVPViT,
+    model: ActiveCanViT,
     teacher: DINOv3Backbone,
     normalizer: PositionAwareNorm,
     images: Tensor,
     viewpoints: list[Viewpoint],
     target: Tensor,
-    hidden: Tensor,
-    show_hidden: bool = True,
+    canvas: Tensor,
+    show_canvas: bool = True,
     log_spatial_stats: bool = True,
     log_curves: bool = True,
     loss_type: LossType = "mse",
 ) -> VizResult:
     """Run forward trajectory and log visualization."""
-    assert isinstance(avp.backbone, DINOv3Backbone)
-    avp_backbone = avp.backbone
-    scene_grid_size = avp._infer_scene_grid_size(hidden)
-    glimpse_grid_size = avp.cfg.glimpse_grid_size
+    assert isinstance(model.backbone, DINOv3Backbone)
+    model_backbone = model.backbone
+    canvas_grid_size = model._infer_canvas_grid_size(canvas)
+    glimpse_grid_size = model.cfg.glimpse_grid_size
 
     with torch.inference_mode():
-        outputs, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
+        outputs, _ = model.forward_trajectory_full(images, viewpoints, canvas)
         all_losses = {
             name: [fn(out.scene, target).item() for out in outputs]
             for name, fn in LOSS_FNS.items()
         }
 
-        # Compute hidden states for logging and visualization
-        # t=0 = initial hidden before any viewpoint, t=1,2,... = after each viewpoint
-        initial_hidden = avp._normalize_hidden(hidden)
-
         if log_curves:
-            hiddens = [initial_hidden] + [out.hidden for out in outputs]
+            # Canvas states after each viewpoint (no initial state - normalization is internal)
+            canvases = [out.canvas for out in outputs]
 
-            # Spatial hidden norm vs timestep (excludes registers)
+            # Spatial canvas norm vs timestep
             spatial_norms = [
-                avp.get_spatial(h).norm(dim=-1).mean().item() for h in hiddens
+                model.get_spatial(c).norm(dim=-1).mean().item() for c in canvases
             ]
             exp.log_curve(
                 f"{prefix}/spatial_norm_vs_timestep",
@@ -114,11 +111,11 @@ def viz_and_log(
 
             # Step-to-step spatial difference norm
             diff_norms = [
-                (avp.get_spatial(hiddens[i + 1]) - avp.get_spatial(hiddens[i]))
+                (model.get_spatial(canvases[i + 1]) - model.get_spatial(canvases[i]))
                 .norm(dim=-1)
                 .mean()
                 .item()
-                for i in range(len(hiddens) - 1)
+                for i in range(len(canvases) - 1)
             ]
             exp.log_curve(
                 f"{prefix}/spatial_diff_norm_vs_timestep",
@@ -127,14 +124,12 @@ def viz_and_log(
                 step=step,
             )
 
-            # Scene loss vs timestep (t=0 is initial scene before any viewpoint)
-            initial_scene = avp.compute_scene(initial_hidden)
-            initial_loss = LOSS_FNS[loss_type](initial_scene, target).item()
+            # Scene loss vs timestep
             losses = all_losses[loss_type]
             exp.log_curve(
                 f"{prefix}/scene_loss_vs_timestep",
-                x=list(range(len(losses) + 1)),
-                y=[initial_loss] + losses,
+                x=list(range(len(losses))),
+                y=losses,
                 step=step,
             )
 
@@ -152,43 +147,39 @@ def viz_and_log(
                 step=step,
             )
 
-        # Prepare viz data for first sample (initial_hidden already computed above)
+        # Prepare viz data for first sample
         sample_idx = 0
         n_prefix = teacher.n_prefix_tokens
-        scene_size_px = scene_grid_size * avp.backbone.patch_size
+        scene_size_px = canvas_grid_size * model.backbone.patch_size_px
         H, W = scene_size_px, scene_size_px
-        initial_scene = avp.compute_scene(initial_hidden)  # [B, N, D]
 
         full_img = imagenet_denormalize(images[sample_idx].cpu()).numpy()
 
         # Target is already normalized; model predicts normalized features directly
         teacher_np = target[sample_idx].cpu().float().numpy()
-        initial_np = initial_scene[sample_idx].cpu().float().numpy()
+        # Use first output's scene as "initial" for viz (no t=0 pre-normalization state)
+        initial_np = outputs[0].scene[sample_idx].cpu().float().numpy()
 
         scenes = [out.scene[sample_idx].cpu().float().numpy() for out in outputs]
 
-        # Raw hidden spatials (before output_proj)
-        if show_hidden:
-            initial_hidden_spatial = (
-                avp.get_spatial(initial_hidden[sample_idx : sample_idx + 1])[0]
-                .cpu()
-                .float()
-                .numpy()
-            )
-            hidden_spatials = [
-                avp.get_spatial(out.hidden[sample_idx : sample_idx + 1])[0]
+        # Raw canvas spatials (before scene_proj)
+        if show_canvas:
+            canvas_spatials = [
+                model.get_spatial(out.canvas[sample_idx : sample_idx + 1])[0]
                 .cpu()
                 .float()
                 .numpy()
                 for out in outputs
             ]
+            # Use first canvas as "initial" for viz
+            initial_canvas_spatial = canvas_spatials[0] if canvas_spatials else None
         else:
-            initial_hidden_spatial = None
-            hidden_spatials = None
+            canvas_spatials = None
+            initial_canvas_spatial = None
 
-        # Local features from AVP backbone
-        locals_avp_raw = [
-            avp_backbone.output_norm(
+        # Local features from model backbone
+        locals_model_raw = [
+            model_backbone.output_norm(
                 out.local[sample_idx : sample_idx + 1, n_prefix:]
             ).squeeze(0)
             for out in outputs
@@ -200,9 +191,9 @@ def viz_and_log(
             for out in outputs
         ]
 
-        locals_avp = [
+        locals_model = [
             (feat).cpu().float().numpy()
-            for feat, vp in zip(locals_avp_raw, viewpoints, strict=True)
+            for feat, vp in zip(locals_model_raw, viewpoints, strict=True)
         ]
         locals_teacher = [
             (feat).cpu().float().numpy()
@@ -213,7 +204,7 @@ def viz_and_log(
         # Shows "what teacher thinks at these positions with FULL image context"
         # Target is already normalized, so cropped features are too
         target_spatial = target.view(
-            target.shape[0], scene_grid_size, scene_grid_size, -1
+            target.shape[0], canvas_grid_size, canvas_grid_size, -1
         ).permute(0, 3, 1, 2)
         locals_teacher_cropped = [
             sample_at_viewpoint(target_spatial, vp, glimpse_grid_size)[
@@ -238,16 +229,16 @@ def viz_and_log(
         full_img,
         teacher_np,
         scenes,
-        locals_avp,
+        locals_model,
         locals_teacher,
         glimpses,
         boxes,
         names,
-        scene_grid_size,
+        canvas_grid_size,
         glimpse_grid_size,
         initial_np,
-        hidden_spatials=hidden_spatials,
-        initial_hidden_spatial=initial_hidden_spatial,
+        hidden_spatials=canvas_spatials,
+        initial_hidden_spatial=initial_canvas_spatial,
         locals_teacher_cropped=locals_teacher_cropped,
     )
     log_figure(exp, fig_pca, f"{prefix}/pca", step)
@@ -258,12 +249,12 @@ def viz_and_log(
 def val_metrics_only(
     exp: comet_ml.Experiment,
     step: int,
-    avp: AVPViT,
+    model: ActiveCanViT,
     compute_raw_targets: Callable[[Tensor], "NormFeatures"],
     scene_normalizer: PositionAwareNorm,
     cls_normalizer: PositionAwareNorm,
     images: Tensor,
-    scene_grid_size: int,
+    canvas_grid_size: int,
     prefix: str = "val",
 ) -> float:
     """Fast validation without PCA. Returns final scene l1 loss (normalized)."""
@@ -273,8 +264,8 @@ def val_metrics_only(
     with torch.inference_mode():
         raw_feats = compute_raw_targets(images)
         target = scene_normalizer(raw_feats.patches)
-        hidden = avp.init_hidden(B, scene_grid_size)
-        outputs, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
+        canvas = model.init_canvas(B, canvas_grid_size)
+        outputs, _ = model.forward_trajectory_full(images, viewpoints, canvas)
         final_scene = outputs[-1].scene
 
         # Scene metrics (normalized + raw)
@@ -285,9 +276,9 @@ def val_metrics_only(
             exp.log_metric(f"{prefix}/scene_{name}_raw", fn(final_scene, raw_feats.patches).item(), step=step)
 
         # CLS metrics (if enabled)
-        if avp.cls_proj is not None:
+        if model.cls_proj is not None:
             cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
-            cls_pred = avp.compute_cls(outputs[-1].hidden)
+            cls_pred = model.compute_cls(outputs[-1].canvas)
             for name, fn in LOSS_FNS.items():
                 exp.log_metric(f"{prefix}/cls_{name}", fn(cls_pred, cls_target).item(), step=step)
 
@@ -297,13 +288,13 @@ def val_metrics_only(
 def eval_and_log(
     exp: comet_ml.Experiment,
     step: int,
-    avp: AVPViT,
+    model: ActiveCanViT,
     teacher: DINOv3Backbone,
     compute_raw_targets: Callable[[Tensor], "NormFeatures"],
     scene_normalizer: PositionAwareNorm,
     cls_normalizer: PositionAwareNorm,
     images: Tensor,
-    scene_grid_size: int,
+    canvas_grid_size: int,
     prefix: str = "val",
     log_spatial_stats: bool = True,
     log_curves: bool = True,
@@ -316,11 +307,11 @@ def eval_and_log(
     with torch.inference_mode():
         raw_feats = compute_raw_targets(images)
         target = scene_normalizer(raw_feats.patches)
-        hidden = avp.init_hidden(B, scene_grid_size)
+        canvas = model.init_canvas(B, canvas_grid_size)
 
     viz = viz_and_log(
-        exp, step, prefix, avp, teacher, scene_normalizer,
-        images, viewpoints, target, hidden,
+        exp, step, prefix, model, teacher, scene_normalizer,
+        images, viewpoints, target, canvas,
         log_spatial_stats=log_spatial_stats, log_curves=log_curves, loss_type=loss_type,
     )
 
@@ -338,10 +329,10 @@ def eval_and_log(
         exp.log_metric(f"{prefix}/scene_{name}_raw", fn(final_scene, raw_feats.patches).item(), step=step)
 
     # CLS metrics (if enabled)
-    if avp.cls_proj is not None:
+    if model.cls_proj is not None:
         with torch.inference_mode():
             cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
-            cls_pred = avp.compute_cls(viz.outputs[-1].hidden)
+            cls_pred = model.compute_cls(viz.outputs[-1].canvas)
             for name, fn in LOSS_FNS.items():
                 exp.log_metric(f"{prefix}/cls_{name}", fn(cls_pred, cls_target).item(), step=step)
 
