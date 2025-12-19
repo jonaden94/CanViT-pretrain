@@ -8,8 +8,8 @@ import torch
 from dinov3.models.vision_transformer import vit_small
 from torch import Tensor
 
-from avp_vit.backbone.dinov3 import DINOv3Backbone
-from avp_vit.rope import compute_rope, glimpse_positions
+from canvit.backbone.dinov3 import DINOv3Backbone
+from canvit.rope import compute_rope, glimpse_positions
 
 
 @pytest.mark.parametrize("rope_dtype", ["fp32", "bf16"])

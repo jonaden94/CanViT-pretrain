@@ -12,8 +12,8 @@ from PIL import Image
 from sklearn.decomposition import PCA
 from ytch.device import get_sensible_device
 
-from avp_vit.backbone.dinov3 import DINOv3Backbone
-from avp_vit.rope import compute_rope, make_grid_positions
+from canvit.backbone.dinov3 import DINOv3Backbone
+from canvit.rope import compute_rope, make_grid_positions
 
 matplotlib.use("Agg")
 

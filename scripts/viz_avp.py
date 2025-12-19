@@ -15,7 +15,7 @@ from sklearn.decomposition import PCA
 from ytch.device import get_sensible_device
 
 from avp_vit import AVPConfig, AVPViT
-from avp_vit.backbone.dinov3 import DINOv3Backbone
+from canvit.backbone.dinov3 import DINOv3Backbone
 from avp_vit.glimpse import Viewpoint
 from avp_vit.train.data import IMAGENET_MEAN, IMAGENET_STD
 

@@ -16,7 +16,7 @@ from PIL import Image
 from torchvision import transforms
 
 from avp_vit import AVPConfig, AVPViT
-from avp_vit.backbone.dinov3 import DINOv3Backbone
+from canvit.backbone.dinov3 import DINOv3Backbone
 from avp_vit.checkpoint import load as load_checkpoint
 from avp_vit.train.data import imagenet_normalize
 from avp_vit.train.viewpoint import make_eval_viewpoints

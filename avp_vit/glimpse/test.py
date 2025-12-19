@@ -3,7 +3,7 @@
 import torch
 
 from avp_vit.glimpse import Viewpoint, sample_at_viewpoint, normalized_to_pixel
-from avp_vit.rope import glimpse_positions
+from canvit.rope import glimpse_positions
 
 
 class TestNormalizedToPixel:

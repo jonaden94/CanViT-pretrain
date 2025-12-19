@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from avp_vit import AVPConfig, AVPViT
-from avp_vit.backbone.dinov3 import DINOv3Backbone
+from canvit.backbone.dinov3 import DINOv3Backbone
 
 CKPT_PATH = Path("dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
 
