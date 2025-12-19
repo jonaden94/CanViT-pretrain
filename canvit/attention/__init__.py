@@ -35,8 +35,8 @@ def _ewa_or_identity(dim: int, use_ewa: bool) -> nn.Module:
     return ElementwiseAffine(dim) if use_ewa else nn.Identity()
 
 
-class RoPECrossAttention(nn.Module):
-    """Cross-attention with RoPE. Subclasses configure Q/K/V/O transforms."""
+class CanvasCrossAttention(nn.Module):
+    """Canvas cross-attention with RoPE. Subclasses configure Q/K/V/O transforms."""
 
     dim: int
     num_heads: int
@@ -103,7 +103,7 @@ class RoPECrossAttention(nn.Module):
 
 
 @final
-class RoPEReadCrossAttention(RoPECrossAttention):
+class ReadCrossAttention(CanvasCrossAttention):
     """Read: Q, O are Linear on local; K, V are EWA on canvas."""
 
     def __init__(self, dim: int, num_heads: int, cfg: CrossAttentionConfig) -> None:
@@ -115,7 +115,7 @@ class RoPEReadCrossAttention(RoPECrossAttention):
 
 
 @final
-class RoPEWriteCrossAttention(RoPECrossAttention):
+class WriteCrossAttention(CanvasCrossAttention):
     """Write: K, V are Linear on local; Q, O are EWA on canvas."""
 
     def __init__(self, dim: int, num_heads: int, cfg: CrossAttentionConfig) -> None:
@@ -130,7 +130,7 @@ class RoPEWriteCrossAttention(RoPECrossAttention):
 class ScaledResidualAttention(nn.Module):
     """Attention with residual + LayerScale: x_new = x + scale * attn(x, kv)."""
 
-    def __init__(self, attn: RoPECrossAttention, scale_init: float) -> None:
+    def __init__(self, attn: CanvasCrossAttention, scale_init: float) -> None:
         super().__init__()
         self.attn = attn
         self.scale = LayerScale(attn.dim, init_values=scale_init)

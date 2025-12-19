@@ -5,18 +5,26 @@ between a small local stream and a large canvas state.
 """
 
 from dataclasses import dataclass, field
-from typing import final
+from typing import NamedTuple, final
 
 import torch
 from torch import Tensor, nn
 
 from canvit.attention import (
     CrossAttentionConfig,
-    RoPEReadCrossAttention,
-    RoPEWriteCrossAttention,
+    ReadCrossAttention,
+    WriteCrossAttention,
     ScaledResidualAttention,
 )
 from canvit.backbone import ViTBackbone
+from canvit.rope import compute_rope
+
+
+class RoPE(NamedTuple):
+    """Rotary position embedding (sin, cos)."""
+
+    sin: Tensor
+    cos: Tensor
 
 
 @final
@@ -24,7 +32,7 @@ from canvit.backbone import ViTBackbone
 class CanViTConfig:
     """CanViT configuration."""
 
-    n_registers: int = 32
+    n_canvas_registers: int = 32
     adapter_stride: int = 2
     layer_scale_init: float = 1e-3
     read_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
@@ -66,17 +74,16 @@ class CanViT(nn.Module):
         n_blocks = backbone.n_blocks
         n_adapters = (n_blocks - 1) // cfg.adapter_stride
 
-        # Read/write attention
         self.read_attn = nn.ModuleList([
             ScaledResidualAttention(
-                RoPEReadCrossAttention(dim, heads, cfg.read_attention),
+                ReadCrossAttention(dim, heads, cfg.read_attention),
                 cfg.layer_scale_init,
             )
             for _ in range(n_adapters)
         ])
         self.write_attn = nn.ModuleList([
             ScaledResidualAttention(
-                RoPEWriteCrossAttention(dim, heads, cfg.write_attention),
+                WriteCrossAttention(dim, heads, cfg.write_attention),
                 cfg.layer_scale_init,
             )
             for _ in range(n_adapters)
@@ -85,7 +92,7 @@ class CanViT(nn.Module):
         # Canvas init
         self.cls_init = nn.Parameter(torch.randn(1, 1, dim))
         self.spatial_init = nn.Parameter(torch.randn(1, 1, dim))
-        self.registers = nn.Parameter(torch.randn(1, cfg.n_registers, dim))
+        self.registers = nn.Parameter(torch.randn(1, cfg.n_canvas_registers, dim))
 
         # Canvas normalization
         self.cls_ln = nn.LayerNorm(dim)
@@ -93,17 +100,25 @@ class CanViT(nn.Module):
         self.spatial_ln = nn.LayerNorm(dim)
 
     @property
-    def n_registers(self) -> int:
-        return self.cfg.n_registers
+    def n_canvas_registers(self) -> int:
+        return self.cfg.n_canvas_registers
 
     @property
     def n_prefix(self) -> int:
         """Number of prefix tokens (cls + registers)."""
-        return 1 + self.n_registers
+        return 1 + self.n_canvas_registers
 
     @property
     def n_adapters(self) -> int:
         return len(self.read_attn)
+
+    def prepare_canvas(self, canvas: Tensor) -> Tensor:
+        """Normalize canvas components [cls | registers | spatial]."""
+        n_reg = self.n_canvas_registers
+        cls = self.cls_ln(canvas[:, :1])
+        reg = self.reg_ln(canvas[:, 1 : 1 + n_reg])
+        spatial = self.spatial_ln(canvas[:, 1 + n_reg :])
+        return torch.cat([cls, reg, spatial], dim=1)
 
     def init_canvas(self, batch_size: int, canvas_grid_size: int) -> Tensor:
         """Create initial canvas [B, 1 + n_reg + G*G, D]."""
@@ -118,37 +133,27 @@ class CanViT(nn.Module):
 
     def forward(
         self,
-        local: Tensor,
+        glimpse: Tensor,
         canvas: Tensor,
-        local_rope: tuple[Tensor, Tensor],
-        canvas_rope: tuple[Tensor, Tensor],
+        local_positions: Tensor,
+        canvas_positions: Tensor,
     ) -> tuple[Tensor, Tensor]:
-        """Interleaved read-backbone-write with canvas normalization.
+        """Process glimpse and update canvas via interleaved read-backbone-write."""
+        local, H, W = self.backbone.prepare_tokens(glimpse)
+        assert local_positions.shape[1] == H * W
 
-        Args:
-            local: [B, N_local, D] - local tokens (from backbone.prepare_tokens)
-            canvas: [B, N_canvas, D] - canvas state [cls | registers | spatial]
-            local_rope: (sin, cos) for local positions
-            canvas_rope: (sin, cos) for canvas positions
+        local_rope = RoPE(*compute_rope(local_positions, self.backbone.rope_periods))
+        canvas_rope = RoPE(*compute_rope(canvas_positions, self.backbone.rope_periods))
+        canvas = self.prepare_canvas(canvas)
 
-        Returns:
-            (local, canvas) - updated tensors, same shapes as input
-        """
-        n_reg = self.n_registers
-        cls = self.cls_ln(canvas[:, :1])
-        reg = self.reg_ln(canvas[:, 1 : 1 + n_reg])
-        spatial = self.spatial_ln(canvas[:, 1 + n_reg :])
-        canvas = torch.cat([cls, reg, spatial], dim=1)
-
-        # Interleaved read-backbone-write
         stride = self.cfg.adapter_stride
         for i in range(self.backbone.n_blocks):
-            crosstalk = i >= stride and i % stride == 0
-            if crosstalk:
+            if i >= stride and i % stride == 0:
                 a = i // stride - 1
                 local = self.read_attn[a](local, canvas, local_rope, canvas_rope)
-            local = self.backbone.forward_block(i, local, local_rope)
-            if crosstalk:
+                local = self.backbone.forward_block(i, local, local_rope)
                 canvas = self.write_attn[a](canvas, local, canvas_rope, local_rope)
+            else:
+                local = self.backbone.forward_block(i, local, local_rope)
 
         return local, canvas

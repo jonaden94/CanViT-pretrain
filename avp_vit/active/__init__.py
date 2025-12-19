@@ -12,7 +12,7 @@ from torch.utils.checkpoint import checkpoint
 
 from canvit import CanViT, CanViTConfig
 from canvit.backbone import ViTBackbone
-from canvit.rope import compute_rope, glimpse_positions, make_grid_positions
+from canvit.rope import glimpse_positions, make_grid_positions
 
 from avp_vit.glimpse import Viewpoint, sample_at_viewpoint
 
@@ -86,12 +86,16 @@ class ActiveCanViT(nn.Module):
             else None
         )
 
-        # Scale down output projection weights (no grad, simpler than scaling in CanViT)
+        # Scale down output projection weights
         scale = 1.0 / math.sqrt(dim)
+        scene_linear = self.scene_proj[1]
+        assert isinstance(scene_linear, nn.Linear)
         with torch.no_grad():
-            self.scene_proj[1].weight.mul_(scale)
+            scene_linear.weight.mul_(scale)
             if self.cls_proj is not None:
-                self.cls_proj[1].weight.mul_(scale)
+                cls_linear = self.cls_proj[1]
+                assert isinstance(cls_linear, nn.Linear)
+                cls_linear.weight.mul_(scale)
 
     @property
     def backbone(self) -> ViTBackbone:
@@ -102,8 +106,8 @@ class ActiveCanViT(nn.Module):
         return self.cfg.glimpse_grid_size * self.backbone.patch_size_px
 
     @property
-    def n_registers(self) -> int:
-        return self.canvit.n_registers
+    def n_canvas_registers(self) -> int:
+        return self.canvit.n_canvas_registers
 
     @property
     def n_prefix(self) -> int:
@@ -140,22 +144,17 @@ class ActiveCanViT(nn.Module):
         canvas: Tensor,
     ) -> StepOutput:
         B = canvas.shape[0]
+        G = self.cfg.glimpse_grid_size
         canvas_grid_size = self._infer_canvas_grid_size(canvas)
 
-        local, H, W = self.backbone.prepare_tokens(glimpse)
-        assert H == W == self.cfg.glimpse_grid_size
-
-        # RoPE positions
-        local_pos = glimpse_positions(centers, scales, H, W, dtype=self.backbone.rope_dtype)
+        local_pos = glimpse_positions(centers, scales, G, G, dtype=self.backbone.rope_dtype)
         canvas_pos = (
             make_grid_positions(canvas_grid_size, canvas_grid_size, glimpse.device, self.backbone.rope_dtype)
             .unsqueeze(0)
             .expand(B, -1, -1)
         )
-        local_rope = compute_rope(local_pos, self.backbone.rope_periods)
-        canvas_rope = compute_rope(canvas_pos, self.backbone.rope_periods)
 
-        local_out, canvas_out = self.canvit(local, canvas, local_rope, canvas_rope)
+        local_out, canvas_out = self.canvit(glimpse, canvas, local_pos, canvas_pos)
         scene_out = self.compute_scene(canvas_out)
         return StepOutput(glimpse, local_out, canvas_out, scene_out)
 

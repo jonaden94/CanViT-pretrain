@@ -95,7 +95,7 @@ def save(
 
     log.info(f"Checkpoint saved: {path} ({size_mb:.1f} MB)")
     log.info(f"  backbone={backbone}, teacher_dim={model.teacher_dim}")
-    log.info(f"  glimpse_grid_size={model.cfg.glimpse_grid_size}, n_registers={model.n_registers}")
+    log.info(f"  glimpse_grid_size={model.cfg.glimpse_grid_size}, n_canvas_registers={model.n_canvas_registers}")
     if step is not None:
         log.info(f"  step={step}, train_loss={train_loss:.4e}" if train_loss else f"  step={step}")
     if git_commit:

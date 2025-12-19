@@ -97,8 +97,9 @@ class DINOv3Backbone(ViTBackbone, nn.Module):
 
     @property
     def ffn_ratio(self) -> float:
-        """MLP expansion ratio (typically 4.0 for standard ViT)."""
-        return self.vit.mlp_ratio
+        ratio = self.vit.mlp_ratio
+        assert isinstance(ratio, (int, float))
+        return float(ratio)
 
     def block_flops(self, n_tokens: int) -> int:
         """FLOPs for one DINOv3 transformer block."""

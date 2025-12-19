@@ -5,7 +5,7 @@ from torch import Tensor, nn
 
 from canvit import CanViT, CanViTConfig
 from canvit.backbone import ViTBackbone
-from canvit.rope import compute_rope, make_rope_periods
+from canvit.rope import make_rope_periods
 
 
 class MockBackbone(ViTBackbone, nn.Module):
@@ -19,6 +19,8 @@ class MockBackbone(ViTBackbone, nn.Module):
         self._patch_px = patch_px
         self._periods = make_rope_periods(dim // heads, torch.float32)
         self.block_modules = nn.ModuleList([nn.Identity() for _ in range(blocks)])
+        self.patch_embed = nn.Linear(3 * patch_px * patch_px, dim)
+        self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
 
     @property
     def embed_dim(self) -> int:
@@ -52,15 +54,19 @@ class MockBackbone(ViTBackbone, nn.Module):
         return self.block_modules[idx](x)
 
     def prepare_tokens(self, images: Tensor) -> tuple[Tensor, int, int]:
-        B, _, H, W = images.shape
-        gh, gw = H // self._patch_px, W // self._patch_px
-        tokens = torch.randn(B, 1 + gh * gw, self._dim, device=images.device)
-        return tokens, gh, gw
+        B, C, H, W = images.shape
+        P = self._patch_px
+        gh, gw = H // P, W // P
+        patches = images.unfold(2, P, P).unfold(3, P, P)
+        patches = patches.permute(0, 2, 3, 1, 4, 5).reshape(B, gh * gw, C * P * P)
+        patch_tokens = self.patch_embed(patches)
+        cls = self.cls_token.expand(B, -1, -1)
+        return torch.cat([cls, patch_tokens], dim=1), gh, gw
 
 
 def test_canvit_init_canvas():
     backbone = MockBackbone(dim=64)
-    cfg = CanViTConfig(n_registers=8)
+    cfg = CanViTConfig(n_canvas_registers=8)
     model = CanViT(backbone, cfg)
 
     canvas = model.init_canvas(batch_size=2, canvas_grid_size=4)
@@ -70,24 +76,23 @@ def test_canvit_init_canvas():
 
 def test_canvit_forward():
     backbone = MockBackbone(dim=64, heads=8, blocks=6, patch_px=16)
-    cfg = CanViTConfig(n_registers=8, adapter_stride=2, layer_scale_init=1e-3)
+    cfg = CanViTConfig(n_canvas_registers=8, adapter_stride=2, layer_scale_init=1e-3)
     model = CanViT(backbone, cfg)
 
     B, D = 2, 64
     canvas_grid = 4
-    n_spatial = canvas_grid ** 2
-    n_local = 17  # 1 prefix + 16 patches
+    glimpse_grid = 4
+    glimpse_size = glimpse_grid * 16
 
-    local = torch.randn(B, n_local, D)
+    glimpse = torch.randn(B, 3, glimpse_size, glimpse_size)
     canvas = model.init_canvas(B, canvas_grid)
 
-    local_pos = torch.randn(B, n_local - 1, 2)
-    canvas_pos = torch.randn(B, n_spatial, 2)
-    local_rope = compute_rope(local_pos, backbone.rope_periods)
-    canvas_rope = compute_rope(canvas_pos, backbone.rope_periods)
+    local_pos = torch.randn(B, glimpse_grid ** 2, 2)
+    canvas_pos = torch.randn(B, canvas_grid ** 2, 2)
 
-    local_out, canvas_out = model(local, canvas, local_rope, canvas_rope)
-    assert local_out.shape == local.shape
+    local_out, canvas_out = model(glimpse, canvas, local_pos, canvas_pos)
+    assert local_out.shape[0] == B
+    assert local_out.shape[2] == D
     assert canvas_out.shape == canvas.shape
 
 
@@ -104,24 +109,25 @@ def test_canvit_n_adapters():
 
 def test_canvit_gradients_flow():
     backbone = MockBackbone(dim=64, heads=8, blocks=4, patch_px=16)
-    cfg = CanViTConfig(n_registers=4, adapter_stride=2)
+    cfg = CanViTConfig(n_canvas_registers=4, adapter_stride=2)
     model = CanViT(backbone, cfg)
 
-    B, D = 2, 64
+    B = 2
     canvas_grid = 4
-    n_local = 17
+    glimpse_grid = 4
+    glimpse_size = glimpse_grid * 16
 
-    local = torch.randn(B, n_local, D, requires_grad=True)
+    glimpse = torch.randn(B, 3, glimpse_size, glimpse_size, requires_grad=True)
     canvas = model.init_canvas(B, canvas_grid).detach().requires_grad_(True)
 
-    local_rope = compute_rope(torch.randn(B, n_local - 1, 2), backbone.rope_periods)
-    canvas_rope = compute_rope(torch.randn(B, canvas_grid ** 2, 2), backbone.rope_periods)
+    local_pos = torch.randn(B, glimpse_grid ** 2, 2)
+    canvas_pos = torch.randn(B, canvas_grid ** 2, 2)
 
-    local_out, canvas_out = model(local, canvas, local_rope, canvas_rope)
+    local_out, canvas_out = model(glimpse, canvas, local_pos, canvas_pos)
     loss = local_out.sum() + canvas_out.sum()
     loss.backward()
 
-    assert local.grad is not None
+    assert glimpse.grad is not None
     assert canvas.grad is not None
-    assert local.grad.abs().sum() > 0
+    assert glimpse.grad.abs().sum() > 0
     assert canvas.grad.abs().sum() > 0

@@ -106,7 +106,7 @@ def compile_teacher(teacher: DINOv3Backbone) -> None:
     n_blocks = teacher.n_blocks
     log.info(f"Compiling teacher: {n_blocks} self-attention blocks")
 
-    blocks = teacher._backbone.blocks
+    blocks = teacher.vit.blocks
     for i in range(n_blocks):
         blocks[i].compile(dynamic=True)
 
@@ -123,7 +123,7 @@ def compile_model(model: ActiveCanViT) -> None:
     )
 
     assert isinstance(canvit.backbone, DINOv3Backbone)
-    blocks = canvit.backbone._backbone.blocks
+    blocks = canvit.backbone.vit.blocks
     for i in range(n_blocks):
         blocks[i].compile(dynamic=True)
 

@@ -29,10 +29,10 @@ def test_layer_scale():
     assert torch.allclose(out, torch.full_like(out, 0.5))
 
 
-def test_rope_read_cross_attention():
-    from canvit.attention import RoPEReadCrossAttention, CrossAttentionConfig
+def test_read_cross_attention():
+    from canvit.attention import ReadCrossAttention, CrossAttentionConfig
     from canvit.rope import compute_rope, make_rope_periods
-    attn = RoPEReadCrossAttention(64, num_heads=8, cfg=CrossAttentionConfig())
+    attn = ReadCrossAttention(64, num_heads=8, cfg=CrossAttentionConfig())
     q_in = torch.randn(2, 16, 64)
     kv_in = torch.randn(2, 32, 64)
     periods = make_rope_periods(8, torch.float32)
@@ -42,10 +42,10 @@ def test_rope_read_cross_attention():
     assert out.shape == q_in.shape
 
 
-def test_rope_write_cross_attention():
-    from canvit.attention import RoPEWriteCrossAttention, CrossAttentionConfig
+def test_write_cross_attention():
+    from canvit.attention import WriteCrossAttention, CrossAttentionConfig
     from canvit.rope import compute_rope, make_rope_periods
-    attn = RoPEWriteCrossAttention(64, num_heads=8, cfg=CrossAttentionConfig())
+    attn = WriteCrossAttention(64, num_heads=8, cfg=CrossAttentionConfig())
     q_in = torch.randn(2, 32, 64)
     kv_in = torch.randn(2, 16, 64)
     periods = make_rope_periods(8, torch.float32)
@@ -56,10 +56,10 @@ def test_rope_write_cross_attention():
 
 
 def test_scaled_residual_attention():
-    from canvit.attention import ScaledResidualAttention, RoPEReadCrossAttention, CrossAttentionConfig
+    from canvit.attention import ScaledResidualAttention, ReadCrossAttention, CrossAttentionConfig
     from canvit.rope import compute_rope, make_rope_periods
     torch.manual_seed(42)
-    attn = RoPEReadCrossAttention(64, num_heads=8, cfg=CrossAttentionConfig())
+    attn = ReadCrossAttention(64, num_heads=8, cfg=CrossAttentionConfig())
     scaled = ScaledResidualAttention(attn, scale_init=1e-6)
     x = torch.randn(2, 16, 64)
     kv = torch.randn(2, 32, 64)
