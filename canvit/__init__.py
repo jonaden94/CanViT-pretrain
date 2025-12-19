@@ -135,8 +135,6 @@ class CanViT(nn.Module):
             (local, canvas) - updated tensors, same shapes as input
         """
         n_reg = self.n_registers
-
-        # Normalize canvas at recurrence boundary
         cls = self.cls_ln(canvas[:, :1])
         reg = self.reg_ln(canvas[:, 1 : 1 + n_reg])
         spatial = self.spatial_ln(canvas[:, 1 + n_reg :])
@@ -145,12 +143,12 @@ class CanViT(nn.Module):
         # Interleaved read-backbone-write
         stride = self.cfg.adapter_stride
         for i in range(self.backbone.n_blocks):
-            should_adapt = i >= stride and i % stride == 0
-            if should_adapt:
+            crosstalk = i >= stride and i % stride == 0
+            if crosstalk:
                 a = i // stride - 1
                 local = self.read_attn[a](local, canvas, local_rope, canvas_rope)
             local = self.backbone.forward_block(i, local, local_rope)
-            if should_adapt:
+            if crosstalk:
                 canvas = self.write_attn[a](canvas, local, canvas_rope, local_rope)
 
         return local, canvas
