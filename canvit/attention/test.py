@@ -3,32 +3,6 @@
 import torch
 
 
-def test_to_from_multihead_roundtrip():
-    from ytch.attention.mh import to_multihead, from_multihead
-    x = torch.randn(2, 16, 64)
-    mh = to_multihead(x, num_heads=8)
-    assert mh.shape == (2, 8, 16, 8)
-    back = from_multihead(mh)
-    assert torch.allclose(back, x)
-
-
-def test_elementwise_affine():
-    from ytch.nn.elementwise_affine import ElementwiseAffine
-    ewa = ElementwiseAffine(64, scale=2.0)
-    x = torch.ones(2, 16, 64)
-    out = ewa(x)
-    assert out.shape == x.shape
-    assert torch.allclose(out, torch.full_like(out, 2.0))
-
-
-def test_layer_scale():
-    from ytch.nn.layer_scale import LayerScale
-    ls = LayerScale(64, init_values=0.5)
-    x = torch.ones(2, 16, 64)
-    out = ls(x)
-    assert torch.allclose(out, torch.full_like(out, 0.5))
-
-
 def test_read_cross_attention():
     from canvit.attention import ReadCrossAttention, CrossAttentionConfig
     from canvit.rope import compute_rope, make_rope_periods
