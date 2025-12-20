@@ -54,7 +54,7 @@ class Config:
     # Logging
     log_every: int = 20
     val_every: int = 250
-    total_viz: int = 100  # PCA viz count (log-spaced, denser early)
+    total_viz: int = 1000  # PCA viz count (log-spaced, denser early)
     total_curves: int = 50  # Curve count (log-spaced)
     ckpt_every: int = 5000
     log_spatial_stats: bool = True  # Log target/pred spatial mean/std
