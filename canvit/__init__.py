@@ -45,8 +45,8 @@ class CanViTConfig:
     n_canvas_registers: int = 32
     adapter_stride: int = 1
     layer_scale_init: float = 1e-3
-    canvas_num_heads: int = 2
-    canvas_head_dim: int = 256  # canvas_dim = 2 * 256 = 512
+    canvas_num_heads: int = 4
+    canvas_head_dim: int = 128  # canvas_dim = 512
     use_canvas_layer_scale: bool = True
     read_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
     write_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
@@ -124,9 +124,7 @@ class CanViT(nn.Module):
         scale = 1.0 / math.sqrt(canvas_dim)
         self.cls_init = nn.Parameter(torch.randn(1, 1, canvas_dim) * scale)
         self.spatial_init = nn.Parameter(torch.randn(1, 1, canvas_dim) * scale)
-        self.registers = nn.Parameter(
-            torch.randn(1, cfg.n_canvas_registers, canvas_dim) * scale
-        )
+        self.registers = nn.Parameter(torch.randn(1, cfg.n_canvas_registers, canvas_dim) * scale)
 
         self.cls_ln = nn.LayerNorm(canvas_dim)
         self.reg_ln = nn.LayerNorm(canvas_dim)
@@ -138,9 +136,7 @@ class CanViT(nn.Module):
         if cfg.use_canvas_layer_scale:
             init = cfg.layer_scale_init
             self.cls_scale = nn.Parameter(torch.full((canvas_dim,), init))
-            self.reg_scales = nn.Parameter(
-                torch.full((cfg.n_canvas_registers, canvas_dim), init)
-            )
+            self.reg_scales = nn.Parameter(torch.full((cfg.n_canvas_registers, canvas_dim), init))
             self.spatial_scale = nn.Parameter(torch.full((canvas_dim,), init))
         else:
             self.cls_scale = None
