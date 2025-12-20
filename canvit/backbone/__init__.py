@@ -40,7 +40,7 @@ class ViTBackbone(ABC):
     @property
     @abstractmethod
     def rope_periods(self) -> Tensor:
-        """RoPE frequency periods for cross-attention."""
+        """RoPE frequency periods for backbone self-attention."""
         ...
 
     @property
