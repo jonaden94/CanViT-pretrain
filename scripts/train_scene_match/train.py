@@ -1,8 +1,7 @@
-"""Main training loop with random grid size sampling."""
+"""Main training loop with stochastic reset."""
 
 import logging
 import random
-from collections.abc import Callable
 from contextlib import nullcontext
 
 import comet_ml
@@ -14,29 +13,24 @@ from tqdm import tqdm
 from ymc.lr import get_linear_scaled_lr
 from ytch.model import count_parameters
 
-from avp_vit import ActiveCanViT, ActiveCanViTConfig
+from avp_vit import ActiveCanViTConfig
 from canvit.backbone.dinov3 import NormFeatures
 from avp_vit.checkpoint import load as load_checkpoint
 from avp_vit.checkpoint import save as save_checkpoint
-from avp_vit.train import InfiniteLoader, SurvivalBatch, get_loss_fn, warmup_cosine_scheduler
+from avp_vit.train import InfiniteLoader, get_loss_fn, warmup_cosine_scheduler
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import random_viewpoint
 
 from .config import Config
-from .data import ResolutionStage, create_loaders, create_resolution_stages
+from .data import create_loaders, scene_size_px
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher
-from .viz import eval_and_log, log_norm_stats, val_metrics_only, viz_and_log
+from .viz import eval_and_log, val_metrics_only, viz_and_log
 
 log = logging.getLogger(__name__)
 
 
 def log_spaced_steps(n: int, max_step: int, K: float | None = None) -> frozenset[int]:
-    """
-    Generate n steps from 0 to max_step with geometrically increasing gaps.
-
-    Gaps form a geometric series: g, g*r, g*r², ... ensuring monotonic increase.
-    K controls the spread (last_gap / first_gap), defaulting to n.
-    """
+    """Generate n steps from 0 to max_step with geometrically increasing gaps."""
     assert n > 1
     n_gaps = n - 1
     K = K if K is not None else float(n)
@@ -62,90 +56,34 @@ def grad_norms_by_module(model: nn.Module, depth: int = 1) -> dict[str, float]:
     }
 
 
-def init_survival_batch(
-    model: ActiveCanViT,
+def warmup_normalizer(
+    scene_norm: PositionAwareNorm,
+    cls_norm: PositionAwareNorm,
     train_loader: InfiniteLoader,
-    compute_targets: Callable[[Tensor, int], NormFeatures],
-    scene_normalizer: PositionAwareNorm,
-    cls_normalizer: PositionAwareNorm,
-    batch_size: int,
-    fresh_count: int,
-    canvas_grid_size: int,
-    scene_size_px: int,
-    device: torch.device,
-) -> SurvivalBatch:
-    """Initialize survival batch. Normalizers expected to be in eval mode."""
-    n_init_batches = (batch_size + fresh_count - 1) // fresh_count
-    log.info(f"Initializing survival batch: batch_size={batch_size}, fresh_count={fresh_count}")
-
-    init_imgs_list: list[Tensor] = []
-    init_patches_list: list[Tensor] = []
-    init_cls_list: list[Tensor] = []
-    with torch.no_grad():
-        for _ in range(n_init_batches):
-            batch = train_loader.next_batch().to(device)
-            feats = compute_targets(batch, scene_size_px)
-            norm_patches = scene_normalizer(feats.patches)
-            norm_cls = cls_normalizer(feats.cls.unsqueeze(1)).squeeze(1)
-            init_imgs_list.append(batch)
-            init_patches_list.append(norm_patches)
-            init_cls_list.append(norm_cls)
-
-    init_imgs = torch.cat(init_imgs_list, dim=0)[:batch_size]
-    init_targets = torch.cat(init_patches_list, dim=0)[:batch_size]
-    init_cls_targets = torch.cat(init_cls_list, dim=0)[:batch_size]
-    canvas_init = model.init_canvas(batch_size, canvas_grid_size)
-
-    return SurvivalBatch.init(init_imgs, init_targets, init_cls_targets, canvas_init)
-
-
-def _log_stage(stage: ResolutionStage) -> None:
-    log.info(
-        f"  G={stage.scene_grid_size}: batch={stage.batch_size}, fresh={stage.fresh_count}, "
-        f"fresh_ratio={stage.fresh_ratio:.2f}"
-    )
-
-
-def warmup_normalizers(
-    scene_normalizers: dict[int, PositionAwareNorm],
-    cls_normalizers: dict[int, PositionAwareNorm],
-    train_loaders: dict[int, InfiniteLoader],
-    stages: dict[int, "ResolutionStage"],
-    compute_raw_targets: Callable[[Tensor, int], NormFeatures],
+    compute_raw_targets: callable,
     warmup_images: int,
+    scene_size: int,
     device: torch.device,
 ) -> None:
-    """Warm up normalizer running stats before training begins.
-
-    Each CLS normalizer is warmed up alongside its corresponding scene normalizer
-    (CLS statistics depend on input resolution, which varies per grid size).
-    """
-    for G, scene_norm in scene_normalizers.items():
-        cls_norm = cls_normalizers[G]
-        scene_size_px = stages[G].scene_size_px
-        scene_norm.train()
-        cls_norm.train()
-        loader = train_loaders[G]
-        images_seen = 0
-        pbar = tqdm(total=warmup_images, desc=f"Warmup G={G}", unit="img", leave=False)
-        while images_seen < warmup_images:
-            batch = loader.next_batch().to(device)
-            with torch.no_grad():
-                feats = compute_raw_targets(batch, scene_size_px)
-                scene_norm(feats.patches)
-                cls_norm(feats.cls.unsqueeze(1))
-            images_seen += batch.shape[0]
-            pbar.update(batch.shape[0])
-        pbar.close()
-        log.info(
-            f"Warmup G={G}: {images_seen} images, "
-            f"scene mean_norm={scene_norm.mean.norm().item():.4f}, "
-            f"cls mean_norm={cls_norm.mean.norm().item():.4f}"
-        )
+    """Warm up normalizer running stats."""
+    scene_norm.train()
+    cls_norm.train()
+    images_seen = 0
+    pbar = tqdm(total=warmup_images, desc="Warmup normalizers", unit="img", leave=False)
+    while images_seen < warmup_images:
+        batch = train_loader.next_batch().to(device)
+        with torch.no_grad():
+            feats = compute_raw_targets(batch, scene_size)
+            scene_norm(feats.patches)
+            cls_norm(feats.cls.unsqueeze(1))
+        images_seen += batch.shape[0]
+        pbar.update(batch.shape[0])
+    pbar.close()
+    log.info(f"Warmup done: {images_seen} images")
 
 
 def train(cfg: Config, trial: optuna.Trial) -> float:
-    """Train AVP model with random grid size sampling. Returns best val_loss."""
+    """Train with stochastic reset. Returns best val_loss."""
     log.info(f"Starting trial {trial.number}")
     log.info(f"Device: {cfg.device}")
 
@@ -174,11 +112,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     model = create_model(student_backbone, teacher.embed_dim, cfg)
 
     if cfg.compile and cfg.model.gradient_checkpointing:
-        raise ValueError(
-            "compile=True and gradient_checkpointing=True may be incompatible. "
-            "This combination has caused CheckpointError (tensor metadata mismatch) in some configurations. "
-            "Disable one of them."
-        )
+        raise ValueError("compile=True and gradient_checkpointing=True may be incompatible.")
 
     if cfg.compile:
         log.info("Compiling teacher and model")
@@ -188,14 +122,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     loss_fn = get_loss_fn(cfg.loss)
     log.info(f"Loss function: {cfg.loss}")
 
-    # Create resolution stages and resources
+    G = cfg.grid_size
     patch_size = teacher.patch_size_px
-    stages = create_resolution_stages(cfg, patch_size)
-    log.info("Resolution stages:")
-    for stage in stages.values():
-        _log_stage(stage)
+    scene_size = scene_size_px(G, patch_size)
+    log.info(f"Grid size: {G}, scene size: {scene_size}px")
 
-    train_loaders, val_loaders = create_loaders(cfg, stages)
+    train_loader, val_loader = create_loaders(cfg)
 
     trainable = [p for p in model.parameters() if p.requires_grad]
     n_trainable = sum(p.numel() for p in trainable)
@@ -208,108 +140,79 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     scheduler = warmup_cosine_scheduler(optimizer, cfg.n_steps, cfg.warmup_steps)
     log.info(f"Optimizer: AdamW, peak_lr={peak_lr:.2e}, weight_decay={cfg.weight_decay:.2e}")
 
-    # Precompute log-spaced viz/curve steps (denser early in training)
     viz_steps = log_spaced_steps(cfg.total_viz, cfg.n_steps)
     curve_steps = log_spaced_steps(cfg.total_curves, cfg.n_steps)
     log.info(f"Viz steps: {len(viz_steps)} points, curves: {len(curve_steps)} points")
 
-    # AMP context (nullcontext if disabled)
     amp_ctx = (
         torch.autocast(device_type=cfg.device.type, dtype=torch.bfloat16)
         if cfg.amp else nullcontext()
     )
     log.info(f"AMP: {'bfloat16' if cfg.amp else 'disabled'}")
 
-    # Load model weights from checkpoint if specified
     if cfg.resume_ckpt is not None:
         ckpt_data = load_checkpoint(cfg.resume_ckpt, cfg.device)
         ckpt_cfg = ActiveCanViTConfig(**ckpt_data["model_config"])
         if ckpt_cfg != cfg.model:
             log.warning("Checkpoint config differs from current config!")
-            log.warning(f"  Checkpoint: {ckpt_cfg}")
-            log.warning(f"  Current: {cfg.model}")
         model.load_state_dict(ckpt_data["state_dict"])
 
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}.pt"
 
-    def compute_raw_targets(images: Tensor, scene_size_px: int) -> NormFeatures:
-        """Compute teacher features (not normalized).
-
-        Resizes images from image_resolution to scene_size_px before teacher forward.
-        This decouples source image resolution from canvas grid size.
-        """
+    def compute_raw_targets(images: Tensor, sz: int) -> NormFeatures:
         with amp_ctx:
-            if images.shape[-1] != scene_size_px:
+            if images.shape[-1] != sz:
                 images = torch.nn.functional.interpolate(
-                    images, size=(scene_size_px, scene_size_px), mode="bilinear", align_corners=False
+                    images, size=(sz, sz), mode="bilinear", align_corners=False
                 )
             feats = teacher.forward_norm_features(images)
             return NormFeatures(patches=feats.patches.float(), cls=feats.cls.float())
 
-    # Create normalizers for each grid size
-    # Both scene and CLS normalizers are per-grid-size (CLS stats depend on input resolution)
-    scene_normalizers: dict[int, PositionAwareNorm] = {}
-    cls_normalizers: dict[int, PositionAwareNorm] = {}
-    for G in cfg.grid_sizes:
-        scene_normalizers[G] = PositionAwareNorm(
-            n_tokens=G * G, embed_dim=teacher.embed_dim, grid_size=G, momentum=cfg.norm_momentum,
-        ).to(cfg.device)
-        cls_normalizers[G] = PositionAwareNorm(
-            n_tokens=1, embed_dim=teacher.embed_dim, grid_size=1, momentum=cfg.norm_momentum,
-        ).to(cfg.device)
+    scene_norm = PositionAwareNorm(
+        n_tokens=G * G, embed_dim=teacher.embed_dim, grid_size=G, momentum=cfg.norm_momentum,
+    ).to(cfg.device)
+    cls_norm = PositionAwareNorm(
+        n_tokens=1, embed_dim=teacher.embed_dim, grid_size=1, momentum=cfg.norm_momentum,
+    ).to(cfg.device)
 
-    log.info(f"Warming up normalizers ({cfg.norm_warmup_images} images per grid size)...")
-    warmup_normalizers(scene_normalizers, cls_normalizers, train_loaders, stages, compute_raw_targets, cfg.norm_warmup_images, cfg.device)
+    log.info(f"Warming up normalizers ({cfg.norm_warmup_images} images)...")
+    warmup_normalizer(scene_norm, cls_norm, train_loader, compute_raw_targets, cfg.norm_warmup_images, scene_size, cfg.device)
 
-    log.info("Initializing survival batches...")
-    states: dict[int, SurvivalBatch] = {}
-    for G, stage in stages.items():
-        states[G] = init_survival_batch(
-            model, train_loaders[G], compute_raw_targets, scene_normalizers[G], cls_normalizers[G],
-            stage.batch_size, stage.fresh_count, G, stage.scene_size_px, cfg.device,
-        )
+    # State: None means needs reset
+    images: Tensor | None = None
+    targets: Tensor | None = None
+    cls_targets: Tensor | None = None
+    canvas: Tensor | None = None
 
-    # EMA tracking for losses (scene, cls, total)
+    # EMA tracking
     ema_scene_t = torch.tensor(0.0, device=cfg.device)
     ema_cls_t = torch.tensor(0.0, device=cfg.device)
     ema_loss_t = torch.tensor(0.0, device=cfg.device)
     alpha = 2 / (cfg.log_every + 1)
 
-    log.info("Starting training loop...")
+    log.info(f"Starting training loop (p_reset={cfg.p_reset})...")
     pbar = tqdm(range(cfg.n_steps), desc="Training", unit="step")
 
     for step in pbar:
-        G = random.choice(cfg.grid_sizes)
-        stage = stages[G]
-        state = states[G]
-        train_loader = train_loaders[G]
-        val_loader = val_loaders[G]
+        # Stochastic reset
+        if canvas is None or random.random() < cfg.p_reset:
+            images = train_loader.next_batch().to(cfg.device)
+            with torch.no_grad():
+                feats = compute_raw_targets(images, scene_size)
+                targets = scene_norm(feats.patches)
+                cls_targets = cls_norm(feats.cls.unsqueeze(1)).squeeze(1)
+            canvas = model.init_canvas(cfg.batch_size, G)
 
-        # Load fresh images and normalize targets (both scene patches and CLS)
-        scene_norm = scene_normalizers[G]
-        cls_norm = cls_normalizers[G]
-        fresh_imgs = train_loader.next_batch().to(cfg.device)
-        with torch.no_grad():
-            fresh_feats = compute_raw_targets(fresh_imgs, stage.scene_size_px)
-            fresh_patches_norm = scene_norm(fresh_feats.patches)
-            fresh_cls_norm = cls_norm(fresh_feats.cls.unsqueeze(1)).squeeze(1)
+        assert images is not None and targets is not None and cls_targets is not None
 
-        # Inner loop: multiple viewpoints per optimizer step
-        viewpoints = [
-            random_viewpoint(stage.batch_size, cfg.device)
-            for _ in range(cfg.n_viewpoints_per_step)
-        ]
+        viewpoints = [random_viewpoint(cfg.batch_size, cfg.device) for _ in range(cfg.n_viewpoints_per_step)]
+
         with amp_ctx:
-            losses, final_canvas = model.forward_loss(
-                state.images,
-                viewpoints,
-                state.targets,
-                state.canvas,
-                cls_target=state.cls_targets,
-                loss_fn=loss_fn,
+            losses, canvas = model.forward_loss(
+                images, viewpoints, targets, canvas,
+                cls_target=cls_targets, loss_fn=loss_fn,
             )
 
-            # Combine losses (trainer's responsibility)
             total_loss = torch.tensor(0.0, device=cfg.device)
             if losses.scene is not None:
                 total_loss = total_loss + losses.scene
@@ -323,9 +226,13 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
             optimizer.zero_grad()
             total_loss.backward()
+
         grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
         optimizer.step()
         scheduler.step()
+
+        # Detach canvas for next step
+        canvas = canvas.detach()
 
         # Update EMAs
         scene_t = losses.scene.detach() if losses.scene is not None else torch.tensor(0.0, device=cfg.device)
@@ -339,60 +246,34 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             ema_scene_t, ema_cls_t, ema_loss_t = scene_t, cls_t, total_t
 
         if step % cfg.log_every == 0:
-            # Raw (instantaneous) values
-            loss_raw = total_t.item()
-            scene_raw = scene_t.item()
-            cls_raw = cls_t.item()
-            # EMA-smoothed values
             loss_ema = ema_loss_t.item()
-            scene_ema = ema_scene_t.item()
-            cls_ema = ema_cls_t.item()
-
             grad_norm = grad_norm_t.item()
             lr = scheduler.get_last_lr()[0]
             metrics = {
-                # Raw losses
-                f"grid{G}/train/loss": loss_raw,
-                "train/loss": loss_raw,
-                # EMA losses
-                f"grid{G}/train/loss_ema": loss_ema,
+                "train/loss": total_t.item(),
                 "train/loss_ema": loss_ema,
-                # Other
                 "train/grad_norm": grad_norm,
                 "train/lr": lr,
-                "train/grid_size": G,
-                "train/spatial_canvas_init_norm": model.canvit.spatial_init.norm().item(),
-                "train/cls_canvas_init_norm": model.canvit.cls_init.norm().item(),
             }
-            if model.cls_proj is not None:
-                cls_linear = model.cls_proj[1]
-                assert isinstance(cls_linear, torch.nn.Linear)
-                metrics["train/cls_proj_weight_norm"] = cls_linear.weight.norm().item()
             if losses.scene is not None:
-                metrics[f"grid{G}/train/scene_loss"] = scene_raw
-                metrics["train/scene_loss"] = scene_raw
-                metrics[f"grid{G}/train/scene_loss_ema"] = scene_ema
-                metrics["train/scene_loss_ema"] = scene_ema
+                metrics["train/scene_loss"] = scene_t.item()
+                metrics["train/scene_loss_ema"] = ema_scene_t.item()
             if losses.cls is not None:
-                metrics[f"grid{G}/train/cls_loss"] = cls_raw
-                metrics["train/cls_loss"] = cls_raw
-                metrics[f"grid{G}/train/cls_loss_ema"] = cls_ema
-                metrics["train/cls_loss_ema"] = cls_ema
+                metrics["train/cls_loss"] = cls_t.item()
+                metrics["train/cls_loss_ema"] = ema_cls_t.item()
             exp.log_metrics(metrics, step=step)
-            pbar.set_postfix_str(f"G={G} loss={loss_ema:.2e} grad={grad_norm:.2e} lr={lr:.2e}")
+            pbar.set_postfix_str(f"loss={loss_ema:.2e} grad={grad_norm:.2e} lr={lr:.2e}")
 
-        # Validation - always log gradient norms and report to Optuna at val_every
         if step % cfg.val_every == 0:
             for name, norm in grad_norms_by_module(model, depth=1).items():
                 exp.log_metric(f"grad_norm/{name}", norm, step=step)
 
-            # Fast validation (skip at viz steps - eval_and_log covers the same metrics)
             if step not in viz_steps:
                 val_images = val_loader.next_batch().to(cfg.device)
                 with amp_ctx:
                     val_scene_l1 = val_metrics_only(
                         exp, step, model, compute_raw_targets, scene_norm, cls_norm,
-                        val_images, G, stage.scene_size_px, f"grid{G}/val",
+                        val_images, G, scene_size, "val",
                     )
                 exp.log_metric("val/scene_l1", val_scene_l1, step=step)
 
@@ -402,47 +283,35 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                     exp.end()
                     raise optuna.TrialPruned()
 
-        # Full viz with PCA (expensive, log-spaced)
         if step in viz_steps:
             with amp_ctx:
                 train_viz = viz_and_log(
-                    exp, step, f"grid{G}/train", model, teacher, scene_norm,
-                    state.images, viewpoints, state.targets, state.canvas,
+                    exp, step, "train", model, teacher, scene_norm,
+                    images, viewpoints, targets, canvas,
                     log_spatial_stats=cfg.log_spatial_stats, log_curves=False, loss_type=cfg.loss,
                 )
-            for name, losses in train_viz.losses.items():
-                exp.log_metric(f"grid{G}/train/viz_{name}", losses[-1], step=step)
+            for name, losses_list in train_viz.losses.items():
+                exp.log_metric(f"train/viz_{name}", losses_list[-1], step=step)
 
             val_images = val_loader.next_batch().to(cfg.device)
             with amp_ctx:
                 val_scene_l1 = eval_and_log(
                     exp, step, model, teacher, compute_raw_targets, scene_norm, cls_norm,
-                    val_images, G, stage.scene_size_px, f"grid{G}/val",
+                    val_images, G, scene_size, "val",
                     log_spatial_stats=cfg.log_spatial_stats,
                     log_curves=(step in curve_steps),
                     loss_type=cfg.loss,
                 )
             exp.log_metric("val/scene_l1", val_scene_l1, step=step)
 
-        # Checkpointing
         if step % cfg.ckpt_every == 0:
             save_checkpoint(
                 ckpt_path, model, cfg.student_model,
                 step=step, train_loss=ema_loss_t.item(), comet_id=exp.get_key(),
             )
-            log_norm_stats(exp, scene_normalizers, cls_normalizers, step)
+            exp.log_metric("norm/scene_mean_norm", scene_norm.mean.norm().item(), step=step)
+            exp.log_metric("norm/cls_mean_norm", cls_norm.mean.norm().item(), step=step)
 
-        # Fresh ratio survival: permute batch, replace first K with fresh (normalized targets)
-        canvas_init = model.init_canvas(stage.fresh_count, G)
-        states[G] = state.step(
-            fresh_images=fresh_imgs,
-            fresh_targets=fresh_patches_norm,
-            fresh_cls_targets=fresh_cls_norm,
-            next_canvas=final_canvas,
-            canvas_init=canvas_init,
-        )
-
-    # Final checkpoint
     save_checkpoint(
         ckpt_path, model, cfg.student_model,
         step=cfg.n_steps, train_loss=ema_loss_t.item(), comet_id=exp.get_key(),

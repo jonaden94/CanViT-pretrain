@@ -21,16 +21,9 @@ class Config:
     freeze_student_backbone: bool = False
     # Model
     model: ActiveCanViTConfig = field(default_factory=ActiveCanViTConfig)
-    grid_sizes: tuple[int, ...] = (16,)
-    batch_size: int = 128  # Batch size at max grid size
-    batch_size_at_min_grid: int | None = (
-        None  # If set, linearly interpolate BS between grids
-    )
-    # Fraction of batch replaced each optimizer step
-    # Having this NOT be 1.0 makes optimization a lot harder...
-    # It could make sense to first pretrain with this at 1.0, maybe adjust it later...
-    # There's an enough complexity
-    fresh_ratio: float = 1.0
+    grid_size: int = 16
+    batch_size: int = 128
+    p_reset: float = 0.5  # Probability of resetting canvas each step
     ref_lr: float = 1e-5
     weight_decay: float = 1e-5
     n_viewpoints_per_step: int = (
@@ -71,11 +64,3 @@ class Config:
     n_trials: int = 100
     # Runtime
     device: torch.device = field(default_factory=get_sensible_device)
-
-    @property
-    def min_grid_size(self) -> int:
-        return min(self.grid_sizes)
-
-    @property
-    def max_grid_size(self) -> int:
-        return max(self.grid_sizes)
