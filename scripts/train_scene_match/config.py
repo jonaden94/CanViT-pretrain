@@ -42,7 +42,7 @@ class Config:
     # ~100 IN1k epochs
     n_steps: int = 1_000_000
     # Target normalization
-    norm_warmup_images: int = 256  # Images to warm up running stats before training
+    norm_warmup_images: int = 4096  # Images to warm up running stats before training
     norm_momentum: float = 0.1  # Momentum for running mean/var updates
     # Data
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
