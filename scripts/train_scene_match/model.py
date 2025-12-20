@@ -49,6 +49,9 @@ def _load_dinov3(
         log.info(f"Loading {model_slug} from {checkpoint}")
         model = factory(pretrained=True, weights=checkpoint)
 
+    # Disable RoPE coordinate rescaling (training-time augmentation that adds noise)
+    model.rope_embed.rescale_coords = None
+
     return model.to(device)
 
 
