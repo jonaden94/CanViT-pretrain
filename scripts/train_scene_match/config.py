@@ -55,6 +55,7 @@ class Config:
     # Training
     num_workers: int = 8
     crop_scale_min: float = 0.8
+    image_resolution: int = 512  # Source image size (independent of grid size)
     loss: LossType = "cos"
     # Logging
     log_every: int = 20

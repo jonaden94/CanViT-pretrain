@@ -153,8 +153,8 @@ def viz_and_log(
         # Prepare viz data for first sample
         sample_idx = 0
         n_prefix = teacher.n_prefix_tokens
-        scene_size_px = canvas_grid_size * model.backbone.patch_size_px
-        H, W = scene_size_px, scene_size_px
+        # Use actual image size for pixel coordinates (image_resolution, not scene_size_px)
+        H, W = images.shape[-2], images.shape[-1]
 
         full_img = imagenet_denormalize(images[sample_idx].cpu()).numpy()
 
@@ -257,11 +257,12 @@ def val_metrics_only(
     exp: comet_ml.Experiment,
     step: int,
     model: ActiveCanViT,
-    compute_raw_targets: Callable[[Tensor], "NormFeatures"],
+    compute_raw_targets: Callable[[Tensor, int], "NormFeatures"],
     scene_normalizer: PositionAwareNorm,
     cls_normalizer: PositionAwareNorm,
     images: Tensor,
     canvas_grid_size: int,
+    scene_size_px: int,
     prefix: str = "val",
 ) -> float:
     """Fast validation without PCA. Returns final scene l1 loss (normalized)."""
@@ -269,7 +270,7 @@ def val_metrics_only(
     viewpoints = make_eval_viewpoints(B, images.device)
 
     with torch.inference_mode():
-        raw_feats = compute_raw_targets(images)
+        raw_feats = compute_raw_targets(images, scene_size_px)
         target = scene_normalizer(raw_feats.patches)
         canvas = model.init_canvas(B, canvas_grid_size)
         outputs, _ = model.forward_trajectory_full(images, viewpoints, canvas)
@@ -297,11 +298,12 @@ def eval_and_log(
     step: int,
     model: ActiveCanViT,
     teacher: DINOv3Backbone,
-    compute_raw_targets: Callable[[Tensor], "NormFeatures"],
+    compute_raw_targets: Callable[[Tensor, int], "NormFeatures"],
     scene_normalizer: PositionAwareNorm,
     cls_normalizer: PositionAwareNorm,
     images: Tensor,
     canvas_grid_size: int,
+    scene_size_px: int,
     prefix: str = "val",
     log_spatial_stats: bool = True,
     log_curves: bool = True,
@@ -312,7 +314,7 @@ def eval_and_log(
     viewpoints = make_eval_viewpoints(B, images.device)
 
     with torch.inference_mode():
-        raw_feats = compute_raw_targets(images)
+        raw_feats = compute_raw_targets(images, scene_size_px)
         target = scene_normalizer(raw_feats.patches)
         canvas = model.init_canvas(B, canvas_grid_size)
 

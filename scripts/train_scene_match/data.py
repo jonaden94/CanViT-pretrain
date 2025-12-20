@@ -74,26 +74,30 @@ def create_loaders(
     if use_indexed:
         log.info(f"Using IndexedImageFolder for train (index_dir={cfg.index_dir})")
 
+    # All loaders use same image_resolution; grid size only affects batch size
+    sz = cfg.image_resolution
+    train_tf = train_transform(sz, (cfg.crop_scale_min, 1.0))
+    val_tf = val_transform(sz)
+    log.info(f"Image resolution: {sz}px (independent of grid size)")
+
+    # Create datasets once (same transforms for all grid sizes)
+    if use_indexed:
+        assert cfg.index_dir is not None
+        train_ds: Dataset[tuple] = IndexedImageFolder(cfg.train_dir, cfg.index_dir, train_tf)
+    else:
+        train_ds = ImageFolder(str(cfg.train_dir), train_tf)
+    val_ds: Dataset[tuple] = ImageFolder(str(cfg.val_dir), val_tf)
+
+    assert len(train_ds) > 0, "train dataset empty"
+    assert len(val_ds) > 0, "val dataset empty"
+    log.info(f"Datasets: train={len(train_ds):,}, val={len(val_ds):,}")
+
+    # Create loaders per grid size (different batch sizes)
     train_loaders: dict[int, InfiniteLoader] = {}
     val_loaders: dict[int, InfiniteLoader] = {}
+    persistent = cfg.num_workers > 0
 
     for G, stage in stages.items():
-        sz = stage.scene_size_px
-        train_tf = train_transform(sz, (cfg.crop_scale_min, 1.0))
-        val_tf = val_transform(sz)
-
-        if use_indexed:
-            assert cfg.index_dir is not None
-            train_ds: Dataset[tuple] = IndexedImageFolder(cfg.train_dir, cfg.index_dir, train_tf)
-        else:
-            train_ds = ImageFolder(str(cfg.train_dir), train_tf)
-        val_ds: Dataset[tuple] = ImageFolder(str(cfg.val_dir), val_tf)
-
-        assert len(train_ds) > 0, "train dataset empty"
-        assert len(val_ds) > 0, "val dataset empty"
-        log.info(f"  G={G}: train={len(train_ds):,}, val={len(val_ds):,}")
-
-        persistent = cfg.num_workers > 0
         train_loaders[G] = InfiniteLoader(DataLoader(
             train_ds, batch_size=stage.fresh_count, shuffle=True,
             num_workers=cfg.num_workers, pin_memory=True, drop_last=True, persistent_workers=persistent,
@@ -102,5 +106,6 @@ def create_loaders(
             val_ds, batch_size=stage.fresh_count, shuffle=False,
             num_workers=cfg.num_workers, pin_memory=True, drop_last=True, persistent_workers=persistent,
         ))
+        log.info(f"  G={G}: fresh_count={stage.fresh_count}")
 
     return train_loaders, val_loaders
