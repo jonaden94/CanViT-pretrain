@@ -44,7 +44,8 @@ class CanViTConfig:
     layer_scale_init: float = 1e-3
     canvas_num_heads: int = 2
     canvas_head_dim: int = 256  # canvas_dim = 2 * 256 = 512
-    canvas_dtype: str = "bfloat16"  # getattr(torch, canvas_dtype)
+    canvas_persistence_dtype: str = "float32"  # canvas state dtype
+    canvas_attention_dtype: str = "bfloat16"  # cross-attention dtype
     read_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
     write_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
 
@@ -90,17 +91,19 @@ class CanViT(nn.Module):
         canvas_num_heads = cfg.canvas_num_heads
         canvas_head_dim = cfg.canvas_head_dim
         canvas_dim = canvas_num_heads * canvas_head_dim
-        canvas_dtype = getattr(torch, cfg.canvas_dtype)
+        persistence_dtype = getattr(torch, cfg.canvas_persistence_dtype)
+        attention_dtype = getattr(torch, cfg.canvas_attention_dtype)
 
         n_blocks = backbone.n_blocks
         n_adapters = (n_blocks - 1) // cfg.adapter_stride
 
+        # Cross-attention in attention_dtype
         self.read_attn = nn.ModuleList(
             [
                 ScaledResidualAttention(
                     ReadCrossAttention(local_dim, canvas_dim, canvas_num_heads, cfg.read_attention),
                     cfg.layer_scale_init,
-                )
+                ).to(attention_dtype)
                 for _ in range(n_adapters)
             ]
         )
@@ -111,23 +114,23 @@ class CanViT(nn.Module):
                         local_dim, canvas_dim, canvas_num_heads, cfg.write_attention
                     ),
                     cfg.layer_scale_init,
-                )
+                ).to(attention_dtype)
                 for _ in range(n_adapters)
             ]
         )
 
-        # Canvas init (1/sqrt(dim) for unit L2 norm)
+        # Canvas init in persistence_dtype
         scale = 1.0 / math.sqrt(canvas_dim)
-        self.cls_init = nn.Parameter(torch.randn(1, 1, canvas_dim, dtype=canvas_dtype) * scale)
-        self.spatial_init = nn.Parameter(torch.randn(1, 1, canvas_dim, dtype=canvas_dtype) * scale)
+        self.cls_init = nn.Parameter(torch.randn(1, 1, canvas_dim, dtype=persistence_dtype) * scale)
+        self.spatial_init = nn.Parameter(torch.randn(1, 1, canvas_dim, dtype=persistence_dtype) * scale)
         self.registers = nn.Parameter(
-            torch.randn(1, cfg.n_canvas_registers, canvas_dim, dtype=canvas_dtype) * scale
+            torch.randn(1, cfg.n_canvas_registers, canvas_dim, dtype=persistence_dtype) * scale
         )
 
-        # Canvas normalization (gamma = 1/sqrt(dim) to preserve scale)
-        self.cls_ln = nn.LayerNorm(canvas_dim)
-        self.reg_ln = nn.LayerNorm(canvas_dim)
-        self.spatial_ln = nn.LayerNorm(canvas_dim)
+        # Canvas normalization in attention_dtype (applied before cross-attention)
+        self.cls_ln = nn.LayerNorm(canvas_dim, dtype=attention_dtype)
+        self.reg_ln = nn.LayerNorm(canvas_dim, dtype=attention_dtype)
+        self.spatial_ln = nn.LayerNorm(canvas_dim, dtype=attention_dtype)
         nn.init.constant_(self.cls_ln.weight, scale)
         nn.init.constant_(self.reg_ln.weight, scale)
         nn.init.constant_(self.spatial_ln.weight, scale)
@@ -158,6 +161,14 @@ class CanViT(nn.Module):
     @property
     def n_adapters(self) -> int:
         return len(self.read_attn)
+
+    @property
+    def persistence_dtype(self) -> torch.dtype:
+        return getattr(torch, self.cfg.canvas_persistence_dtype)
+
+    @property
+    def attention_dtype(self) -> torch.dtype:
+        return getattr(torch, self.cfg.canvas_attention_dtype)
 
     def prepare_canvas(self, canvas: Tensor) -> Tensor:
         """Normalize canvas components [cls | registers | spatial]."""
@@ -191,8 +202,11 @@ class CanViT(nn.Module):
         - backbone_rope_periods: for backbone self-attention (head_dim = local_dim/H)
         - canvas_rope_periods: for cross-attention (head_dim = canvas_dim/H)
         Same positions, different frequency encodings.
+
+        Canvas persists in persistence_dtype, cross-attention in attention_dtype.
         """
         local, H, W = self.backbone.prepare_tokens(glimpse)
+        local_dtype = local.dtype
         assert local_positions.shape[1] == H * W
 
         # RoPE for backbone self-attention
@@ -201,16 +215,23 @@ class CanViT(nn.Module):
         local_rope_xattn = RoPE(*compute_rope(local_positions, self.canvas_rope_periods))
         canvas_rope = RoPE(*compute_rope(canvas_positions, self.canvas_rope_periods))
 
-        canvas = self.prepare_canvas(canvas)
+        # Cast canvas to attention_dtype for LayerNorm + cross-attention
+        canvas = self.prepare_canvas(canvas.to(self.attention_dtype))
 
         stride = self.cfg.adapter_stride
         for i in range(self.backbone.n_blocks):
             if i >= stride and i % stride == 0:
                 a = i // stride - 1
-                local = self.read_attn[a](local, canvas, local_rope_xattn, canvas_rope)
+                # Cross-attention in attention_dtype
+                local = self.read_attn[a](
+                    local.to(self.attention_dtype), canvas, local_rope_xattn, canvas_rope
+                ).to(local_dtype)
                 local = self.backbone.forward_block(i, local, local_rope_backbone)
-                canvas = self.write_attn[a](canvas, local, canvas_rope, local_rope_xattn)
+                canvas = self.write_attn[a](
+                    canvas, local.to(self.attention_dtype), canvas_rope, local_rope_xattn
+                )
             else:
                 local = self.backbone.forward_block(i, local, local_rope_backbone)
 
-        return local, canvas
+        # Return canvas in persistence_dtype
+        return local, canvas.to(self.persistence_dtype)
