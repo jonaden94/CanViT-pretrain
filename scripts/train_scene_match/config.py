@@ -3,11 +3,28 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import torch
 from ytch.device import get_sensible_device
 
 from avp_vit import ActiveCanViTConfig
 from avp_vit.train import LossType
+
+
+def log_spaced_steps(n: int, max_step: int, K: float | None = None) -> frozenset[int]:
+    """
+    n steps from 0 to max_step with geometrically increasing gaps.
+    K = last_gap / first_gap (default: n).
+    """
+    assert n > 1
+    n_gaps = n - 1
+    K = K if K is not None else float(n)
+    r = K ** (1 / (n_gaps - 1))
+    g1 = max_step * (r - 1) / (r**n_gaps - 1)
+
+    gaps = g1 * (r ** np.arange(n_gaps))
+    steps = np.concatenate([[0], np.cumsum(gaps)])
+    return frozenset(int(round(s)) for s in steps)
 
 
 @dataclass
@@ -59,8 +76,8 @@ class Config:
     # Logging
     log_every: int = 20
     val_every: int = 250
-    viz_every: int = 500  # PCA viz (expensive) less often than val
-    curve_every: int = 5000  # Curves less often than val (Comet limit: 1000/experiment)
+    total_viz: int = 100  # PCA viz count (log-spaced, denser early)
+    total_curves: int = 50  # Curve count (log-spaced)
     ckpt_every: int = 5000
     log_spatial_stats: bool = True  # Log target/pred spatial mean/std
     # Compilation

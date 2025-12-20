@@ -20,7 +20,7 @@ from avp_vit.train import InfiniteLoader, SurvivalBatch, get_loss_fn, warmup_cos
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import random_viewpoint
 
-from .config import Config
+from .config import Config, log_spaced_steps
 from .data import ResolutionStage, create_loaders, create_resolution_stages
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher
 from .viz import eval_and_log, log_norm_stats, val_metrics_only, viz_and_log
@@ -186,6 +186,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     scheduler = warmup_cosine_scheduler(optimizer, cfg.n_steps, cfg.warmup_steps)
     log.info(f"Optimizer: AdamW, peak_lr={peak_lr:.2e}, weight_decay={cfg.weight_decay:.2e}")
 
+    # Precompute log-spaced viz/curve steps (denser early in training)
+    viz_steps = log_spaced_steps(cfg.total_viz, cfg.n_steps)
+    curve_steps = log_spaced_steps(cfg.total_curves, cfg.n_steps)
+    log.info(f"Viz steps: {len(viz_steps)} points, curves: {len(curve_steps)} points")
+
     # Load model weights from checkpoint if specified
     if cfg.resume_ckpt is not None:
         ckpt_data = load_checkpoint(cfg.resume_ckpt, cfg.device)
@@ -343,8 +348,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             for name, norm in grad_norms_by_module(model, depth=1).items():
                 exp.log_metric(f"grad_norm/{name}", norm, step=step)
 
-            # Fast validation (skip at viz_every - eval_and_log covers the same metrics)
-            if step % cfg.viz_every != 0:
+            # Fast validation (skip at viz steps - eval_and_log covers the same metrics)
+            if step not in viz_steps:
                 val_images = val_loader.next_batch().to(cfg.device)
                 val_scene_l1 = val_metrics_only(
                     exp, step, model, compute_raw_targets, scene_norm, cls_norm,
@@ -358,8 +363,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                     exp.end()
                     raise optuna.TrialPruned()
 
-        # Full viz with PCA (expensive, less frequent)
-        if step % cfg.viz_every == 0:
+        # Full viz with PCA (expensive, log-spaced)
+        if step in viz_steps:
             train_viz = viz_and_log(
                 exp, step, f"grid{G}/train", model, teacher, scene_norm,
                 state.images, viewpoints, state.targets, state.canvas,
@@ -373,7 +378,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 exp, step, model, teacher, compute_raw_targets, scene_norm, cls_norm,
                 val_images, G, f"grid{G}/val",
                 log_spatial_stats=cfg.log_spatial_stats,
-                log_curves=(step % cfg.curve_every == 0),
+                log_curves=(step in curve_steps),
                 loss_type=cfg.loss,
             )
             exp.log_metric("val/scene_l1", val_scene_l1, step=step)
