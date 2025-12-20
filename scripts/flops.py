@@ -116,17 +116,19 @@ def main() -> None:
 
     # ViT-S/16 parameters
     local_dim = 384
-    canvas_dim = 768  # 2x local_dim
-    n_registers = 32
-    n_prefix = 1  # CLS
+    canvas_dim = 512  # 2 heads × 256 head_dim (from CanViTConfig)
+    n_backbone_prefix = 5  # 1 CLS + 4 registers (DINOv3)
+    n_canvas_registers = 32
 
     glimpse_grids = [2]
-    canvas_grids = [16, 32, 64, 128]
+    canvas_grids = [16, 32, 64, 128, 256, 512]
+    patch_size = 16
 
     # Table: Cross-Attention FLOPs per Adapter
     table = Table(title=f"Cross-Attention FLOPs per Adapter (ViT-S local={local_dim}, canvas={canvas_dim})")
-    table.add_column("Glimpse", style="bold")
     table.add_column("Canvas", style="bold")
+    table.add_column("Pixels", style="dim")
+    table.add_column("Tokens", style="dim", justify="right")
     table.add_column("Attention", style="bold")
     table.add_column("SDPA", justify="right")
     table.add_column("Proj", justify="right")
@@ -134,8 +136,9 @@ def main() -> None:
 
     for g in glimpse_grids:
         for c in canvas_grids:
-            n_local = g * g + n_prefix
-            n_canvas = c * c + n_registers
+            n_local = n_backbone_prefix + g * g  # prefix + patches
+            n_canvas = 1 + n_canvas_registers + c * c  # CLS + registers + spatial
+            canvas_px = c * patch_size
 
             # SDPA is same for both (read + write, in canvas_dim space)
             sdpa = sdpa_flops(n_local, n_canvas, canvas_dim) + sdpa_flops(n_canvas, n_local, canvas_dim)
@@ -149,14 +152,16 @@ def main() -> None:
             can_total = sdpa + can_proj
 
             table.add_row(
-                f"{g}×{g}",
                 f"{c}×{c}",
+                f"{canvas_px}px",
+                f"{n_canvas:,}",
                 "Regular",
                 fmt(sdpa),
                 fmt(reg_proj),
                 fmt(reg_total),
             )
             table.add_row(
+                "",
                 "",
                 "",
                 "[cyan]Canvas[/cyan]",
@@ -166,6 +171,7 @@ def main() -> None:
             )
             # Multiplier row
             table.add_row(
+                "",
                 "",
                 "",
                 "[green]×[/green]",
