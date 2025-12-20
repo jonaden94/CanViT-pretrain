@@ -17,6 +17,7 @@ from canvit.attention import (
     ScaledResidualAttention,
     WriteCrossAttention,
 )
+from ytch.nn.layer_scale import LayerScale
 from canvit.backbone import ViTBackbone
 from canvit.rope import compute_rope, make_rope_periods
 
@@ -46,6 +47,7 @@ class CanViTConfig:
     canvas_head_dim: int = 256  # canvas_dim = 2 * 256 = 512
     canvas_persistence_dtype: str = "float32"  # canvas state dtype
     canvas_attention_dtype: str = "bfloat16"  # cross-attention dtype
+    use_canvas_layer_scale: bool = False
     read_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
     write_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
 
@@ -77,6 +79,7 @@ class CanViT(nn.Module):
     cls_ln: nn.LayerNorm
     reg_ln: nn.LayerNorm
     spatial_ln: nn.LayerNorm
+    canvas_layer_scale: LayerScale | None
     # RoPE periods for cross-attention
     # Backbone self-attn uses backbone.rope_periods (backbone_head_dim = local_dim / backbone.num_heads)
     # Cross-attn uses canvas_rope_periods (canvas_head_dim from config)
@@ -135,6 +138,13 @@ class CanViT(nn.Module):
         nn.init.constant_(self.reg_ln.weight, scale)
         nn.init.constant_(self.spatial_ln.weight, scale)
 
+        if cfg.use_canvas_layer_scale:
+            self.canvas_layer_scale = LayerScale(canvas_dim, init_values=cfg.layer_scale_init).to(
+                attention_dtype
+            )
+        else:
+            self.canvas_layer_scale = None
+
         # RoPE periods for cross-attention (canvas_head_dim)
         self.register_buffer(
             "canvas_rope_periods",
@@ -171,12 +181,15 @@ class CanViT(nn.Module):
         return getattr(torch, self.cfg.canvas_attention_dtype)
 
     def prepare_canvas(self, canvas: Tensor) -> Tensor:
-        """Normalize canvas components [cls | registers | spatial]."""
+        """Normalize canvas components [cls | registers | spatial], optionally apply layer scale."""
         n_reg = self.n_canvas_registers
         cls = self.cls_ln(canvas[:, :1])
         reg = self.reg_ln(canvas[:, 1 : 1 + n_reg])
         spatial = self.spatial_ln(canvas[:, 1 + n_reg :])
-        return torch.cat([cls, reg, spatial], dim=1)
+        out = torch.cat([cls, reg, spatial], dim=1)
+        if self.canvas_layer_scale is not None:
+            out = self.canvas_layer_scale(out)
+        return out
 
     def init_canvas(self, batch_size: int, canvas_grid_size: int) -> Tensor:
         """Create initial canvas [B, 1 + n_reg + G*G, canvas_dim]."""
