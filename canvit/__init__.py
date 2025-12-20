@@ -10,6 +10,7 @@ from typing import NamedTuple, final
 
 import torch
 from torch import Tensor, nn
+from ytch.nn.layer_scale import LayerScale
 
 from canvit.attention import (
     CrossAttentionConfig,
@@ -17,7 +18,6 @@ from canvit.attention import (
     ScaledResidualAttention,
     WriteCrossAttention,
 )
-from ytch.nn.layer_scale import LayerScale
 from canvit.backbone import ViTBackbone
 from canvit.rope import compute_rope, make_rope_periods
 
@@ -47,7 +47,7 @@ class CanViTConfig:
     canvas_head_dim: int = 256  # canvas_dim = 2 * 256 = 512
     canvas_persistence_dtype: str = "float32"  # canvas state dtype
     canvas_attention_dtype: str = "bfloat16"  # cross-attention dtype
-    use_canvas_layer_scale: bool = False
+    use_canvas_layer_scale: bool = True
     read_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
     write_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
 
@@ -125,7 +125,9 @@ class CanViT(nn.Module):
         # Canvas init in persistence_dtype
         scale = 1.0 / math.sqrt(canvas_dim)
         self.cls_init = nn.Parameter(torch.randn(1, 1, canvas_dim, dtype=persistence_dtype) * scale)
-        self.spatial_init = nn.Parameter(torch.randn(1, 1, canvas_dim, dtype=persistence_dtype) * scale)
+        self.spatial_init = nn.Parameter(
+            torch.randn(1, 1, canvas_dim, dtype=persistence_dtype) * scale
+        )
         self.registers = nn.Parameter(
             torch.randn(1, cfg.n_canvas_registers, canvas_dim, dtype=persistence_dtype) * scale
         )
