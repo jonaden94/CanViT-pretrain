@@ -254,7 +254,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
         # Inner loop: multiple viewpoints per optimizer step
         viewpoints = [
-            random_viewpoint(stage.batch_size, cfg.device, cfg.viewpoint_scale)
+            random_viewpoint(stage.batch_size, cfg.device)
             for _ in range(cfg.n_viewpoints_per_step)
         ]
         losses, final_canvas = model.forward_loss(

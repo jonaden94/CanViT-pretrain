@@ -1,51 +1,38 @@
 """Tests for viewpoint sampling."""
 
-import math
-
 import torch
 
-from avp_vit.train.viewpoint import ViewpointScaleConfig, make_eval_viewpoints, random_viewpoint
+from avp_vit.train.viewpoint import make_eval_viewpoints, random_viewpoint
 
 
 def test_random_viewpoint_shapes():
     B = 8
-    cfg = ViewpointScaleConfig()
-    vp = random_viewpoint(B, torch.device("cpu"), cfg)
+    vp = random_viewpoint(B, torch.device("cpu"))
     assert vp.centers.shape == (B, 2)
     assert vp.scales.shape == (B,)
 
 
-def test_random_viewpoint_centers_uniform():
-    """Centers sampled uniformly, constrained to allow min_scale."""
+def test_random_viewpoint_centers_symmetric():
+    """Centers are symmetric around origin (mean ≈ 0)."""
     B = 10000
-    cfg = ViewpointScaleConfig()
-    min_scale = cfg.min_area ** 0.5
-    max_center = 1 - min_scale
-    vp = random_viewpoint(B, torch.device("cpu"), cfg)
-    # All centers in valid range
-    assert (vp.centers >= -max_center - 1e-6).all()
-    assert (vp.centers <= max_center + 1e-6).all()
-    # Roughly uniform (mean ≈ 0)
+    vp = random_viewpoint(B, torch.device("cpu"))
     assert vp.centers.mean().abs() < 0.05
+
+
+def test_random_viewpoint_centers_in_safe_box():
+    """Each center lies within its scale's safe box: |center| ≤ 1 - scale."""
+    B = 10000
+    vp = random_viewpoint(B, torch.device("cpu"))
+    L = 1 - vp.scales
+    assert (vp.centers.abs() <= L.unsqueeze(1) + 1e-6).all()
 
 
 def test_random_viewpoint_fits():
     """Viewpoint always fits: |center| + scale ≤ 1."""
     B = 10000
-    cfg = ViewpointScaleConfig()
-    vp = random_viewpoint(B, torch.device("cpu"), cfg)
-    # For each dim: |center| + scale ≤ 1
+    vp = random_viewpoint(B, torch.device("cpu"))
     margin = vp.centers.abs() + vp.scales.unsqueeze(1)
     assert (margin <= 1 + 1e-6).all()
-
-
-def test_random_viewpoint_min_scale():
-    """Scale never below sqrt(min_area)."""
-    B = 10000
-    min_area = 0.01
-    cfg = ViewpointScaleConfig(min_area=min_area)
-    vp = random_viewpoint(B, torch.device("cpu"), cfg)
-    assert (vp.scales >= math.sqrt(min_area) - 1e-6).all()
 
 
 def test_eval_viewpoints():

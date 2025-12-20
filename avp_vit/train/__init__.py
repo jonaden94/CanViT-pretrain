@@ -12,7 +12,6 @@ from avp_vit.train.loss import LOSS_FNS, LossFn, LossType, cos_dissim, get_loss_
 from avp_vit.train.scheduler import warmup_cosine_scheduler
 from avp_vit.train.state import SurvivalBatch
 from avp_vit.train.viewpoint import (
-    ViewpointScaleConfig,
     make_eval_viewpoints,
     random_viewpoint,
 )
@@ -35,7 +34,6 @@ __all__ = [
     "LossFn",
     "LossType",
     "SurvivalBatch",
-    "ViewpointScaleConfig",
     "cos_dissim",
     "fit_pca",
     "get_loss_fn",

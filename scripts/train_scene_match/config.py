@@ -8,7 +8,6 @@ from ytch.device import get_sensible_device
 
 from avp_vit import ActiveCanViTConfig
 from avp_vit.train import LossType
-from avp_vit.train.viewpoint import ViewpointScaleConfig
 
 
 @dataclass
@@ -37,7 +36,6 @@ class Config:
     n_viewpoints_per_step: int = (
         2  # Inner loop viewpoints (>=2 for length generalization)
     )
-    viewpoint_scale: ViewpointScaleConfig = field(default_factory=ViewpointScaleConfig)
     warmup_steps: int = 100_000
     grad_clip: float = 1.0
     # at 128 fresh images per optimizer step, that's
