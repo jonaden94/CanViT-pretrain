@@ -11,6 +11,7 @@ import torch
 from torch import Tensor
 
 from avp_vit import ActiveCanViT
+from canvit import CanViTConfig
 from canvit.attention import CrossAttentionConfig
 
 # Field renames for legacy checkpoint migration
@@ -128,7 +129,7 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
             migrated = {_CROSS_ATTN_RENAMES.get(k, k): v for k, v in old_dict.items()}
             filtered = {k: v for k, v in migrated.items() if k in _CROSS_ATTN_FIELDS}
             canvit_config[key] = CrossAttentionConfig(**filtered)
-    model_config["canvit"] = canvit_config
+    model_config["canvit"] = CanViTConfig(**canvit_config)
 
     data: CheckpointData = {
         "state_dict": _strip_orig_mod(raw["state_dict"]),
