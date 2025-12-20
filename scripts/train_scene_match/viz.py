@@ -80,6 +80,7 @@ def viz_and_log(
     log_spatial_stats: bool = True,
     log_curves: bool = True,
     loss_type: LossType = "mse",
+    show_locals: bool = False,
 ) -> VizResult:
     """Run forward trajectory and log visualization."""
     assert isinstance(model.backbone, DINOv3Backbone)
@@ -247,6 +248,7 @@ def viz_and_log(
         hidden_spatials=canvas_spatials,
         initial_hidden_spatial=initial_canvas_spatial,
         locals_teacher_cropped=locals_teacher_cropped,
+        show_locals=show_locals,
     )
     log_figure(exp, fig_pca, f"{prefix}/pca", step)
 
@@ -308,6 +310,7 @@ def eval_and_log(
     log_spatial_stats: bool = True,
     log_curves: bool = True,
     loss_type: LossType = "mse",
+    show_locals: bool = False,
 ) -> float:
     """Full evaluation with PCA visualization (expensive). Returns final scene l1 loss (normalized)."""
     B = images.shape[0]
@@ -322,6 +325,7 @@ def eval_and_log(
         exp, step, prefix, model, teacher, scene_normalizer,
         images, viewpoints, target, canvas,
         log_spatial_stats=log_spatial_stats, log_curves=log_curves, loss_type=loss_type,
+        show_locals=show_locals,
     )
 
     # Log normalized scene metrics - per timestep and final
