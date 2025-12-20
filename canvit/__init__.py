@@ -75,10 +75,7 @@ class CanViT(nn.Module):
     cls_init: nn.Parameter
     spatial_init: nn.Parameter
     registers: nn.Parameter
-    # Canvas normalization (always enabled)
-    cls_ln: nn.LayerNorm
-    reg_ln: nn.LayerNorm
-    spatial_ln: nn.LayerNorm
+    # Canvas layer scales (gate previous canvas contribution)
     cls_scale: nn.Parameter | None
     reg_scales: nn.Parameter | None
     spatial_scale: nn.Parameter | None
@@ -126,13 +123,6 @@ class CanViT(nn.Module):
         self.spatial_init = nn.Parameter(torch.randn(1, 1, canvas_dim) * scale)
         self.registers = nn.Parameter(torch.randn(1, cfg.n_canvas_registers, canvas_dim) * scale)
 
-        self.cls_ln = nn.LayerNorm(canvas_dim)
-        self.reg_ln = nn.LayerNorm(canvas_dim)
-        self.spatial_ln = nn.LayerNorm(canvas_dim)
-        nn.init.constant_(self.cls_ln.weight, scale)
-        nn.init.constant_(self.reg_ln.weight, scale)
-        nn.init.constant_(self.spatial_ln.weight, scale)
-
         if cfg.use_canvas_layer_scale:
             init = cfg.layer_scale_init
             self.cls_scale = nn.Parameter(torch.full((canvas_dim,), init))
@@ -170,28 +160,48 @@ class CanViT(nn.Module):
     def n_adapters(self) -> int:
         return len(self.read_attn)
 
-    def prepare_canvas(self, canvas: Tensor) -> Tensor:
-        """Normalize canvas components [cls | registers | spatial], optionally apply layer scale."""
+    def prepare_canvas(self, previous: Tensor) -> Tensor:
+        """Prepare canvas via leaky integration toward inits.
+
+        Formula: canvas = inits + λ*(previous - inits) = (1-λ)*inits + λ*previous
+
+        At step 0 (previous=inits from init_canvas), returns exact inits.
+        At step t, blends inits with previous; older residuals decay as λ^t.
+        """
+        B = previous.shape[0]
         n_reg = self.n_canvas_registers
-        cls = self.cls_ln(canvas[:, :1])
-        reg = self.reg_ln(canvas[:, 1 : 1 + n_reg])
-        spatial = self.spatial_ln(canvas[:, 1 + n_reg :])
+        n_spatial = previous.shape[1] - self.n_prefix
+
+        # Expand inits to batch size
+        cls_init = self.cls_init.expand(B, -1, -1)
+        reg_init = self.registers.expand(B, -1, -1)
+        spatial_init = self.spatial_init.expand(B, n_spatial, -1)
+
         if self.cls_scale is not None:
-            cls = cls * self.cls_scale
-            reg = reg * self.reg_scales
-            spatial = spatial * self.spatial_scale
+            assert self.reg_scales is not None and self.spatial_scale is not None
+            # Leaky integration: inits + λ*(prev - inits)
+            cls = cls_init + self.cls_scale * (previous[:, :1] - cls_init)
+            reg = reg_init + self.reg_scales * (previous[:, 1 : 1 + n_reg] - reg_init)
+            spatial = spatial_init + self.spatial_scale * (previous[:, 1 + n_reg :] - spatial_init)
+        else:
+            # No layer scale: pass through previous unchanged
+            cls = previous[:, :1]
+            reg = previous[:, 1 : 1 + n_reg]
+            spatial = previous[:, 1 + n_reg :]
+
         return torch.cat([cls, reg, spatial], dim=1)
 
     def init_canvas(self, batch_size: int, canvas_grid_size: int) -> Tensor:
-        """Create initial canvas [B, 1 + n_reg + G*G, canvas_dim]."""
+        """Create initial canvas from learned inits [B, 1 + n_reg + G*G, canvas_dim].
+
+        Base case for recurrence: prepare_canvas(inits) = inits (exactly).
+        """
         B = batch_size
         n_spatial = canvas_grid_size**2
         cls = self.cls_init.expand(B, -1, -1)
-        regs = self.registers.expand(B, -1, -1)
+        reg = self.registers.expand(B, -1, -1)
         spatial = self.spatial_init.expand(B, n_spatial, -1)
-        out = torch.cat([cls, regs, spatial], dim=1)
-        assert out.shape == (B, self.n_prefix + n_spatial, self.canvas_dim)
-        return out
+        return torch.cat([cls, reg, spatial], dim=1)
 
     def compile(self, **kwargs) -> None:
         """Compile model components for faster execution."""
