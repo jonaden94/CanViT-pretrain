@@ -120,8 +120,8 @@ def main() -> None:
     n_registers = 32
     n_prefix = 1  # CLS
 
-    glimpse_grids = [2, 4, 8]
-    canvas_grids = [16, 32]
+    glimpse_grids = [2]
+    canvas_grids = [16, 32, 64, 128]
 
     # Table: Cross-Attention FLOPs per Adapter
     table = Table(title=f"Cross-Attention FLOPs per Adapter (ViT-S local={local_dim}, canvas={canvas_dim})")
@@ -206,7 +206,7 @@ def verify_formulas() -> None:
 
     local_dim = model.local_dim
     canvas_dim = model.canvas_dim
-    glimpse_grid, canvas_grid = 8, 16
+    glimpse_grid, canvas_grid = 2, 16
     n_local = backbone.n_prefix_tokens + glimpse_grid * glimpse_grid
     n_canvas = model.n_prefix + canvas_grid * canvas_grid
 
@@ -220,11 +220,12 @@ def verify_formulas() -> None:
     # Formula prediction
     predicted = canvas_attention_flops(n_local, n_canvas, local_dim, canvas_dim)
 
-    print(f"\n[bold]Formula verification (8×8 → 16×16, local={local_dim}, canvas={canvas_dim}):[/bold]")
-    print(f"  Actual (model):   {actual_total:,}")
-    print(f"  Predicted:        {predicted:,}")
+    from rich import print as rprint
+    rprint(f"\n[bold]Formula verification (2×2 → 16×16, local={local_dim}, canvas={canvas_dim}):[/bold]")
+    rprint(f"  Actual (model):   {actual_total:,}")
+    rprint(f"  Predicted:        {predicted:,}")
     assert actual_total == predicted, f"Mismatch: {actual_total} != {predicted}"
-    print("  ✓ Match!")
+    rprint("  [green]✓ Match![/green]")
 
 
 if __name__ == "__main__":
