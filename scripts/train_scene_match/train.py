@@ -5,6 +5,7 @@ import random
 from collections.abc import Callable
 
 import comet_ml
+import numpy as np
 import optuna
 import torch
 from torch import Tensor, nn
@@ -20,12 +21,29 @@ from avp_vit.train import InfiniteLoader, SurvivalBatch, get_loss_fn, warmup_cos
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import random_viewpoint
 
-from .config import Config, log_spaced_steps
+from .config import Config
 from .data import ResolutionStage, create_loaders, create_resolution_stages
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher
 from .viz import eval_and_log, log_norm_stats, val_metrics_only, viz_and_log
 
 log = logging.getLogger(__name__)
+
+
+def log_spaced_steps(n: int, max_step: int, K: float | None = None) -> frozenset[int]:
+    """
+    Generate n steps from 0 to max_step with geometrically increasing gaps.
+
+    Gaps form a geometric series: g, g*r, g*r², ... ensuring monotonic increase.
+    K controls the spread (last_gap / first_gap), defaulting to n.
+    """
+    assert n > 1
+    n_gaps = n - 1
+    K = K if K is not None else float(n)
+    r = K ** (1 / (n_gaps - 1))
+    g1 = max_step * (r - 1) / (r**n_gaps - 1)
+    gaps = g1 * (r ** np.arange(n_gaps))
+    steps = np.concatenate([[0], np.cumsum(gaps)])
+    return frozenset(int(round(s)) for s in steps)
 
 
 def grad_norms_by_module(model: nn.Module, depth: int = 1) -> dict[str, float]:
