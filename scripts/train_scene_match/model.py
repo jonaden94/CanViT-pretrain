@@ -93,7 +93,7 @@ def create_model(
     model = ActiveCanViT(student_backbone, cfg.model, teacher_dim).to(cfg.device)
 
     log.info(
-        f"Model created: grid_sizes={cfg.grid_sizes}, "
+        f"Model created: grid_size={cfg.grid_size}, "
         f"glimpse={cfg.model.glimpse_grid_size}x{cfg.model.glimpse_grid_size} ({glimpse_px}px), "
         f"student_dim={student_backbone.embed_dim} -> teacher_dim={teacher_dim}, "
         f"freeze_student_backbone={cfg.freeze_student_backbone}"
