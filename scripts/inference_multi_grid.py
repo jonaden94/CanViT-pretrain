@@ -350,7 +350,7 @@ def main(args: Args) -> None:
 
         for t, proj in enumerate(projected_list):
             ax = axes[row_proj, t + 1]
-            rgb = pca_rgb(pca_scene, proj, G, G)
+            rgb = pca_rgb(pca_scene, proj, G, G, normalize=True)
             ax.imshow(rgb)
             draw_trajectory(ax, viewpoints, colors, g_H, g_W, up_to=t, alpha=0.5)
             ax.set_xticks([])
