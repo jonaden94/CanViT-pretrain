@@ -15,22 +15,23 @@ class Config:
     teacher_model: str = "dinov3_vits16"
     teacher_ckpt: Path = Path("dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
     # Student
-    student_model: str = "dinov3_vitl16"
+    student_model: str = "dinov3_vits16"
     student_ckpt: Path | None = None  # None = random init
     freeze_student_backbone: bool = False
     # Model config (PretrainingConfig via alias)
-    model: ActiveCanViTConfig = field(default_factory=ActiveCanViTConfig)
+    model: ActiveCanViTConfig = field(default_factory=lambda: ActiveCanViTConfig())
     # Glimpse/canvas sizes (runtime, not in model config)
+    gram_loss_weight: float = 1.0
     glimpse_grid_size: int = 4  # tokens per glimpse side
-    grid_size: int = 16  # canvas grid size
+    grid_size: int = 32  # canvas grid size
     # Training
     batch_size: int = 128
-    p_reset: float = 0.5  # Probability of resetting canvas each step
-    peak_lr: float = 1e-4
-    weight_decay: float = 0.05
+    p_reset: float = 0  # Probability of resetting canvas each step
+    peak_lr: float = 1e-3
+    weight_decay: float = 0.05  # standard in ViTs
     n_viewpoints_per_step: int = 2  # Inner loop viewpoints
-    min_viewpoint_scale: float = 0.0  # Minimum scale for random viewpoints
-    warmup_steps: int = 100_000
+    min_viewpoint_scale: float = 0.125  # Minimum scale for random viewpoints
+    warmup_steps: int = 10_000
     grad_clip: float = 1.0
     n_steps: int = 2_000_000
     # Target normalization
@@ -46,7 +47,6 @@ class Config:
     num_workers: int = 8
     crop_scale_min: float = 0.8
     image_resolution: int = 512
-    gram_loss_weight: float = 0.0
     # Logging
     log_every: int = 20
     val_every: int = 250
