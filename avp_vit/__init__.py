@@ -5,21 +5,22 @@ Re-exports from canvit for backward compatibility.
 
 from canvit import CanViT, CanViTConfig
 from canvit.attention import CanvasAttentionConfig
+from canvit.gram import gram_mse, spatial_gram
 from canvit.model.active.pretraining import (
     ActiveCanViTForReconstructivePretraining as ActiveCanViT,
     ActiveCanViTForReconstructivePretrainingConfig as ActiveCanViTConfig,
     LossOutputs,
     PretrainingGlimpseOutput as StepOutput,
-    gram_mse,
 )
 
 __all__ = [
+    "ActiveCanViT",
+    "ActiveCanViTConfig",
     "CanViT",
     "CanViTConfig",
     "CanvasAttentionConfig",
-    "ActiveCanViT",
-    "ActiveCanViTConfig",
     "LossOutputs",
     "StepOutput",
     "gram_mse",
+    "spatial_gram",
 ]
