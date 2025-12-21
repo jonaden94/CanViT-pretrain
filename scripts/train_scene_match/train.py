@@ -221,7 +221,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             viewpoints = [Viewpoint.full_scene(cfg.batch_size, cfg.device) for _ in range(cfg.n_viewpoints_per_step)]
             force_random_reset = True
         else:
-            viewpoints = [random_viewpoint(cfg.batch_size, cfg.device) for _ in range(cfg.n_viewpoints_per_step)]
+            viewpoints = [random_viewpoint(cfg.batch_size, cfg.device, min_scale=cfg.min_viewpoint_scale) for _ in range(cfg.n_viewpoints_per_step)]
             force_random_reset = False
 
         with amp_ctx:
@@ -325,6 +325,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             save_checkpoint(
                 ckpt_path, model, cfg.student_model,
                 step=step, train_loss=ema_loss_t.item(), comet_id=exp.get_key(),
+                scene_norm_state=scene_norm.state_dict(),
+                cls_norm_state=cls_norm.state_dict(),
             )
             exp.log_metric("norm/scene_mean_norm", scene_norm.mean.norm().item(), step=step)
             exp.log_metric("norm/cls_mean_norm", cls_norm.mean.norm().item(), step=step)
@@ -332,6 +334,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     save_checkpoint(
         ckpt_path, model, cfg.student_model,
         step=cfg.n_steps, train_loss=ema_loss_t.item(), comet_id=exp.get_key(),
+        scene_norm_state=scene_norm.state_dict(),
+        cls_norm_state=cls_norm.state_dict(),
     )
 
     log.info(f"Final: train_ema={ema_loss_t.item():.4f}")

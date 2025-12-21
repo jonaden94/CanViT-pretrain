@@ -7,12 +7,17 @@ import torch
 from avp_vit.glimpse import Viewpoint
 
 
-def random_viewpoint(B: int, device: torch.device) -> Viewpoint:
+def random_viewpoint(
+    B: int,
+    device: torch.device,
+    min_scale: float = 0.0,
+    max_scale: float = 1.0,
+) -> Viewpoint:
     """Sample random viewpoints with uniform safe-box-area distribution.
 
     Geometry
     --------
-    A viewpoint has center (x, y) ∈ [-1, 1]² and scale s ∈ (0, 1].
+    A viewpoint has center (x, y) ∈ [-1, 1]² and scale s ∈ [min_scale, max_scale].
     The constraint is: |x| + s ≤ 1 and |y| + s ≤ 1 (viewpoint must fit in scene).
 
     Given scale s, the valid centers form a "safe box": [-(1-s), (1-s)]²
@@ -26,27 +31,23 @@ def random_viewpoint(B: int, device: torch.device) -> Viewpoint:
     Uniform over A balances "degrees of freedom" for center placement.
 
     Let L = 1 - s be the safe-box half-width. Then A ∝ L².
-    For A to be uniform on [0, 1], we need L² ~ Uniform(0, 1).
-    So L = sqrt(U) where U ~ Uniform(0, 1).
-
-    Therefore:
-        L = sqrt(U)
-        s = 1 - L = 1 - sqrt(U)
+    For uniform area sampling within [min_scale, max_scale]:
+    - L_max = 1 - min_scale (largest safe box, at smallest scale)
+    - L_min = 1 - max_scale (smallest safe box, at largest scale)
+    - Sample L² uniformly in [L_min², L_max²]
 
     Then sample center uniformly in the safe box: x, y ~ Uniform(-L, L).
-
-    Properties
-    ----------
-    - Scale distribution: PDF ∝ (1-s), biased toward smaller scales
-    - Center distribution: clustered toward origin (large s forces small L)
-    - Constraint |center| + scale ≤ 1 satisfied BY CONSTRUCTION
     """
-    # Sample safe-box half-width L such that L² is uniform.
-    # L² ~ Uniform(0, 1)  →  L = sqrt(U)
-    u = torch.rand(B, device=device)
-    L = torch.sqrt(u)
+    assert 0.0 <= min_scale <= max_scale <= 1.0
 
-    # Scale is complement of safe-box half-width: s = 1 - L
+    L_min = 1 - max_scale
+    L_max = 1 - min_scale
+
+    # Sample L² uniformly in [L_min², L_max²], then take sqrt
+    u = torch.rand(B, device=device)
+    L_sq = L_min**2 + u * (L_max**2 - L_min**2)
+    L = torch.sqrt(L_sq)
+
     scales = 1 - L
 
     # Sample center uniformly within each sample's safe box [-L, L]²

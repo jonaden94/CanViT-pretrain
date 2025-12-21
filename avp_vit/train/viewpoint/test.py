@@ -35,6 +35,26 @@ def test_random_viewpoint_fits():
     assert (margin <= 1 + 1e-6).all()
 
 
+def test_random_viewpoint_min_scale():
+    """Scale respects min_scale constraint."""
+    B = 10000
+    min_scale = 0.25
+    vp = random_viewpoint(B, torch.device("cpu"), min_scale=min_scale)
+    assert (vp.scales >= min_scale - 1e-6).all()
+    # Still fits in scene
+    margin = vp.centers.abs() + vp.scales.unsqueeze(1)
+    assert (margin <= 1 + 1e-6).all()
+
+
+def test_random_viewpoint_scale_range():
+    """Scale respects both min and max constraints."""
+    B = 10000
+    min_scale, max_scale = 0.2, 0.5
+    vp = random_viewpoint(B, torch.device("cpu"), min_scale=min_scale, max_scale=max_scale)
+    assert (vp.scales >= min_scale - 1e-6).all()
+    assert (vp.scales <= max_scale + 1e-6).all()
+
+
 def test_eval_viewpoints():
     vps = make_eval_viewpoints(4, torch.device("cpu"))
     assert len(vps) == 5  # full + 4 quadrants

@@ -30,6 +30,9 @@ class CheckpointData(TypedDict):
     step: int | None
     train_loss: float | None
     comet_id: str | None
+    # Normalizer stats (required for correct inference)
+    scene_norm_state: dict[str, Tensor] | None
+    cls_norm_state: dict[str, Tensor] | None
 
 
 def _git_info() -> tuple[str | None, bool]:
@@ -65,6 +68,8 @@ def save(
     step: int | None = None,
     train_loss: float | None = None,
     comet_id: str | None = None,
+    scene_norm_state: dict[str, Tensor] | None = None,
+    cls_norm_state: dict[str, Tensor] | None = None,
 ) -> None:
     """Save checkpoint with all info needed to reconstruct model."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -81,6 +86,8 @@ def save(
         "step": step,
         "train_loss": train_loss,
         "comet_id": comet_id,
+        "scene_norm_state": scene_norm_state,
+        "cls_norm_state": cls_norm_state,
     }
 
     torch.save(data, path)
@@ -120,6 +127,8 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
         "step": raw.get("step"),
         "train_loss": raw.get("train_loss"),
         "comet_id": raw.get("comet_id"),
+        "scene_norm_state": raw.get("scene_norm_state"),
+        "cls_norm_state": raw.get("cls_norm_state"),
     }
 
     log.info(f"  backbone={data['backbone']}, teacher_dim={data['teacher_dim']}")
