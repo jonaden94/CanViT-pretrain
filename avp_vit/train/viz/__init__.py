@@ -4,6 +4,8 @@ IMPORTANT: Functions here take NUMPY ARRAYS, not tensors.
 Caller is responsible for .cpu(), .detach(), .numpy() as needed.
 """
 
+from typing import NamedTuple
+
 import matplotlib
 # Use non-interactive backend BEFORE importing pyplot to prevent GUI resource leaks
 matplotlib.use("Agg")
@@ -16,8 +18,38 @@ from numpy.typing import NDArray
 from sklearn.decomposition import PCA
 from torch import Tensor
 
-from avp_vit.glimpse import PixelBox
 from avp_vit.train.data import IMAGENET_MEAN, IMAGENET_STD
+
+
+class PixelBox(NamedTuple):
+    """Axis-aligned bounding box in pixel coordinates."""
+
+    left: float
+    top: float
+    width: float
+    height: float
+    center_x: float
+    center_y: float
+
+
+def viewpoint_to_pixel_box(
+    centers: Tensor, scales: Tensor, batch_idx: int, H: int, W: int
+) -> PixelBox:
+    """Convert viewpoint geometry to pixel coordinates for visualization."""
+    cy, cx = centers[batch_idx].tolist()
+    scale = scales[batch_idx].item()
+    center_x = (cx + 1) / 2 * W
+    center_y = (cy + 1) / 2 * H
+    width = scale * W
+    height = scale * H
+    return PixelBox(
+        left=center_x - width / 2,
+        top=center_y - height / 2,
+        width=width,
+        height=height,
+        center_x=center_x,
+        center_y=center_y,
+    )
 
 # Type alias for RGB tuple
 RGBA = tuple[float, float, float, float]

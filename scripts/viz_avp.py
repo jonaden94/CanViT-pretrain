@@ -17,7 +17,7 @@ from ytch.device import get_sensible_device
 from avp_vit import ActiveCanViT, ActiveCanViTConfig
 from avp_vit.checkpoint import load
 from canvit.backbone.dinov3 import DINOv3Backbone
-from avp_vit.glimpse import Viewpoint
+from avp_vit.train.viewpoint import Viewpoint
 from avp_vit.train.data import IMAGENET_MEAN, IMAGENET_STD
 
 
@@ -40,7 +40,7 @@ def load_image(path: Path, size: int, device: torch.device) -> torch.Tensor:
 
 
 def make_viewpoints(n: int, device: torch.device) -> list[Viewpoint]:
-    vps = [Viewpoint.full_scene(1, device)]
+    vps = [Viewpoint.full_scene(batch_size=1, device=device)]
     quads = [(0, 0), (1, 0), (0, 1), (1, 1)]
     for qx, qy in quads[: n - 1]:
         vps.append(Viewpoint.quadrant(1, device, qx, qy))

@@ -5,6 +5,7 @@ import random
 from contextlib import nullcontext
 
 import comet_ml
+import dacite
 import numpy as np
 import optuna
 import torch
@@ -21,9 +22,9 @@ from avp_vit import ActiveCanViTConfig  # noqa: E402
 from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
 from avp_vit.checkpoint import load as load_checkpoint  # noqa: E402
 from avp_vit.checkpoint import save as save_checkpoint  # noqa: E402
-from avp_vit.train import InfiniteLoader, get_loss_fn, gram_mse, warmup_cosine_scheduler  # noqa: E402
+from avp_vit.train import InfiniteLoader, warmup_cosine_scheduler  # noqa: E402
 from avp_vit.train.norm import PositionAwareNorm  # noqa: E402
-from avp_vit.glimpse import Viewpoint  # noqa: E402
+from avp_vit.train.viewpoint import Viewpoint  # noqa: E402
 from avp_vit.train.viewpoint import random_viewpoint  # noqa: E402
 
 from .config import Config  # noqa: E402
@@ -114,7 +115,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     student_backbone = load_student_backbone(cfg)
     log.info(f"Student backbone params: {count_parameters(student_backbone):,}")
 
-    model = create_model(student_backbone, teacher.embed_dim, cfg)
+    bundle = create_model(student_backbone, teacher.embed_dim, cfg)
+    model, glimpse_size_px = bundle.model, bundle.glimpse_size_px
 
     if cfg.compile and cfg.model.gradient_checkpointing:
         raise ValueError("compile=True and gradient_checkpointing=True may be incompatible.")
@@ -123,9 +125,6 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         log.info("Compiling teacher and model")
         compile_teacher(teacher)
         compile_model(model)
-
-    loss_fn = get_loss_fn(cfg.loss)
-    log.info(f"Loss function: {cfg.loss}")
 
     G = cfg.grid_size
     patch_size = teacher.patch_size_px
@@ -156,7 +155,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     if cfg.resume_ckpt is not None:
         ckpt_data = load_checkpoint(cfg.resume_ckpt, cfg.device)
-        ckpt_cfg = ActiveCanViTConfig(**ckpt_data["model_config"])
+        ckpt_cfg = dacite.from_dict(ActiveCanViTConfig, ckpt_data["model_config"])
         if ckpt_cfg != cfg.model:
             log.warning("Checkpoint config differs from current config!")
         model.load_state_dict(ckpt_data["state_dict"])
@@ -216,12 +215,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 feats = compute_raw_targets(images, scene_size)
                 targets = scene_norm(feats.patches)
                 cls_targets = cls_norm(feats.cls.unsqueeze(1)).squeeze(1)
-            canvas = model.init_canvas(cfg.batch_size, G)
+            canvas = model.init_canvas(batch_size=cfg.batch_size, canvas_grid_size=G)
 
         assert images is not None and targets is not None and cls_targets is not None and canvas is not None
 
         if organic_reset and not force_random_reset:
-            viewpoints = [Viewpoint.full_scene(cfg.batch_size, cfg.device) for _ in range(cfg.n_viewpoints_per_step)]
+            viewpoints = [Viewpoint.full_scene(batch_size=cfg.batch_size, device=cfg.device) for _ in range(cfg.n_viewpoints_per_step)]
             force_random_reset = True
         else:
             viewpoints = [random_viewpoint(cfg.batch_size, cfg.device, min_scale=cfg.min_viewpoint_scale) for _ in range(cfg.n_viewpoints_per_step)]
@@ -229,21 +228,19 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
         with amp_ctx:
             losses, canvas = model.forward_loss(
-                images, viewpoints, targets, canvas,
-                cls_target=cls_targets, loss_fn=loss_fn,
+                image=images,
+                viewpoints=viewpoints,
+                target=targets,
+                cls_target=cls_targets,
+                glimpse_size_px=glimpse_size_px,
+                canvas_grid_size=G,
+                canvas=canvas,
+                compute_gram=True,
             )
 
-            total_loss = torch.tensor(0.0, device=cfg.device)
-            if losses.scene is not None:
-                total_loss = total_loss + losses.scene
-            if losses.cls is not None:
-                total_loss = total_loss + losses.cls
-
-            # Gram MSE: spatial covariance structure
-            final_scene = model.compute_scene(canvas)
-            gram_mse_t = gram_mse(final_scene, targets)
-            if cfg.gram_loss_weight > 0:
-                total_loss = total_loss + cfg.gram_loss_weight * gram_mse_t
+            total_loss = (losses.scene or 0.0) + (losses.cls or 0.0)
+            if cfg.gram_loss_weight > 0 and losses.gram is not None:
+                total_loss = total_loss + cfg.gram_loss_weight * losses.gram
 
             if not torch.isfinite(total_loss):
                 log.warning(f"NaN/Inf loss at step {step}, pruning trial")
@@ -261,15 +258,16 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         canvas = canvas.detach()
 
         # Update EMAs
-        scene_t = losses.scene if losses.scene is not None else torch.tensor(0.0, device=cfg.device)
-        cls_t = losses.cls if losses.cls is not None else torch.tensor(0.0, device=cfg.device)
-        ema_scene = ema_update(ema_scene, scene_t)
-        ema_cls = ema_update(ema_cls, cls_t)
-        ema_gram = ema_update(ema_gram, gram_mse_t)
+        if losses.scene is not None:
+            ema_scene = ema_update(ema_scene, losses.scene)
+        if losses.cls is not None:
+            ema_cls = ema_update(ema_cls, losses.cls)
+        if losses.gram is not None:
+            ema_gram = ema_update(ema_gram, losses.gram)
         ema_loss = ema_update(ema_loss, total_loss)
 
         if step % cfg.log_every == 0:
-            assert ema_loss is not None and ema_gram is not None
+            assert ema_loss is not None
             grad_norm = grad_norm_t.item()
             lr = scheduler.get_last_lr()[0]
             metrics = {
@@ -277,15 +275,15 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 "train/loss_ema": ema_loss.item(),
                 "train/grad_norm": grad_norm,
                 "train/lr": lr,
-                "train/gram_mse": gram_mse_t.item(),
-                "train/gram_mse_ema": ema_gram.item(),
             }
-            if losses.scene is not None:
-                assert ema_scene is not None
+            if losses.gram is not None:
+                assert ema_gram is not None
+                metrics["train/gram_mse"] = losses.gram.item()
+                metrics["train/gram_mse_ema"] = ema_gram.item()
+            if losses.scene is not None and ema_scene is not None:
                 metrics["train/scene_loss"] = losses.scene.item()
                 metrics["train/scene_loss_ema"] = ema_scene.item()
-            if losses.cls is not None:
-                assert ema_cls is not None
+            if losses.cls is not None and ema_cls is not None:
                 metrics["train/cls_loss"] = losses.cls.item()
                 metrics["train/cls_loss_ema"] = ema_cls.item()
             exp.log_metrics(metrics, step=step)
@@ -298,11 +296,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             if step not in viz_steps:
                 val_images = val_loader.next_batch().to(cfg.device)
                 with amp_ctx:
-                    val_scene_l1 = val_metrics_only(
+                    val_metrics_only(
                         exp, step, model, compute_raw_targets, scene_norm, cls_norm,
-                        val_images, G, scene_size, "val",
+                        val_images, G, scene_size, glimpse_size_px, "val",
                     )
-                exp.log_metric("val/scene_l1", val_scene_l1, step=step)
 
             if step > 0:
                 trial.report(ema_loss.item(), step)
@@ -314,22 +311,19 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             with amp_ctx:
                 train_viz = viz_and_log(
                     exp, step, "train", model, teacher, scene_norm,
-                    images, viewpoints, targets, canvas,
-                    log_spatial_stats=cfg.log_spatial_stats, log_curves=False, loss_type=cfg.loss,
+                    images, viewpoints, targets, canvas, glimpse_size_px,
+                    log_spatial_stats=cfg.log_spatial_stats, log_curves=False,
                 )
-            for name, losses_list in train_viz.losses.items():
-                exp.log_metric(f"train/viz_{name}", losses_list[-1], step=step)
+            exp.log_metric("train/viz_cos_sim", train_viz.cos_sims[-1], step=step)
 
             val_images = val_loader.next_batch().to(cfg.device)
             with amp_ctx:
-                val_scene_l1 = eval_and_log(
+                eval_and_log(
                     exp, step, model, teacher, compute_raw_targets, scene_norm, cls_norm,
-                    val_images, G, scene_size, "val",
+                    val_images, G, scene_size, glimpse_size_px, "val",
                     log_spatial_stats=cfg.log_spatial_stats,
                     log_curves=(step in curve_steps),
-                    loss_type=cfg.loss,
                 )
-            exp.log_metric("val/scene_l1", val_scene_l1, step=step)
 
         if step % cfg.ckpt_every == 0:
             save_checkpoint(

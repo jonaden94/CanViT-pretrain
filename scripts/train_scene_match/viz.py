@@ -9,13 +9,14 @@ from typing import NamedTuple
 import comet_ml
 import matplotlib.pyplot as plt
 import torch
+import torch.nn.functional as F
 from matplotlib.figure import Figure
 from torch import Tensor
 
 from avp_vit import ActiveCanViT, StepOutput
-from avp_vit.glimpse import Viewpoint, sample_at_viewpoint
+from avp_vit.train.viewpoint import Viewpoint, sample_at_viewpoint
 from canvit.backbone.dinov3 import DINOv3Backbone, NormFeatures
-from avp_vit.train import LOSS_FNS, LossType, imagenet_denormalize, plot_multistep_pca, plot_norm_stats
+from avp_vit.train import imagenet_denormalize, plot_multistep_pca, plot_norm_stats
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import make_eval_viewpoints
 
@@ -23,9 +24,9 @@ log = logging.getLogger(__name__)
 
 
 class VizResult(NamedTuple):
-    """Result from viz_and_log: per-timestep losses and model outputs."""
+    """Result from viz_and_log: per-timestep cosine similarities and model outputs."""
 
-    losses: dict[str, list[float]]  # {loss_name: [loss_t0, loss_t1, ...]}
+    cos_sims: list[float]  # [cos_sim_t0, cos_sim_t1, ...]
     outputs: list[StepOutput]  # Model outputs at each timestep
 
 
@@ -76,27 +77,33 @@ def viz_and_log(
     viewpoints: list[Viewpoint],
     target: Tensor,
     canvas: Tensor,
+    glimpse_size_px: int,
     show_canvas: bool = True,
     log_spatial_stats: bool = True,
     log_curves: bool = True,
-    loss_type: LossType = "mse",
     show_locals: bool = False,
 ) -> VizResult:
     """Run forward trajectory and log visualization."""
     assert isinstance(model.backbone, DINOv3Backbone)
     model_backbone = model.backbone
-    canvas_grid_size = model._infer_canvas_grid_size(canvas)
-    glimpse_grid_size = model.cfg.glimpse_grid_size
+    n_spatial = canvas.shape[1] - model.n_prefix
+    canvas_grid_size = int(n_spatial ** 0.5)
+    assert canvas_grid_size ** 2 == n_spatial
+    glimpse_grid_size = glimpse_size_px // model.backbone.patch_size_px
+    assert glimpse_grid_size * model.backbone.patch_size_px == glimpse_size_px
 
     with torch.inference_mode():
         # Compute initial scene BEFORE any forward pass
         initial_scene = model.compute_scene(canvas)
 
-        outputs, _ = model.forward_trajectory_full(images, viewpoints, canvas)
-        all_losses = {
-            name: [fn(out.scene, target).item() for out in outputs]
-            for name, fn in LOSS_FNS.items()
-        }
+        outputs, _ = model.forward_trajectory(
+            image=images,
+            viewpoints=viewpoints,
+            canvas_grid_size=canvas_grid_size,
+            glimpse_size_px=glimpse_size_px,
+            canvas=canvas,
+        )
+        cos_sims = [F.cosine_similarity(out.scene, target, dim=-1).mean().item() for out in outputs]
 
         if log_curves:
             # Canvas states: initial + after each viewpoint
@@ -128,12 +135,11 @@ def viz_and_log(
                 step=step,
             )
 
-            # Scene loss vs timestep
-            losses = all_losses[loss_type]
+            # Cosine similarity vs timestep
             exp.log_curve(
-                f"{prefix}/scene_loss_vs_timestep",
-                x=list(range(len(losses))),
-                y=losses,
+                f"{prefix}/cos_sim_vs_timestep",
+                x=list(range(len(cos_sims))),
+                y=cos_sims,
                 step=step,
             )
 
@@ -215,7 +221,7 @@ def viz_and_log(
                 target.shape[0], canvas_grid_size, canvas_grid_size, -1
             ).permute(0, 3, 1, 2)
             locals_teacher_cropped = [
-                sample_at_viewpoint(target_spatial, vp, glimpse_grid_size)[
+                sample_at_viewpoint(spatial=target_spatial, viewpoint=vp, out_size=glimpse_grid_size)[
                     sample_idx
                 ]  # [D, G, G]
                 .permute(1, 2, 0)
@@ -256,7 +262,7 @@ def viz_and_log(
     )
     log_figure(exp, fig_pca, f"{prefix}/pca", step)
 
-    return VizResult(losses=all_losses, outputs=outputs)
+    return VizResult(cos_sims=cos_sims, outputs=outputs)
 
 
 def val_metrics_only(
@@ -269,34 +275,34 @@ def val_metrics_only(
     images: Tensor,
     canvas_grid_size: int,
     scene_size_px: int,
+    glimpse_size_px: int,
     prefix: str = "val",
 ) -> float:
-    """Fast validation without PCA. Returns final scene l1 loss (normalized)."""
+    """Fast validation without PCA. Returns final scene cosine similarity."""
     B = images.shape[0]
     viewpoints = make_eval_viewpoints(B, images.device)
 
     with torch.inference_mode():
         raw_feats = compute_raw_targets(images, scene_size_px)
         target = scene_normalizer(raw_feats.patches)
-        canvas = model.init_canvas(B, canvas_grid_size)
-        outputs, _ = model.forward_trajectory_full(images, viewpoints, canvas)
+        outputs, _ = model.forward_trajectory(
+            image=images,
+            viewpoints=viewpoints,
+            canvas_grid_size=canvas_grid_size,
+            glimpse_size_px=glimpse_size_px,
+        )
         final_scene = outputs[-1].scene
 
-        # Scene metrics (normalized + raw)
-        norms = {name: fn(final_scene, target).item() for name, fn in LOSS_FNS.items()}
-        for name, val in norms.items():
-            exp.log_metric(f"{prefix}/scene_{name}", val, step=step)
-        for name, fn in LOSS_FNS.items():
-            exp.log_metric(f"{prefix}/scene_{name}_raw", fn(final_scene, raw_feats.patches).item(), step=step)
+        cos_sim = F.cosine_similarity(final_scene, target, dim=-1).mean().item()
+        exp.log_metric(f"{prefix}/scene_cos_sim", cos_sim, step=step)
 
-        # CLS metrics (if enabled)
-        if model.cls_proj is not None:
+        if model.cls_head is not None:
             cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
             cls_pred = model.compute_cls(outputs[-1].canvas)
-            for name, fn in LOSS_FNS.items():
-                exp.log_metric(f"{prefix}/cls_{name}", fn(cls_pred, cls_target).item(), step=step)
+            cls_cos_sim = F.cosine_similarity(cls_pred, cls_target, dim=-1).mean().item()
+            exp.log_metric(f"{prefix}/cls_cos_sim", cls_cos_sim, step=step)
 
-    return norms["l1"]
+    return cos_sim
 
 
 def eval_and_log(
@@ -310,50 +316,42 @@ def eval_and_log(
     images: Tensor,
     canvas_grid_size: int,
     scene_size_px: int,
+    glimpse_size_px: int,
     prefix: str = "val",
     log_spatial_stats: bool = True,
     log_curves: bool = True,
-    loss_type: LossType = "mse",
     show_locals: bool = False,
 ) -> float:
-    """Full evaluation with PCA visualization (expensive). Returns final scene l1 loss (normalized)."""
+    """Full evaluation with PCA visualization (expensive). Returns final scene cosine similarity."""
     B = images.shape[0]
     viewpoints = make_eval_viewpoints(B, images.device)
 
     with torch.inference_mode():
         raw_feats = compute_raw_targets(images, scene_size_px)
         target = scene_normalizer(raw_feats.patches)
-        canvas = model.init_canvas(B, canvas_grid_size)
+        canvas = model.init_canvas(batch_size=B, canvas_grid_size=canvas_grid_size)
 
     viz = viz_and_log(
         exp, step, prefix, model, teacher, scene_normalizer,
-        images, viewpoints, target, canvas,
-        log_spatial_stats=log_spatial_stats, log_curves=log_curves, loss_type=loss_type,
+        images, viewpoints, target, canvas, glimpse_size_px,
+        log_spatial_stats=log_spatial_stats, log_curves=log_curves,
         show_locals=show_locals,
     )
 
-    # Log normalized scene metrics - per timestep and final
-    n_timesteps = len(viz.losses["l1"])
-    for t in range(n_timesteps):
-        for name, losses in viz.losses.items():
-            exp.log_metric(f"{prefix}/scene_{name}_t{t}", losses[t], step=step)
-    for name, losses in viz.losses.items():
-        exp.log_metric(f"{prefix}/scene_{name}", losses[-1], step=step)
+    # Log per-timestep and final cosine similarity
+    for t, cos_sim in enumerate(viz.cos_sims):
+        exp.log_metric(f"{prefix}/scene_cos_sim_t{t}", cos_sim, step=step)
+    exp.log_metric(f"{prefix}/scene_cos_sim", viz.cos_sims[-1], step=step)
 
-    # Raw scene metrics (for cross-run comparison) - reuse outputs from viz_and_log
-    final_scene = viz.outputs[-1].scene
-    for name, fn in LOSS_FNS.items():
-        exp.log_metric(f"{prefix}/scene_{name}_raw", fn(final_scene, raw_feats.patches).item(), step=step)
-
-    # CLS metrics (if enabled)
-    if model.cls_proj is not None:
+    # CLS cosine similarity (if enabled)
+    if model.cls_head is not None:
         with torch.inference_mode():
             cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
             cls_pred = model.compute_cls(viz.outputs[-1].canvas)
-            for name, fn in LOSS_FNS.items():
-                exp.log_metric(f"{prefix}/cls_{name}", fn(cls_pred, cls_target).item(), step=step)
+            cls_cos_sim = F.cosine_similarity(cls_pred, cls_target, dim=-1).mean().item()
+            exp.log_metric(f"{prefix}/cls_cos_sim", cls_cos_sim, step=step)
 
-    return viz.losses["l1"][-1]
+    return viz.cos_sims[-1]
 
 
 def log_norm_stats(

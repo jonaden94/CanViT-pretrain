@@ -15,8 +15,8 @@ def _make_tiny_model(device: torch.device) -> ActiveCanViT:
     from dinov3.hub.backbones import dinov3_vits16
 
     backbone = DINOv3Backbone(dinov3_vits16(pretrained=False).to(device))
-    cfg = ActiveCanViTConfig()
-    return ActiveCanViT(backbone, cfg, teacher_dim=384).to(device)
+    cfg = ActiveCanViTConfig(teacher_dim=384)
+    return ActiveCanViT(backbone=backbone, cfg=cfg).to(device)
 
 
 def test_save_load_roundtrip() -> None:
@@ -60,6 +60,8 @@ def test_strips_orig_mod() -> None:
             "step": None,
             "train_loss": None,
             "comet_id": None,
+            "scene_norm_state": None,
+            "cls_norm_state": None,
         }
         torch.save(raw, path)
 

@@ -21,8 +21,7 @@ from torchvision import transforms
 from avp_vit.checkpoint import load_model
 from canvit.backbone.dinov3 import DINOv3Backbone
 from avp_vit.train.data import imagenet_normalize
-from avp_vit.glimpse import Viewpoint
-from avp_vit.train.loss import cos_dissim
+from avp_vit.train.viewpoint import Viewpoint
 from avp_vit.train.viewpoint import make_eval_viewpoints, random_viewpoint
 from avp_vit.train.viz import fit_pca, pca_rgb, imagenet_denormalize, timestep_colors
 
@@ -199,7 +198,8 @@ def main(args: Args) -> None:
                 hidden_list.append(hidden)
                 projected_list.append(projected)
                 if use_teacher:
-                    loss_list.append(cos_dissim(out.scene[0], teacher_upsampled_torch[G]).item())
+                    cos_sim = F.cosine_similarity(out.scene[0], teacher_upsampled_torch[G], dim=-1).mean().item()
+                    loss_list.append(cos_sim)
             all_hidden[G] = hidden_list
             all_projected[G] = projected_list
             if use_teacher:

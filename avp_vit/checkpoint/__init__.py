@@ -12,8 +12,7 @@ import torch
 from torch import Tensor
 
 from avp_vit import ActiveCanViT
-from canvit import CanViTConfig
-from canvit.attention import CrossAttentionConfig
+import dacite
 
 log = logging.getLogger(__name__)
 
@@ -79,7 +78,7 @@ def save(
     data: CheckpointData = {
         "state_dict": model.state_dict(),
         "model_config": asdict(model.cfg),
-        "teacher_dim": model.teacher_dim,
+        "teacher_dim": model.cfg.teacher_dim,  # type: ignore[attr-defined]
         "backbone": backbone,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "git_commit": git_commit,
@@ -95,8 +94,7 @@ def save(
     size_mb = path.stat().st_size / (1024 * 1024)
 
     log.info(f"Checkpoint saved: {path} ({size_mb:.1f} MB)")
-    log.info(f"  backbone={backbone}, teacher_dim={model.teacher_dim}")
-    log.info(f"  glimpse_grid_size={model.cfg.glimpse_grid_size}, n_canvas_registers={model.n_canvas_registers}")
+    log.info(f"  backbone={backbone}, teacher_dim={model.cfg.teacher_dim}")  # type: ignore[attr-defined]
     if step is not None:
         log.info(f"  step={step}, train_loss={train_loss:.4e}" if train_loss else f"  step={step}")
     if git_commit:
@@ -109,17 +107,9 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
 
     raw = torch.load(path, weights_only=False, map_location=device)
 
-    # Reconstruct nested dataclasses in canvit config
-    model_config = raw["model_config"].copy()
-    canvit_config = model_config.get("canvit", {})
-    for key in ("read_attention", "write_attention"):
-        if isinstance(canvit_config.get(key), dict):
-            canvit_config[key] = CrossAttentionConfig(**canvit_config[key])
-    model_config["canvit"] = CanViTConfig(**canvit_config)
-
     data: CheckpointData = {
         "state_dict": _strip_orig_mod(raw["state_dict"]),
-        "model_config": model_config,
+        "model_config": raw["model_config"],
         "teacher_dim": raw["teacher_dim"],
         "backbone": raw["backbone"],
         "timestamp": raw.get("timestamp", "unknown"),
@@ -133,7 +123,6 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
     }
 
     log.info(f"  backbone={data['backbone']}, teacher_dim={data['teacher_dim']}")
-    log.info(f"  glimpse_grid_size={model_config.get('glimpse_grid_size')}")
     if data["step"] is not None:
         log.info(f"  step={data['step']}, train_loss={data['train_loss']:.4e}" if data["train_loss"] else f"  step={data['step']}")
     if data["git_commit"]:
@@ -194,10 +183,10 @@ def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = Tr
 
     factory = _get_backbone_factory(ckpt["backbone"])
     raw_backbone = factory(pretrained=False)
-    backbone = DINOv3Backbone(raw_backbone)
+    backbone = DINOv3Backbone(raw_backbone)  # type: ignore[arg-type]
 
-    cfg = ActiveCanViTConfig(**ckpt["model_config"])
-    model = ActiveCanViT(backbone, cfg, ckpt["teacher_dim"])
+    cfg = dacite.from_dict(ActiveCanViTConfig, ckpt["model_config"])
+    model = ActiveCanViT(backbone=backbone, cfg=cfg)
 
     result = model.load_state_dict(ckpt["state_dict"], strict=strict)
     if strict and (result.missing_keys or result.unexpected_keys):

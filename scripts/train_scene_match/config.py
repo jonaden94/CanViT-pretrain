@@ -7,7 +7,6 @@ import torch
 from ytch.device import get_sensible_device
 
 from avp_vit import ActiveCanViTConfig
-from avp_vit.train import LossType
 
 
 @dataclass
@@ -19,50 +18,45 @@ class Config:
     student_model: str = "dinov3_vitl16"
     student_ckpt: Path | None = None  # None = random init
     freeze_student_backbone: bool = False
-    # Model
+    # Model config (PretrainingConfig via alias)
     model: ActiveCanViTConfig = field(default_factory=ActiveCanViTConfig)
-    grid_size: int = 16
+    # Glimpse/canvas sizes (runtime, not in model config)
+    glimpse_grid_size: int = 4  # tokens per glimpse side
+    grid_size: int = 16  # canvas grid size
+    # Training
     batch_size: int = 128
     p_reset: float = 0.5  # Probability of resetting canvas each step
     peak_lr: float = 1e-4
     weight_decay: float = 0.05
-    n_viewpoints_per_step: int = (
-        2  # Inner loop viewpoints (>=2 for length generalization)
-    )
+    n_viewpoints_per_step: int = 2  # Inner loop viewpoints
     min_viewpoint_scale: float = 0.0  # Minimum scale for random viewpoints
     warmup_steps: int = 100_000
     grad_clip: float = 1.0
-    # at 128 fresh images per optimizer step, that's
-    # ~100 IN1k epochs
-    # do take p_reset into account!
     n_steps: int = 2_000_000
     # Target normalization
-    norm_warmup_images: int = 4096  # Images to warm up running stats before training
-    norm_momentum: float = 0.1  # Momentum for running mean/var updates
+    norm_warmup_images: int = 4096
+    norm_momentum: float = 0.1
     # Data
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
-    index_dir: Path | None = (
-        None  # If set, use IndexedImageFolder for train (needed for IN21k)
-    )
+    index_dir: Path | None = None
     ckpt_dir: Path = Path("checkpoints")
-    resume_ckpt: Path | None = None  # AVP checkpoint to resume from
+    resume_ckpt: Path | None = None
     # Training
     num_workers: int = 8
     crop_scale_min: float = 0.8
-    image_resolution: int = 512  # Source image size (independent of grid size)
-    loss: LossType = "cos"
-    gram_loss_weight: float = 0.0  # 0 = metric only, >0 = add to training loss
+    image_resolution: int = 512
+    gram_loss_weight: float = 0.0
     # Logging
     log_every: int = 20
     val_every: int = 250
-    total_viz: int = 1000  # PCA viz count (log-spaced, denser early)
-    total_curves: int = 50  # Curve count (log-spaced)
+    total_viz: int = 1000
+    total_curves: int = 50
     ckpt_every: int = 20_000
-    log_spatial_stats: bool = True  # Log target/pred spatial mean/std
+    log_spatial_stats: bool = True
     # Compilation and precision
     compile: bool = True
-    amp: bool = True  # bfloat16 automatic mixed precision
+    amp: bool = True
     # Optuna
     n_trials: int = 100
     # Runtime

@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import Callable
+from typing import NamedTuple
 
 import torch
 from dinov3.hub.backbones import (
@@ -20,7 +21,6 @@ from .config import Config
 
 log = logging.getLogger(__name__)
 
-# Registry: model slug -> factory function
 MODEL_REGISTRY: dict[str, Callable[..., DinoVisionTransformer]] = {
     "dinov3_vits16": dinov3_vits16,
     "dinov3_vits16plus": dinov3_vits16plus,
@@ -28,6 +28,12 @@ MODEL_REGISTRY: dict[str, Callable[..., DinoVisionTransformer]] = {
     "dinov3_vitl16": dinov3_vitl16,
     "dinov3_vitl16plus": dinov3_vitl16plus,
 }
+
+
+class ModelBundle(NamedTuple):
+    """Model with derived runtime parameters."""
+    model: ActiveCanViT
+    glimpse_size_px: int
 
 
 def _load_dinov3(
@@ -49,9 +55,7 @@ def _load_dinov3(
         log.info(f"Loading {model_slug} from {checkpoint}")
         model = factory(pretrained=True, weights=checkpoint)
 
-    # Disable RoPE coordinate rescaling (training-time augmentation that adds noise)
     model.rope_embed.rescale_coords = None
-
     return model.to(device)
 
 
@@ -85,23 +89,23 @@ def create_model(
     student_backbone: DINOv3Backbone,
     teacher_dim: int,
     cfg: Config,
-) -> ActiveCanViT:
-    """Create ActiveCanViT wrapping student backbone, projecting to teacher_dim."""
-    patch_size = student_backbone.patch_size_px
-    glimpse_px = cfg.model.glimpse_grid_size * patch_size
+) -> ModelBundle:
+    """Create ActiveCanViT wrapping student backbone."""
+    cfg.model.teacher_dim = teacher_dim
 
     for p in student_backbone.parameters():
         p.requires_grad = not cfg.freeze_student_backbone
 
-    model = ActiveCanViT(student_backbone, cfg.model, teacher_dim).to(cfg.device)
+    model = ActiveCanViT(backbone=student_backbone, cfg=cfg.model).to(cfg.device)
+    glimpse_size_px = cfg.glimpse_grid_size * student_backbone.patch_size_px
 
     log.info(
-        f"Model created: grid_size={cfg.grid_size}, "
-        f"glimpse={cfg.model.glimpse_grid_size}x{cfg.model.glimpse_grid_size} ({glimpse_px}px), "
+        f"Model created: canvas={cfg.grid_size}x{cfg.grid_size}, "
+        f"glimpse={cfg.glimpse_grid_size}x{cfg.glimpse_grid_size} ({glimpse_size_px}px), "
         f"student_dim={student_backbone.embed_dim} -> teacher_dim={teacher_dim}, "
-        f"freeze_student_backbone={cfg.freeze_student_backbone}"
+        f"freeze_backbone={cfg.freeze_student_backbone}"
     )
-    return model
+    return ModelBundle(model, glimpse_size_px)
 
 
 def compile_teacher(teacher: DINOv3Backbone) -> None:

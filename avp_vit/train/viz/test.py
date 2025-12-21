@@ -7,8 +7,8 @@ import numpy as np
 import torch
 from matplotlib.figure import Figure
 
-from avp_vit.glimpse import PixelBox
 from avp_vit.train.viz import (
+    PixelBox,
     fit_pca,
     imagenet_denormalize,
     pca_rgb,
