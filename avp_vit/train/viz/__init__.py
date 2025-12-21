@@ -55,16 +55,22 @@ def fit_pca(features: NDArray[np.floating]) -> PCA:
     return pca
 
 
-def pca_rgb(pca: PCA, features: NDArray[np.floating], H: int, W: int) -> NDArray[np.floating]:
+def pca_rgb(
+    pca: PCA, features: NDArray[np.floating], H: int, W: int, normalize: bool = False
+) -> NDArray[np.floating]:
     """Project features to RGB via PCA, reshape to [H, W, 3].
 
     Args:
         features: [H*W, D] numpy array (already on CPU)
+        normalize: If True, normalize projection to std=1 before sigmoid.
+            Use for data with different variance than PCA was fit on.
 
     Returns:
         [H, W, 3] numpy array with sigmoid-scaled values in [0, 1]
     """
     proj = pca.transform(features)
+    if normalize:
+        proj = proj / (proj.std() + 1e-8)
     return _pca_proj_to_rgb(proj, H, W)
 
 
@@ -283,7 +289,7 @@ def plot_multistep_pca(
     # Fit PCA on teacher (used for scene comparisons)
     pca_teacher = fit_pca(teacher)
     teacher_rgb = pca_rgb(pca_teacher, teacher, S, S)
-    initial_rgb = pca_rgb(pca_teacher, initial_scene, S, S)
+    initial_rgb = pca_rgb(pca_teacher, initial_scene, S, S, normalize=True)
 
     # Hidden PCA for init (own basis)
     if show_hidden:
@@ -385,7 +391,7 @@ def plot_multistep_pca(
     # Rows 1+: After each glimpse (t=0, t=1, ...)
     for t in range(n_views):
         row = t + 1
-        scene_rgb = pca_rgb(pca_teacher, scenes[t], S, S)
+        scene_rgb = pca_rgb(pca_teacher, scenes[t], S, S, normalize=True)
 
         # Hidden: own PCA per timestep
         if show_hidden:
