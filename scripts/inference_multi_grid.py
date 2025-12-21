@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from sklearn.decomposition import PCA
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -37,6 +39,7 @@ class Args:
     viewpoint_mode: Literal["quadrants", "sixteenths", "random"] = "quadrants"
     n_viewpoints: int = 8
     hidden_ln: bool = False  # Apply LayerNorm to hidden spatial before viz
+    pca_per_timestep: bool = False  # Fit PCA per timestep (max contrast) vs shared (comparable colors)
     device: str = "mps"
     seed: int | None = None
     no_teacher: bool = False  # Skip teacher loading/viz (avoids downloading weights)
@@ -219,11 +222,19 @@ def main(args: Args) -> None:
     H, W = img_np.shape[:2]
     colors = timestep_colors(n_viewpoints)
 
+    # PCA fitting: per-timestep (max contrast) or shared (comparable colors across time)
     first_G = args.grid_sizes[0]
-    pca_hidden = fit_pca(all_hidden[first_G][-1])
-    pca_proj = fit_pca(all_projected[first_G][-1])  # own PCA for projected
+    pca_hidden: PCA | None = None
+    pca_proj: PCA | None = None
+    pca_unique: PCA | None = None
+    pca_scene: PCA | None = None
+    if not args.pca_per_timestep:
+        pca_hidden = fit_pca(all_hidden[first_G][-1])
+        pca_proj = fit_pca(all_projected[first_G][-1])
+        if use_teacher:
+            pca_unique = fit_pca(all_unique[first_G][-1])
+    # Teacher PCA always shared for semantic comparison
     if use_teacher:
-        pca_unique = fit_pca(all_unique[first_G][-1])
         pca_scene = fit_pca(teacher_upsampled[first_G])
 
     # Row 0: Input + loss curves (or just input if no teacher)
@@ -266,7 +277,9 @@ def main(args: Args) -> None:
         ax.set_yticks([])
         for t, hidden in enumerate(hidden_list):
             ax = axes[row_hidden, t + 1]
-            ax.imshow(pca_rgb(pca_hidden, hidden, G, G))
+            pca_h = fit_pca(hidden) if args.pca_per_timestep else pca_hidden
+            assert pca_h is not None
+            ax.imshow(pca_rgb(pca_h, hidden, G, G))
             draw_trajectory(ax, viewpoints, colors, g_H, g_W, up_to=t, alpha=0.5)
             ax.set_xticks([])
             ax.set_yticks([])
@@ -282,7 +295,9 @@ def main(args: Args) -> None:
             ax.set_yticks([])
             for t, unique in enumerate(all_unique[G]):
                 ax = axes[row_unique, t + 1]
-                ax.imshow(pca_rgb(pca_unique, unique, G, G))
+                pca_u = fit_pca(unique) if args.pca_per_timestep else pca_unique
+                assert pca_u is not None
+                ax.imshow(pca_rgb(pca_u, unique, G, G))
                 draw_trajectory(ax, viewpoints, colors, g_H, g_W, up_to=t, alpha=0.5)
                 ax.set_xticks([])
                 ax.set_yticks([])
@@ -298,9 +313,13 @@ def main(args: Args) -> None:
         for t, proj in enumerate(projected_list):
             ax = axes[row_proj, t + 1]
             if use_teacher:
+                # Always use teacher PCA for semantic comparison
+                assert pca_scene is not None
                 ax.imshow(pca_rgb(pca_scene, proj, G, G, normalize=True))
             else:
-                ax.imshow(pca_rgb(pca_proj, proj, G, G))
+                pca_p = fit_pca(proj) if args.pca_per_timestep else pca_proj
+                assert pca_p is not None
+                ax.imshow(pca_rgb(pca_p, proj, G, G))
             draw_trajectory(ax, viewpoints, colors, g_H, g_W, up_to=t, alpha=0.5)
             ax.set_xticks([])
             ax.set_yticks([])
@@ -308,6 +327,7 @@ def main(args: Args) -> None:
         if use_teacher:
             # Row: Teacher
             row_teacher = 1 + g_idx * rows_per_g + 3
+            assert pca_scene is not None
             teacher_rgb = pca_rgb(pca_scene, teacher_upsampled[G], G, G)
             ax = axes[row_teacher, 0]
             ax.imshow(img_np)
