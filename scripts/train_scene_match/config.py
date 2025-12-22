@@ -34,7 +34,10 @@ class Config:
     weight_decay: float = 0.05  # standard in ViTs
     n_viewpoints_per_step: int = 2  # Inner loop viewpoints
     min_viewpoint_scale: float = 0.125  # Minimum scale for random viewpoints
-    warmup_steps: int = 100_000
+    # ~ 1 epoch
+    warmup_steps: int = 10_000
+    # ~ 10 epochs
+    # warmup_steps: int = 100_000
     grad_clip: float = 1.0
     n_steps: int = 2_000_000
     # Target normalization
