@@ -329,6 +329,10 @@ def main() -> None:
             if not latency_data[teacher_key] or rerun_teacher:
                 latency_data[teacher_key].append(teacher_ms)
 
+    # Cache expensive computations
+    scene_target_np = scene_target.cpu().numpy() if scene_target is not None else None
+    pca_teacher = fit_pca(scene_target_np) if scene_target_np is not None else None
+
     viewpoints: list[Viewpoint] = st.session_state.viewpoints
     results: list[StepResult] = st.session_state.results
     n = len(viewpoints)
@@ -369,9 +373,8 @@ def main() -> None:
 
     with c2:
         st.markdown(f"**Teacher {teacher_grid}²**")
-        if scene_target is not None:
-            pca = fit_pca(scene_target.cpu().numpy())
-            st.image(upscale(pca_rgb(pca, scene_target.cpu().numpy(), teacher_grid, teacher_grid), col_w), width=col_w)
+        if scene_target_np is not None and pca_teacher is not None:
+            st.image(upscale(pca_rgb(pca_teacher, scene_target_np, teacher_grid, teacher_grid), col_w), width=col_w)
 
     with c3:
         lbl = f"**Hidden {canvas_grid}²**" + (" (L2)" if l2_norm else "") + (f" T{n-1}" if n else "")
@@ -382,10 +385,9 @@ def main() -> None:
 
     with c4:
         st.markdown(f"**Projected {canvas_grid}²**" + (f" T{n-1}" if n else ""))
-        if n > 0 and scene_target is not None:
-            pca = fit_pca(scene_target.cpu().numpy())
+        if n > 0 and pca_teacher is not None:
             p = results[-1].projected
-            st.image(upscale(pca_rgb(pca, p, canvas_grid, canvas_grid, normalize=True), col_w), width=col_w)
+            st.image(upscale(pca_rgb(pca_teacher, p, canvas_grid, canvas_grid, normalize=True), col_w), width=col_w)
             if results[-1].scene_cos is not None:
                 st.caption(f"cos = {results[-1].scene_cos:.4f}")
 
@@ -429,16 +431,15 @@ def main() -> None:
 
     # Timeline
     n_results = len(results)
-    if n_results > 0 and scene_target is not None:
+    if n_results > 0 and pca_teacher is not None:
         st.markdown("---")
         st.markdown("**Timeline**")
         n_show = min(n_results, 8)
         cols = st.columns(n_show)
-        pca = fit_pca(scene_target.cpu().numpy())
         for t in range(n_show):
             with cols[t]:
                 st.image((np.clip(results[t].glimpse, 0, 1) * 255).astype(np.uint8), width=80)
-                st.image(upscale(pca_rgb(pca, results[t].projected, canvas_grid, canvas_grid, normalize=True), 80), width=80)
+                st.image(upscale(pca_rgb(pca_teacher, results[t].projected, canvas_grid, canvas_grid, normalize=True), 80), width=80)
                 st.caption(f"T{t}: {results[t].scene_cos:.3f}" if results[t].scene_cos else f"T{t}")
 
     # Debug
