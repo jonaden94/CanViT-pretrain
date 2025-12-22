@@ -340,19 +340,26 @@ def main() -> None:
     if "latency_data" not in st.session_state:
         st.session_state.latency_data = {}  # dict[str, list[float]]
 
+    # Store file_id in session state to prevent instability across reruns
+    current_file_id = uploaded.file_id
+    if "file_id" not in st.session_state or st.session_state.file_id != current_file_id:
+        log.info(f"New file uploaded: {current_file_id}")
+        st.session_state.file_id = current_file_id
+
     # Config change detection (excludes scale, l2_norm)
-    config_key = f"{ckpt_path}:{device_name}:{canvas_grid}:{glimpse_grid}:{uploaded.file_id}"
+    config_key = f"{ckpt_path}:{device_name}:{canvas_grid}:{glimpse_grid}:{st.session_state.file_id}"
     old_config = st.session_state.get("_config")
     n_vps = len(st.session_state.get("viewpoints", []))
-    log.info(f"Render: vps={n_vps}, config_match={old_config == config_key}")
     if old_config != config_key:
-        log.info(f"Config changed: {old_config} -> {config_key}, resetting state")
+        log.warning(f"CONFIG RESET! old='{old_config}' new='{config_key}'")
         st.session_state._config = config_key
         st.session_state.viewpoints = []
         st.session_state.results = []
         st.session_state.canvas = res.model.init_canvas(batch_size=1, canvas_grid_size=canvas_grid)
         st.session_state.cls = res.model.init_cls(batch_size=1)
         st.session_state.last_click = None
+    else:
+        log.info(f"Render: vps={n_vps}")
 
     # Load image
     transform = transforms.Compose([
