@@ -9,11 +9,24 @@ from dinov3_probes import DINOv3LinearClassificationHead
 from torch import Tensor
 from torchvision.models import ResNet50_Weights
 
-PROBE_REPOS = {
-    "dinov3_vits16": "yberreby/dinov3-vits16-lvd1689m-in1k-512x512-linear-clf-probe",
-    "dinov3_vitb16": "yberreby/dinov3-vitb16-lvd1689m-in1k-512x512-linear-clf-probe",
-    "dinov3_vitl16": "yberreby/dinov3-vitl16-lvd1689m-in1k-512x512-linear-clf-probe",
+
+class ProbeInfo(NamedTuple):
+    """Probe metadata tied to its training configuration."""
+    repo: str
+    resolution: int  # Image resolution the probe was trained at (pixels)
+
+
+# All probes trained at 512x512 - resolution is in the repo name for verification
+PROBE_REGISTRY: dict[str, ProbeInfo] = {
+    "dinov3_vits16": ProbeInfo("yberreby/dinov3-vits16-lvd1689m-in1k-512x512-linear-clf-probe", 512),
+    "dinov3_vitb16": ProbeInfo("yberreby/dinov3-vitb16-lvd1689m-in1k-512x512-linear-clf-probe", 512),
+    "dinov3_vitl16": ProbeInfo("yberreby/dinov3-vitl16-lvd1689m-in1k-512x512-linear-clf-probe", 512),
 }
+
+# Verify registry consistency at import time
+for backbone, info in PROBE_REGISTRY.items():
+    expected_res_str = f"{info.resolution}x{info.resolution}"
+    assert expected_res_str in info.repo, f"Probe {backbone}: resolution {info.resolution} not in repo name {info.repo}"
 
 
 class TopKPrediction(NamedTuple):
@@ -31,10 +44,15 @@ def get_imagenet_class_names() -> list[str]:
 
 def load_probe(backbone: str, device: torch.device) -> DINOv3LinearClassificationHead | None:
     """Load IN1k classification probe from HF Hub. Returns None if backbone unsupported."""
-    if backbone not in PROBE_REPOS:
+    if backbone not in PROBE_REGISTRY:
         return None
-    probe = DINOv3LinearClassificationHead.from_pretrained(PROBE_REPOS[backbone])
+    probe = DINOv3LinearClassificationHead.from_pretrained(PROBE_REGISTRY[backbone].repo)
     return probe.to(device).eval()
+
+
+def get_probe_resolution(backbone: str) -> int:
+    """Get the image resolution the probe was trained at. Raises KeyError if backbone unsupported."""
+    return PROBE_REGISTRY[backbone].resolution
 
 
 def compute_in1k_top1(logits: Tensor, labels: Tensor) -> float:
