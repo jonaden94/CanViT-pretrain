@@ -76,7 +76,7 @@ def run_trajectory(
         canvas_grid_size=canvas_grid,
         glimpse_size_px=glimpse_size_px,
     )
-    return [model.compute_cls(out.canvas) for out in traj.outputs]
+    return [model.predict_teacher_cls(out.cls) for out in traj.outputs]
 
 
 @torch.inference_mode()

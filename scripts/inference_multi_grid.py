@@ -187,6 +187,7 @@ def main(args: Args) -> None:
                 log.info(f"G={G}: teacher 16×16 → upsample to {G}×{G}")
 
             canvas = model.init_canvas(batch_size=1, canvas_grid_size=G)
+            cls = model.init_cls(batch_size=1)
             glimpse_size_px = 8 * patch_size  # Default glimpse grid = 8 tokens
 
             hidden_list, projected_list, loss_list = [], [], []
@@ -195,11 +196,13 @@ def main(args: Args) -> None:
                 out = model.forward_step(
                     image=image,
                     canvas=canvas,
+                    cls=cls,
                     viewpoint=vp,
                     glimpse_size_px=glimpse_size_px,
                 )
                 canvas = out.canvas
-                scene = model.compute_scene(canvas)
+                cls = out.cls
+                scene = model.predict_teacher_scene(canvas)
                 spatial = model.get_spatial(canvas)[0]
                 hidden = scene_ln(spatial).cpu().numpy() if args.hidden_ln else spatial.cpu().numpy()
                 projected = scene[0].cpu().numpy()

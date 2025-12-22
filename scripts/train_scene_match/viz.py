@@ -98,11 +98,11 @@ def viz_and_log(
 
     with torch.inference_mode():
         # Compute initial scene BEFORE any forward pass
-        initial_scene = model.compute_scene(canvas)
+        initial_scene = model.predict_teacher_scene(canvas)
 
         traj = model.forward_trajectory(
             image=images,
-            viewpoints=viewpoints,
+            viewpoints=viewpoints,  # pyright: ignore[reportArgumentType]
             canvas_grid_size=canvas_grid_size,
             glimpse_size_px=glimpse_size_px,
             canvas=canvas,
@@ -285,7 +285,7 @@ def val_metrics_only(
         target = scene_normalizer(raw_feats.patches)
         traj = model.forward_trajectory(
             image=images,
-            viewpoints=viewpoints,
+            viewpoints=viewpoints,  # pyright: ignore[reportArgumentType]
             canvas_grid_size=canvas_grid_size,
             glimpse_size_px=glimpse_size_px,
         )
@@ -299,7 +299,7 @@ def val_metrics_only(
 
         if model.cls_head is not None:
             cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
-            cls_pred = model.compute_cls(outputs[-1].canvas)
+            cls_pred = model.predict_teacher_cls(outputs[-1].cls)
             cls_cos_sim = (
                 F.cosine_similarity(cls_pred, cls_target, dim=-1).mean().item()
             )
@@ -311,7 +311,7 @@ def val_metrics_only(
             if probe is not None and labels is not None:
                 in1k_accs: list[float] = []
                 for t, out in enumerate(outputs):
-                    cls_pred_t = model.compute_cls(out.canvas)
+                    cls_pred_t = model.predict_teacher_cls(out.cls)
                     cls_raw = cls_normalizer.denormalize(cls_pred_t)
                     logits = probe(cls_raw)
                     acc = compute_in1k_top1(logits, labels)
@@ -387,7 +387,7 @@ def eval_and_log(
         assert cls_target is not None
         assert viz.cls_cos_sims is not None
         with torch.inference_mode():
-            cls_pred = model.compute_cls(viz.outputs[-1].canvas)
+            cls_pred = model.predict_teacher_cls(viz.outputs[-1].cls)
             cls_cos_sim = (
                 F.cosine_similarity(cls_pred, cls_target, dim=-1).mean().item()
             )
