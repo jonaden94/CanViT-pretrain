@@ -288,7 +288,7 @@ def main() -> None:
         st.markdown("---")
         col_clear, col_undo = st.columns(2)
         with col_clear:
-            if st.button("Clear viewpoints"):
+            if st.button("Clear viewpoints", help="Resets canvas and all viewpoints"):
                 st.session_state.pop("viewpoints", None)
                 st.session_state.pop("results", None)
                 st.session_state.pop("canvas", None)
@@ -297,19 +297,18 @@ def main() -> None:
                 log.info("Cleared all viewpoints")
                 st.rerun()
         with col_undo:
-            if st.button("Undo last"):
+            if st.button("Undo last", help="Removes last viewpoint from display (canvas state preserved)"):
                 if st.session_state.get("viewpoints"):
                     st.session_state.viewpoints.pop()
                     st.session_state.results.pop()
-                    # Note: canvas/cls not reverted (would need history)
-                    log.info("Undid last viewpoint (canvas state not reverted)")
+                    log.info("Undid last viewpoint (canvas state preserved)")
                     st.rerun()
 
         col_teacher, col_latency = st.columns(2)
         with col_teacher:
-            rerun_teacher = st.button("Rerun teacher")
+            rerun_teacher = st.button("Rerun teacher", help="Sample teacher latency again")
         with col_latency:
-            if st.button("Clear latency"):
+            if st.button("Clear latency", help="Clear all latency measurements"):
                 st.session_state.pop("latency_data", None)
                 st.rerun()
 
@@ -467,11 +466,14 @@ def main() -> None:
         with col_sim:
             if scene_sims or cls_sims:
                 fig = go.Figure()
+                # Reference line at cos=1 (perfect alignment)
+                max_t = max(len(scene_sims) if scene_sims else 1, len(cls_sims) if cls_sims else 1)
+                fig.add_trace(go.Scatter(x=[0, max_t - 1], y=[1.0, 1.0], mode="lines", name="Target", line={"dash": "dash", "color": "gray", "width": 1}))
                 if scene_sims:
                     fig.add_trace(go.Scatter(x=list(range(len(scene_sims))), y=scene_sims, mode="lines+markers", name="Scene"))
                 if cls_sims:
                     fig.add_trace(go.Scatter(x=list(range(len(cls_sims))), y=cls_sims, mode="lines+markers", name="CLS"))
-                fig.update_layout(title="Cosine Similarity", xaxis_title="T", yaxis_title="cos", height=250, margin=dict(l=20, r=20, t=40, b=40))
+                fig.update_layout(title="Cosine Similarity", xaxis_title="T", yaxis_title="cos", height=250, margin=dict(l=20, r=20, t=40, b=40), yaxis_range=[0, 1.05])
                 st.plotly_chart(fig, width="stretch")
 
         with col_lat:
