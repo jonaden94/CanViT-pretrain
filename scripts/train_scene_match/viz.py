@@ -10,15 +10,14 @@ import comet_ml
 import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
+from canvit.backbone.dinov3 import DINOv3Backbone, NormFeatures
 from matplotlib.figure import Figure
 from torch import Tensor
 
 from avp_vit import ActiveCanViT, StepOutput
-from avp_vit.train.viewpoint import Viewpoint, sample_at_viewpoint
-from canvit.backbone.dinov3 import DINOv3Backbone, NormFeatures
 from avp_vit.train import imagenet_denormalize, plot_multistep_pca, plot_norm_stats
 from avp_vit.train.norm import PositionAwareNorm
-from avp_vit.train.viewpoint import make_eval_viewpoints
+from avp_vit.train.viewpoint import Viewpoint, make_eval_viewpoints, sample_at_viewpoint
 
 log = logging.getLogger(__name__)
 
@@ -87,8 +86,8 @@ def viz_and_log(
     assert isinstance(model.backbone, DINOv3Backbone)
     model_backbone = model.backbone
     n_spatial = canvas.shape[1] - model.n_prefix
-    canvas_grid_size = int(n_spatial ** 0.5)
-    assert canvas_grid_size ** 2 == n_spatial
+    canvas_grid_size = int(n_spatial**0.5)
+    assert canvas_grid_size**2 == n_spatial
     glimpse_grid_size = glimpse_size_px // model.backbone.patch_size_px
     assert glimpse_grid_size * model.backbone.patch_size_px == glimpse_size_px
 
@@ -103,38 +102,12 @@ def viz_and_log(
             glimpse_size_px=glimpse_size_px,
             canvas=canvas,
         )
-        cos_sims = [F.cosine_similarity(out.scene, target, dim=-1).mean().item() for out in outputs]
+        cos_sims = [
+            F.cosine_similarity(out.scene, target, dim=-1).mean().item()
+            for out in outputs
+        ]
 
         if log_curves:
-            # Canvas states: initial + after each viewpoint
-            canvases = [canvas] + [out.canvas for out in outputs]
-
-            # Spatial canvas norm vs timestep
-            spatial_norms = [
-                model.get_spatial(c).norm(dim=-1).mean().item() for c in canvases
-            ]
-            exp.log_curve(
-                f"{prefix}/spatial_norm_vs_timestep",
-                x=list(range(len(spatial_norms))),
-                y=spatial_norms,
-                step=step,
-            )
-
-            # Step-to-step spatial difference norm
-            diff_norms = [
-                (model.get_spatial(canvases[i + 1]) - model.get_spatial(canvases[i]))
-                .norm(dim=-1)
-                .mean()
-                .item()
-                for i in range(len(canvases) - 1)
-            ]
-            exp.log_curve(
-                f"{prefix}/spatial_diff_norm_vs_timestep",
-                x=list(range(len(diff_norms))),
-                y=diff_norms,
-                step=step,
-            )
-
             # Cosine similarity vs timestep
             exp.log_curve(
                 f"{prefix}/cos_sim_vs_timestep",
@@ -221,9 +194,9 @@ def viz_and_log(
                 target.shape[0], canvas_grid_size, canvas_grid_size, -1
             ).permute(0, 3, 1, 2)
             locals_teacher_cropped = [
-                sample_at_viewpoint(spatial=target_spatial, viewpoint=vp, out_size=glimpse_grid_size)[
-                    sample_idx
-                ]  # [D, G, G]
+                sample_at_viewpoint(
+                    spatial=target_spatial, viewpoint=vp, out_size=glimpse_grid_size
+                )[sample_idx]  # [D, G, G]
                 .permute(1, 2, 0)
                 .reshape(-1, target.shape[-1])  # [G², D]
                 .cpu()
@@ -301,7 +274,9 @@ def val_metrics_only(
         if model.cls_head is not None:
             cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
             cls_pred = model.compute_cls(outputs[-1].canvas)
-            cls_cos_sim = F.cosine_similarity(cls_pred, cls_target, dim=-1).mean().item()
+            cls_cos_sim = (
+                F.cosine_similarity(cls_pred, cls_target, dim=-1).mean().item()
+            )
             cls_mse = F.mse_loss(cls_pred, cls_target).item()
             exp.log_metric(f"{prefix}/cls_cos_sim", cls_cos_sim, step=step)
             exp.log_metric(f"{prefix}/cls_mse", cls_mse, step=step)
@@ -336,9 +311,19 @@ def eval_and_log(
         canvas = model.init_canvas(batch_size=B, canvas_grid_size=canvas_grid_size)
 
     viz = viz_and_log(
-        exp, step, prefix, model, teacher, scene_normalizer,
-        images, viewpoints, target, canvas, glimpse_size_px,
-        log_spatial_stats=log_spatial_stats, log_curves=log_curves,
+        exp,
+        step,
+        prefix,
+        model,
+        teacher,
+        scene_normalizer,
+        images,
+        viewpoints,
+        target,
+        canvas,
+        glimpse_size_px,
+        log_spatial_stats=log_spatial_stats,
+        log_curves=log_curves,
         show_locals=show_locals,
     )
 
@@ -357,7 +342,9 @@ def eval_and_log(
         with torch.inference_mode():
             cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
             cls_pred = model.compute_cls(viz.outputs[-1].canvas)
-            cls_cos_sim = F.cosine_similarity(cls_pred, cls_target, dim=-1).mean().item()
+            cls_cos_sim = (
+                F.cosine_similarity(cls_pred, cls_target, dim=-1).mean().item()
+            )
             cls_mse = F.mse_loss(cls_pred, cls_target).item()
             exp.log_metric(f"{prefix}/cls_cos_sim", cls_cos_sim, step=step)
             exp.log_metric(f"{prefix}/cls_mse", cls_mse, step=step)
