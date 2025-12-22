@@ -154,9 +154,9 @@ def validate(cfg: Config) -> dict[str, float]:
         teacher_correct_top5 += (teacher_top5 == labels.unsqueeze(1)).any(dim=1).sum().item()
 
         total += labels.shape[0]
-        final_acc1 = 100 * correct_top1[-1] / total
         teacher_acc1 = 100 * teacher_correct_top1 / total
-        pbar.set_postfix_str(f"model={final_acc1:.1f}% teacher={teacher_acc1:.1f}%")
+        ts = " ".join(f"t{t}={100*correct_top1[t]/total:.1f}" for t in range(n_timesteps))
+        pbar.set_postfix_str(f"{ts} teacher={teacher_acc1:.1f}")
 
     log.info("Results by timestep (t0=full, t1-4=quadrants):")
     metrics: dict[str, float] = {"total_samples": float(total)}
