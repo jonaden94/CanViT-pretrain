@@ -290,13 +290,30 @@ def validate(
         backbone: Backbone name for probe resolution lookup (required if probe is provided).
     """
     assert not log_pca or teacher is not None, "teacher required for PCA viz"
+
+    # Warn if resolution mismatch between model targets and probe training
+    if probe is not None and backbone is not None:
+        probe_res = get_probe_resolution(backbone)
+        if scene_size_px != probe_res:
+            log.warning(
+                f"Resolution mismatch: model predicts teacher@{scene_size_px}, "
+                f"but probe trained on teacher@{probe_res}. IN1k metrics may be unreliable."
+            )
+
     B = images.shape[0]
     viewpoints = make_eval_viewpoints(B, images.device)
 
-    with torch.inference_mode():
-        raw_feats = compute_raw_targets(images, scene_size_px)
-        target = scene_normalizer(raw_feats.patches)
-        cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1) if model.cls_head is not None else None
+    # Freeze normalizer stats during validation (don't contaminate with val data)
+    scene_was_training = scene_normalizer.training
+    cls_was_training = cls_normalizer.training
+    scene_normalizer.eval()
+    cls_normalizer.eval()
+
+    try:
+        with torch.inference_mode():
+            raw_feats = compute_raw_targets(images, scene_size_px)
+            target = scene_normalizer(raw_feats.patches)
+            cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1) if model.cls_head is not None else None
         canvas = model.init_canvas(batch_size=B, canvas_grid_size=canvas_grid_size)
 
         traj = model.forward_trajectory(
@@ -406,7 +423,13 @@ def validate(
                 timestep_predictions=pca_predictions,
             )
 
-    return cos_sim
+        return cos_sim
+    finally:
+        # Restore normalizer training state
+        if scene_was_training:
+            scene_normalizer.train()
+        if cls_was_training:
+            cls_normalizer.train()
 
 
 def log_norm_stats(
