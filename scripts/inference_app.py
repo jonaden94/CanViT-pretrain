@@ -9,6 +9,7 @@ User flow:
 5. Reset viewpoints → clears viewpoints but keeps image
 """
 
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +39,9 @@ from dinov3_probes import DINOv3LinearClassificationHead
 from ytch.device import sync_device
 
 IMAGENET_LABELS = ResNet50_Weights.DEFAULT.meta["categories"]
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
 st.set_page_config(page_title="AVP-ViT", layout="wide")
 
@@ -74,6 +78,7 @@ class Resources:
 
 @st.cache_resource
 def load_resources(ckpt_path: str, device_name: str) -> Resources:
+    log.info(f"Loading resources: ckpt={ckpt_path}, device={device_name}")
     device = torch.device(device_name)
     model = load_model(Path(ckpt_path), device)
     ckpt = load_ckpt(Path(ckpt_path), "cpu")
@@ -118,11 +123,17 @@ def load_resources(ckpt_path: str, device_name: str) -> Resources:
 # --- Core ---
 
 
-def get_teacher_target(
-    res: Resources, image: Tensor, teacher_grid: int
-) -> tuple[Tensor | None, Tensor | None, float]:
+@dataclass
+class TeacherResult:
+    scene: Tensor | None
+    cls: Tensor | None
+    top5: list[tuple[str, float]]
+    ms: float
+
+
+def get_teacher_target(res: Resources, image: Tensor, teacher_grid: int) -> TeacherResult:
     if res.teacher is None:
-        return None, None, 0.0
+        return TeacherResult(None, None, [], 0.0)
 
     px = teacher_grid * res.patch_size
     img = F.interpolate(image, (px, px), mode="bilinear", align_corners=False)
@@ -141,7 +152,15 @@ def get_teacher_target(
     if res.cls_norm is not None:
         cls_target = res.cls_norm(feats.cls.unsqueeze(1)).squeeze(1)
 
-    return scene[0], cls_target, ms
+    # Teacher top-5 predictions
+    top5: list[tuple[str, float]] = []
+    if res.probe is not None:
+        logits = res.probe(feats.cls)
+        probs = F.softmax(logits, dim=-1)
+        p, c = probs[0].topk(5)
+        top5 = [(IMAGENET_LABELS[i], prob) for i, prob in zip(c.tolist(), p.tolist())]
+
+    return TeacherResult(scene[0] if scene is not None else None, cls_target, top5, ms)
 
 
 def run_step(
@@ -157,6 +176,10 @@ def run_step(
     teacher_grid: int,
     l2_norm: bool,
 ) -> tuple[Tensor, Tensor, StepResult]:
+    # Shape assertions
+    assert image.shape[0] == 1, f"batch size must be 1, got {image.shape[0]}"
+    assert canvas.shape[0] == 1, f"canvas batch size must be 1, got {canvas.shape[0]}"
+
     sync_device(image.device)
     t0 = time.perf_counter()
     out = res.model.forward_step(
@@ -166,10 +189,13 @@ def run_step(
     step_ms = (time.perf_counter() - t0) * 1000
 
     spatial = res.model.get_spatial(out.canvas)[0]
+    assert spatial.shape[0] == canvas_grid * canvas_grid, f"spatial tokens {spatial.shape[0]} != {canvas_grid}²"
+
     if l2_norm:
         spatial = F.normalize(spatial, p=2, dim=-1)
 
     scene = res.model.predict_teacher_scene(out.canvas)
+    assert scene.shape[1] == canvas_grid * canvas_grid, f"scene tokens {scene.shape[1]} != {canvas_grid}²"
 
     # Scene cosine similarity
     scene_cos = None
@@ -254,7 +280,7 @@ def main() -> None:
         l2_norm = st.checkbox("L2 normalize hidden", value=False)
 
         st.markdown("---")
-        col_clear, col_teacher = st.columns(2)
+        col_clear, col_undo = st.columns(2)
         with col_clear:
             if st.button("Clear viewpoints"):
                 st.session_state.pop("viewpoints", None)
@@ -262,13 +288,24 @@ def main() -> None:
                 st.session_state.pop("canvas", None)
                 st.session_state.pop("cls", None)
                 st.session_state.pop("last_click", None)
+                log.info("Cleared all viewpoints")
                 st.rerun()
+        with col_undo:
+            if st.button("Undo last"):
+                if st.session_state.get("viewpoints"):
+                    st.session_state.viewpoints.pop()
+                    st.session_state.results.pop()
+                    # Note: canvas/cls not reverted (would need history)
+                    log.info("Undid last viewpoint (canvas state not reverted)")
+                    st.rerun()
+
+        col_teacher, col_latency = st.columns(2)
         with col_teacher:
             rerun_teacher = st.button("Rerun teacher")
-
-        if st.button("Clear latency data"):
-            st.session_state.pop("latency_data", None)
-            st.rerun()
+        with col_latency:
+            if st.button("Clear latency"):
+                st.session_state.pop("latency_data", None)
+                st.rerun()
 
     uploaded = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
 
@@ -321,16 +358,16 @@ def main() -> None:
     model_key = f"Model {glimpse_grid}→{canvas_grid}"
 
     with torch.no_grad():
-        scene_target, cls_target, teacher_ms = get_teacher_target(res, image, teacher_grid)
-        if teacher_ms > 0:
+        teacher = get_teacher_target(res, image, teacher_grid)
+        if teacher.ms > 0:
             if teacher_key not in latency_data:
                 latency_data[teacher_key] = []
             # First run for this config or rerun button pressed
             if not latency_data[teacher_key] or rerun_teacher:
-                latency_data[teacher_key].append(teacher_ms)
+                latency_data[teacher_key].append(teacher.ms)
 
     # Cache expensive computations
-    scene_target_np = scene_target.cpu().numpy() if scene_target is not None else None
+    scene_target_np = teacher.scene.cpu().numpy() if teacher.scene is not None else None
     pca_teacher = fit_pca(scene_target_np) if scene_target_np is not None else None
 
     viewpoints: list[Viewpoint] = st.session_state.viewpoints
@@ -358,7 +395,7 @@ def main() -> None:
                     sync_device(device)
                     new_canvas, new_cls, result = run_step(
                         res, image, st.session_state.canvas, st.session_state.cls,
-                        vp, glimpse_px, canvas_grid, scene_target, cls_target,
+                        vp, glimpse_px, canvas_grid, teacher.scene, teacher.cls,
                         teacher_grid, l2_norm,
                     )
                     sync_device(device)
@@ -369,6 +406,7 @@ def main() -> None:
                     if model_key not in latency_data:
                         latency_data[model_key] = []
                     latency_data[model_key].append(result.step_ms)
+                    log.info(f"T{n}: pos=({cx:.1f},{cy:.1f}) scale={scale:.2f} cos={result.scene_cos:.4f if result.scene_cos else '?'} time={result.step_ms:.1f}ms")
                 st.rerun()
 
     with c2:
@@ -391,13 +429,23 @@ def main() -> None:
             if results[-1].scene_cos is not None:
                 st.caption(f"cos = {results[-1].scene_cos:.4f}")
 
-    # Top-5 predictions
-    if n > 0 and results[-1].top5:
+    # Top-5 predictions (Model vs Teacher)
+    has_model_preds = n > 0 and results[-1].top5
+    has_teacher_preds = bool(teacher.top5)
+    if has_model_preds or has_teacher_preds:
         st.markdown("---")
-        cols = st.columns(5)
-        for i, (label, prob) in enumerate(results[-1].top5):
-            with cols[i]:
-                st.metric(label, f"{100*prob:.1f}%")
+        if has_model_preds:
+            st.markdown("**Model** (AVP-ViT)")
+            cols = st.columns(5)
+            for i, (label, prob) in enumerate(results[-1].top5):
+                with cols[i]:
+                    st.metric(label, f"{100*prob:.1f}%")
+        if has_teacher_preds:
+            st.markdown("**Teacher** (DINOv3)")
+            cols = st.columns(5)
+            for i, (label, prob) in enumerate(teacher.top5):
+                with cols[i]:
+                    st.metric(label, f"{100*prob:.1f}%")
 
     # Metrics plots
     if n > 0:
@@ -429,17 +477,24 @@ def main() -> None:
                 )
                 st.plotly_chart(fig, width="stretch")
 
-    # Timeline
+    # Timeline (glimpse → hidden → projected)
     n_results = len(results)
-    if n_results > 0 and pca_teacher is not None:
+    if n_results > 0:
         st.markdown("---")
-        st.markdown("**Timeline**")
+        st.markdown("**Timeline** (glimpse → hidden → projected)")
         n_show = min(n_results, 8)
         cols = st.columns(n_show)
         for t in range(n_show):
             with cols[t]:
+                # Glimpse
                 st.image((np.clip(results[t].glimpse, 0, 1) * 255).astype(np.uint8), width=80)
-                st.image(upscale(pca_rgb(pca_teacher, results[t].projected, canvas_grid, canvas_grid, normalize=True), 80), width=80)
+                # Hidden (own PCA)
+                h = results[t].hidden
+                pca_h = fit_pca(h)
+                st.image(upscale(pca_rgb(pca_h, h, canvas_grid, canvas_grid), 80), width=80)
+                # Projected (teacher PCA)
+                if pca_teacher is not None:
+                    st.image(upscale(pca_rgb(pca_teacher, results[t].projected, canvas_grid, canvas_grid, normalize=True), 80), width=80)
                 st.caption(f"T{t}: {results[t].scene_cos:.3f}" if results[t].scene_cos else f"T{t}")
 
     # Debug
@@ -451,6 +506,18 @@ patch: {res.patch_size}px, img: {img_size}px, glimpse: {glimpse_px}px
 teacher: {'✓' if res.teacher else '✗'}, scene_norm: {res.scene_norm.grid_size if res.scene_norm else '✗'}², probe: {'✓' if res.probe else '✗'}
 canvas: {tuple(st.session_state.canvas.shape)}, cls: {tuple(st.session_state.cls.shape)}
 latency: {latency_summary or 'none'}""")
+
+        if viewpoints:
+            st.markdown("**Viewpoints**")
+            vp_lines = []
+            for i, vp in enumerate(viewpoints):
+                box = vp.to_pixel_box(0, H, W)
+                cy, cx = vp.centers[0].tolist()
+                s = vp.scales[0].item()
+                cos = results[i].scene_cos if i < len(results) and results[i].scene_cos else None
+                cos_str = f"{cos:.4f}" if cos else "?"
+                vp_lines.append(f"T{i}: center=({cx:.3f},{cy:.3f}) scale={s:.2f} → pixel=({box.center_x:.0f},{box.center_y:.0f}) cos={cos_str}")
+            st.code("\n".join(vp_lines))
 
 
 if __name__ == "__main__":
