@@ -332,11 +332,13 @@ def main() -> None:
                 viewpoints.append(vp)
 
                 with torch.no_grad():
+                    sync_device(device)
                     new_canvas, new_cls, result = run_step(
                         res, image, st.session_state.canvas, st.session_state.cls,
                         vp, glimpse_px, canvas_grid, scene_target, cls_target,
                         teacher_grid, l2_norm,
                     )
+                    sync_device(device)
                     st.session_state.canvas = new_canvas
                     st.session_state.cls = new_cls
                     results.append(result)
@@ -385,7 +387,7 @@ def main() -> None:
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=list(range(len(scene_sims))), y=scene_sims, mode="lines+markers", name="Scene cos"))
                 fig.update_layout(title="Similarity vs Timestep", xaxis_title="T", yaxis_title="Cosine", height=250, margin=dict(l=20, r=20, t=40, b=40))
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
         with col_lat:
             if step_times:
@@ -406,7 +408,7 @@ def main() -> None:
                     title="Latency Distribution",
                     yaxis_title="ms", height=250, margin=dict(l=20, r=20, t=40, b=40), showlegend=False
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
     # Timeline
     n_results = len(results)
