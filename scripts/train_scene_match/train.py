@@ -208,7 +208,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             losses, _ = model.forward_loss(
                 image=images,
                 viewpoints=viewpoints,
-                target=targets,
+                spatial_target=targets,
                 cls_target=cls_targets,
                 glimpse_size_px=glimpse_size_px,
                 canvas_grid_size=G,
