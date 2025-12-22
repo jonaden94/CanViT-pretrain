@@ -85,7 +85,9 @@ def fit_pca(features: NDArray[np.floating]) -> PCA | None:
     Returns:
         Fitted PCA, or None if features have zero variance (e.g., constant init).
     """
-    if features.var() < 1e-10:
+    # Check variance along each spatial position - if too uniform, skip
+    # Early training has ~1e-8 variance which still breaks PCA
+    if features.var(axis=0).max() < 1e-5:
         return None
     pca = PCA(n_components=3, whiten=True)
     pca.fit(features)
