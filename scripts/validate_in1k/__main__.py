@@ -17,12 +17,14 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 from tqdm import tqdm
 
+from canvit.backbone.dinov3 import DINOv3Backbone
+
 from avp_vit import ActiveCanViT
-from avp_vit.checkpoint import load as load_ckpt, load_model
-from canvit.viewpoint import Viewpoint as CoreViewpoint
+from avp_vit.checkpoint import _get_backbone_factory, load as load_ckpt, load_model
 from avp_vit.train.data import val_transform
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import make_eval_viewpoints
+from canvit.viewpoint import Viewpoint as CoreViewpoint
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -43,6 +45,14 @@ class Config:
     device: str = "mps"
     canvas_grid: int = 32
     glimpse_grid: int = 8
+
+
+def load_teacher(ckpt_path: Path, device: torch.device) -> DINOv3Backbone:
+    """Load teacher backbone from checkpoint."""
+    ckpt = load_ckpt(ckpt_path, "cpu")
+    factory = _get_backbone_factory(ckpt["backbone"])
+    raw_teacher = factory(pretrained=True)
+    return DINOv3Backbone(raw_teacher.to(device).eval())  # type: ignore[arg-type]
 
 
 def load_cls_normalizer(ckpt_path: Path, device: torch.device) -> PositionAwareNorm:
@@ -68,8 +78,8 @@ def run_trajectory(
     images: Tensor,
     canvas_grid: int,
     glimpse_size_px: int,
-) -> Tensor:
-    """Run coarse-to-fine trajectory and return final CLS prediction."""
+) -> list[Tensor]:
+    """Run coarse-to-fine trajectory and return CLS prediction at each timestep."""
     B = images.shape[0]
     viewpoints = make_eval_viewpoints(B, images.device)
     outputs, _ = model.forward_trajectory(
@@ -78,7 +88,7 @@ def run_trajectory(
         canvas_grid_size=canvas_grid,
         glimpse_size_px=glimpse_size_px,
     )
-    return model.compute_cls(outputs[-1].canvas)
+    return [model.compute_cls(out.canvas) for out in outputs]
 
 
 @torch.inference_mode()
@@ -99,20 +109,25 @@ def validate(cfg: Config) -> dict[str, float]:
     log.info(f"Probe: {PROBE_REPOS[backbone]}")
 
     cls_norm = load_cls_normalizer(cfg.checkpoint, device)
+    teacher = load_teacher(cfg.checkpoint, device)
+    log.info("Teacher loaded for baseline comparison")
 
     transform = val_transform(img_size)
     dataset = ImageFolder(str(cfg.val_dir), transform=transform)
     loader = DataLoader(
         dataset,
         batch_size=cfg.batch_size,
-        shuffle=False,
+        shuffle=True,  # Shuffle for representative partial results in tqdm
         num_workers=cfg.num_workers,
         pin_memory=True,
     )
     log.info(f"Dataset: {len(dataset)} images, {len(loader)} batches")
 
-    correct_top1 = 0
-    correct_top5 = 0
+    n_timesteps = 5  # full + 4 quadrants
+    correct_top1 = [0] * n_timesteps
+    correct_top5 = [0] * n_timesteps
+    teacher_correct_top1 = 0
+    teacher_correct_top5 = 0
     total = 0
 
     pbar = tqdm(loader, desc="Validating", unit="batch")
@@ -120,27 +135,44 @@ def validate(cfg: Config) -> dict[str, float]:
         images = images.to(device)
         labels = labels.to(device)
 
-        cls_pred = run_trajectory(model, images, cfg.canvas_grid, glimpse_size_px)
-        cls_raw = denormalize_cls(cls_pred, cls_norm)
-        logits = probe(cls_raw)
+        # Model predictions at each timestep
+        cls_preds = run_trajectory(model, images, cfg.canvas_grid, glimpse_size_px)
+        for t, cls_pred in enumerate(cls_preds):
+            cls_raw = denormalize_cls(cls_pred, cls_norm)
+            logits = probe(cls_raw)
+            _, top5_pred = logits.topk(5, dim=-1)
+            top1_pred = top5_pred[:, 0]
+            correct_top1[t] += (top1_pred == labels).sum().item()
+            correct_top5[t] += (top5_pred == labels.unsqueeze(1)).any(dim=1).sum().item()
 
-        _, top5_pred = logits.topk(5, dim=-1)
-        top1_pred = top5_pred[:, 0]
+        # Teacher baseline (raw CLS features)
+        teacher_cls = teacher.forward_norm_features(images).cls
+        teacher_logits = probe(teacher_cls)
+        _, teacher_top5 = teacher_logits.topk(5, dim=-1)
+        teacher_top1 = teacher_top5[:, 0]
+        teacher_correct_top1 += (teacher_top1 == labels).sum().item()
+        teacher_correct_top5 += (teacher_top5 == labels.unsqueeze(1)).any(dim=1).sum().item()
 
-        correct_top1 += (top1_pred == labels).sum().item()
-        correct_top5 += (top5_pred == labels.unsqueeze(1)).any(dim=1).sum().item()
         total += labels.shape[0]
+        final_acc1 = 100 * correct_top1[-1] / total
+        teacher_acc1 = 100 * teacher_correct_top1 / total
+        pbar.set_postfix_str(f"model={final_acc1:.1f}% teacher={teacher_acc1:.1f}%")
 
-        acc1 = 100 * correct_top1 / total
-        acc5 = 100 * correct_top5 / total
-        pbar.set_postfix_str(f"top1={acc1:.2f}% top5={acc5:.2f}%")
+    log.info("Results by timestep (t0=full, t1-4=quadrants):")
+    metrics: dict[str, float] = {"total_samples": float(total)}
+    for t in range(n_timesteps):
+        acc1 = 100 * correct_top1[t] / total
+        acc5 = 100 * correct_top5[t] / total
+        log.info(f"  t{t}: top1={acc1:.2f}%, top5={acc5:.2f}%")
+        metrics[f"t{t}_top1"] = acc1
+        metrics[f"t{t}_top5"] = acc5
 
-    metrics = {
-        "top1_accuracy": 100 * correct_top1 / total,
-        "top5_accuracy": 100 * correct_top5 / total,
-        "total_samples": total,
-    }
-    log.info(f"Final: top1={metrics['top1_accuracy']:.2f}%, top5={metrics['top5_accuracy']:.2f}%")
+    teacher_acc1 = 100 * teacher_correct_top1 / total
+    teacher_acc5 = 100 * teacher_correct_top5 / total
+    log.info(f"Teacher baseline: top1={teacher_acc1:.2f}%, top5={teacher_acc5:.2f}%")
+    metrics["teacher_top1"] = teacher_acc1
+    metrics["teacher_top5"] = teacher_acc5
+
     return metrics
 
 
