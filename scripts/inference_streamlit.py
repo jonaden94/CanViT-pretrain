@@ -25,15 +25,10 @@ from avp_vit.checkpoint import load as load_ckpt
 from avp_vit.checkpoint import load_model
 from avp_vit.train.data import imagenet_normalize
 from avp_vit.train.norm import PositionAwareNorm
+from avp_vit.train.probe import load_probe
 from avp_vit.train.viewpoint import Viewpoint
 from avp_vit.train.viz import fit_pca, imagenet_denormalize, pca_rgb, timestep_colors
 from ytch.device import sync_device
-
-PROBE_REPOS = {
-    "dinov3_vits16": "yberreby/dinov3-vits16-lvd1689m-in1k-512x512-linear-clf-probe",
-    "dinov3_vitb16": "yberreby/dinov3-vitb16-lvd1689m-in1k-512x512-linear-clf-probe",
-    "dinov3_vitl16": "yberreby/dinov3-vitl16-lvd1689m-in1k-512x512-linear-clf-probe",
-}
 IMAGENET_LABELS = ResNet50_Weights.DEFAULT.meta["categories"]
 
 DISPLAY_PX = 512
@@ -156,11 +151,7 @@ def cached_load_probe(
 ) -> DINOv3LinearClassificationHead | None:
     """Load classification probe from HF Hub if backbone is supported."""
     ckpt = load_ckpt(Path(checkpoint_path), "cpu")
-    backbone = ckpt["backbone"]
-    if backbone not in PROBE_REPOS:
-        return None
-    probe = DINOv3LinearClassificationHead.from_pretrained(PROBE_REPOS[backbone])
-    return probe.to(device).eval()
+    return load_probe(ckpt["backbone"], torch.device(device))
 
 
 def load_and_preprocess(
@@ -347,8 +338,7 @@ def run_inference_step(
     top5_classes: list[int] | None = None
     top5_probs: list[float] | None = None
     if probe is not None and cls_norm is not None:
-        std = (cls_norm.var + cls_norm.eps).sqrt()
-        cls_raw = cls_pred * std + cls_norm.mean
+        cls_raw = cls_norm.denormalize(cls_pred)
         logits = probe(cls_raw)
         probs = F.softmax(logits, dim=-1)
         top5_p, top5_c = probs[0].topk(5)
