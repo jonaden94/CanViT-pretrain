@@ -97,7 +97,7 @@ def fmt(flops: int) -> str:
 def main() -> None:
     from canvit import CanViT, CanViTConfig
     from canvit.backbone.dinov3 import DINOv3Backbone
-    from dinov3.hub.backbones import dinov3_vitb16
+    from dinov3.hub.backbones import dinov3_vitb16  # pyright: ignore[reportAttributeAccessIssue]
 
     console = Console()
 
