@@ -80,3 +80,7 @@ class PositionAwareNorm(nn.Module):
                     )
 
         return (x - self.mean) / (self.var + self.eps).sqrt()
+
+    def denormalize(self, x: Tensor) -> Tensor:
+        """Invert normalization: x * sqrt(var + eps) + mean."""
+        return x * (self.var + self.eps).sqrt() + self.mean

@@ -24,6 +24,7 @@ from avp_vit.checkpoint import load as load_checkpoint  # noqa: E402
 from avp_vit.checkpoint import save as save_checkpoint  # noqa: E402
 from avp_vit.train import InfiniteLoader, warmup_cosine_scheduler  # noqa: E402
 from avp_vit.train.norm import PositionAwareNorm  # noqa: E402
+from avp_vit.train.probe import load_probe  # noqa: E402
 from avp_vit.train.viewpoint import random_viewpoint  # noqa: E402
 
 from .config import Config  # noqa: E402
@@ -110,6 +111,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     teacher = load_teacher(cfg)
     log.info(f"Teacher params: {count_parameters(teacher):,}")
+
+    probe = load_probe(cfg.teacher_model, cfg.device)
+    if probe is not None:
+        log.info(f"Loaded IN1k probe for {cfg.teacher_model}")
 
     student_backbone = load_student_backbone(cfg)
     log.info(f"Student backbone params: {count_parameters(student_backbone):,}")
@@ -283,11 +288,14 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 exp.log_metric(f"grad_norm/{name}", norm, step=step)
 
             if step not in viz_steps:
-                val_images = val_loader.next_batch().to(cfg.device)
+                val_images, val_labels = val_loader.next_batch_with_labels()
+                val_images = val_images.to(cfg.device)
+                val_labels = val_labels.to(cfg.device) if probe is not None else None
                 with amp_ctx:
                     val_metrics_only(
                         exp, step, model, compute_raw_targets, scene_norm, cls_norm,
                         val_images, G, scene_size, glimpse_size_px, "val",
+                        probe=probe, labels=val_labels,
                     )
 
             if step > 0:

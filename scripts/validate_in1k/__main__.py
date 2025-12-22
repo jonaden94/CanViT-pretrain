@@ -11,7 +11,6 @@ from pathlib import Path
 
 import torch
 import tyro
-from dinov3_probes import DINOv3LinearClassificationHead
 from torch import Tensor
 from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
@@ -23,17 +22,12 @@ from avp_vit import ActiveCanViT
 from avp_vit.checkpoint import _get_backbone_factory, load as load_ckpt, load_model
 from avp_vit.train.data import val_transform
 from avp_vit.train.norm import PositionAwareNorm
+from avp_vit.train.probe import load_probe
 from avp_vit.train.viewpoint import make_eval_viewpoints
 from canvit.viewpoint import Viewpoint as CoreViewpoint
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
-
-PROBE_REPOS = {
-    "dinov3_vits16": "yberreby/dinov3-vits16-lvd1689m-in1k-512x512-linear-clf-probe",
-    "dinov3_vitb16": "yberreby/dinov3-vitb16-lvd1689m-in1k-512x512-linear-clf-probe",
-    "dinov3_vitl16": "yberreby/dinov3-vitl16-lvd1689m-in1k-512x512-linear-clf-probe",
-}
 
 
 @dataclass
@@ -67,12 +61,6 @@ def load_cls_normalizer(ckpt_path: Path, device: torch.device) -> PositionAwareN
     return cls_norm.to(device)
 
 
-def denormalize_cls(x: Tensor, norm: PositionAwareNorm) -> Tensor:
-    """Invert PositionAwareNorm: x * sqrt(var + eps) + mean."""
-    std = (norm.var + norm.eps).sqrt()
-    return x * std + norm.mean
-
-
 def run_trajectory(
     model: ActiveCanViT,
     images: Tensor,
@@ -104,9 +92,9 @@ def validate(cfg: Config) -> dict[str, float]:
 
     ckpt = load_ckpt(cfg.checkpoint, device)
     backbone = ckpt["backbone"]
-    assert backbone in PROBE_REPOS, f"No probe for backbone {backbone}"
-    probe = DINOv3LinearClassificationHead.from_pretrained(PROBE_REPOS[backbone]).to(device)
-    log.info(f"Probe: {PROBE_REPOS[backbone]}")
+    probe = load_probe(backbone, device)
+    assert probe is not None, f"No probe for backbone {backbone}"
+    log.info(f"Probe loaded for {backbone}")
 
     cls_norm = load_cls_normalizer(cfg.checkpoint, device)
     teacher = load_teacher(cfg.checkpoint, device)
@@ -138,7 +126,7 @@ def validate(cfg: Config) -> dict[str, float]:
         # Model predictions at each timestep
         cls_preds = run_trajectory(model, images, cfg.canvas_grid, glimpse_size_px)
         for t, cls_pred in enumerate(cls_preds):
-            cls_raw = denormalize_cls(cls_pred, cls_norm)
+            cls_raw = cls_norm.denormalize(cls_pred)
             logits = probe(cls_raw)
             _, top5_pred = logits.topk(5, dim=-1)
             top1_pred = top5_pred[:, 0]

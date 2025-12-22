@@ -81,3 +81,7 @@ class InfiniteLoader:
         """Get next batch of images (discards labels)."""
         imgs, _ = next(self._gen)
         return imgs
+
+    def next_batch_with_labels(self) -> tuple[Tensor, Tensor]:
+        """Get next batch of (images, labels)."""
+        return next(self._gen)

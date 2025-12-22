@@ -14,9 +14,12 @@ from canvit.backbone.dinov3 import DINOv3Backbone, NormFeatures
 from matplotlib.figure import Figure
 from torch import Tensor
 
+from dinov3_probes import DINOv3LinearClassificationHead
+
 from avp_vit import ActiveCanViT, StepOutput
 from avp_vit.train import imagenet_denormalize, plot_multistep_pca, plot_norm_stats
 from avp_vit.train.norm import PositionAwareNorm
+from avp_vit.train.probe import compute_in1k_top1
 from avp_vit.train.viewpoint import Viewpoint, make_eval_viewpoints, sample_at_viewpoint
 
 log = logging.getLogger(__name__)
@@ -264,8 +267,15 @@ def val_metrics_only(
     scene_size_px: int,
     glimpse_size_px: int,
     prefix: str = "val",
+    probe: DINOv3LinearClassificationHead | None = None,
+    labels: Tensor | None = None,
 ) -> float:
-    """Fast validation without PCA. Returns final scene cosine similarity."""
+    """Fast validation without PCA. Returns final scene cosine similarity.
+
+    Args:
+        probe: Optional IN1k classification probe for accuracy metrics.
+        labels: Optional IN1k labels (required if probe is provided).
+    """
     B = images.shape[0]
     viewpoints = make_eval_viewpoints(B, images.device)
 
@@ -294,6 +304,23 @@ def val_metrics_only(
             cls_mse = F.mse_loss(cls_pred, cls_target).item()
             exp.log_metric(f"{prefix}/cls_cos_sim", cls_cos_sim, step=step)
             exp.log_metric(f"{prefix}/cls_mse", cls_mse, step=step)
+
+            # IN1k probe metrics (optional)
+            if probe is not None and labels is not None:
+                in1k_accs: list[float] = []
+                for t, out in enumerate(outputs):
+                    cls_pred_t = model.compute_cls(out.canvas)
+                    cls_raw = cls_normalizer.denormalize(cls_pred_t)
+                    logits = probe(cls_raw)
+                    acc = compute_in1k_top1(logits, labels)
+                    in1k_accs.append(acc)
+                    exp.log_metric(f"{prefix}/in1k_t{t}", acc, step=step)
+                exp.log_curve(
+                    f"{prefix}/in1k_vs_timestep",
+                    x=list(range(len(in1k_accs))),
+                    y=in1k_accs,
+                    step=step,
+                )
 
     return cos_sim
 

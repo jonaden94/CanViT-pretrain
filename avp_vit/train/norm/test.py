@@ -206,3 +206,17 @@ def test_effective_momentum_formula():
     # After B samples, old stats should have weight (1-α)^B = 0.6561
     # New info should have weight 1 - 0.6561 = 0.3439
     assert abs(m_expected - 0.3439) < 0.001
+
+
+def test_denormalize_inverts_forward():
+    """denormalize should invert forward normalization."""
+    norm = PositionAwareNorm(n_tokens=4, embed_dim=8, grid_size=2)
+    norm.train()
+    norm(torch.randn(8, 4, 8))
+    norm.eval()
+
+    x = torch.randn(4, 4, 8)
+    normalized = norm(x)
+    recovered = norm.denormalize(normalized)
+
+    assert torch.allclose(recovered, x, rtol=1e-5)
