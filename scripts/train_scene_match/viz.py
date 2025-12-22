@@ -25,7 +25,8 @@ log = logging.getLogger(__name__)
 class VizResult(NamedTuple):
     """Result from viz_and_log: per-timestep cosine similarities and model outputs."""
 
-    cos_sims: list[float]  # [cos_sim_t0, cos_sim_t1, ...]
+    scene_cos_sims: list[float]  # [cos_sim_t0, cos_sim_t1, ...]
+    cls_cos_sims: list[float] | None  # None if no cls_target provided
     outputs: list[StepOutput]  # Model outputs at each timestep
 
 
@@ -77,6 +78,7 @@ def viz_and_log(
     target: Tensor,
     canvas: Tensor,
     glimpse_size_px: int,
+    cls_target: Tensor | None = None,
     show_canvas: bool = True,
     log_spatial_stats: bool = True,
     log_curves: bool = True,
@@ -102,19 +104,31 @@ def viz_and_log(
             glimpse_size_px=glimpse_size_px,
             canvas=canvas,
         )
-        cos_sims = [
+        scene_cos_sims = [
             F.cosine_similarity(out.scene, target, dim=-1).mean().item()
             for out in outputs
         ]
+        cls_cos_sims: list[float] | None = None
+        if cls_target is not None:
+            cls_cos_sims = [
+                F.cosine_similarity(out.cls, cls_target, dim=-1).mean().item()
+                for out in outputs
+            ]
 
         if log_curves:
-            # Cosine similarity vs timestep
             exp.log_curve(
-                f"{prefix}/cos_sim_vs_timestep",
-                x=list(range(len(cos_sims))),
-                y=cos_sims,
+                f"{prefix}/scene_cos_sim_vs_timestep",
+                x=list(range(len(scene_cos_sims))),
+                y=scene_cos_sims,
                 step=step,
             )
+            if cls_cos_sims is not None:
+                exp.log_curve(
+                    f"{prefix}/cls_cos_sim_vs_timestep",
+                    x=list(range(len(cls_cos_sims))),
+                    y=cls_cos_sims,
+                    step=step,
+                )
 
         # Log spatial stats for target and final prediction
         if log_spatial_stats:
@@ -235,7 +249,7 @@ def viz_and_log(
     )
     log_figure(exp, fig_pca, f"{prefix}/pca", step)
 
-    return VizResult(cos_sims=cos_sims, outputs=outputs)
+    return VizResult(scene_cos_sims=scene_cos_sims, cls_cos_sims=cls_cos_sims, outputs=outputs)
 
 
 def val_metrics_only(
@@ -308,6 +322,7 @@ def eval_and_log(
     with torch.inference_mode():
         raw_feats = compute_raw_targets(images, scene_size_px)
         target = scene_normalizer(raw_feats.patches)
+        cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1) if model.cls_head is not None else None
         canvas = model.init_canvas(batch_size=B, canvas_grid_size=canvas_grid_size)
 
     viz = viz_and_log(
@@ -322,15 +337,16 @@ def eval_and_log(
         target,
         canvas,
         glimpse_size_px,
+        cls_target=cls_target,
         log_spatial_stats=log_spatial_stats,
         log_curves=log_curves,
         show_locals=show_locals,
     )
 
     # Log per-timestep and final cosine similarity
-    for t, cos_sim in enumerate(viz.cos_sims):
+    for t, cos_sim in enumerate(viz.scene_cos_sims):
         exp.log_metric(f"{prefix}/scene_cos_sim_t{t}", cos_sim, step=step)
-    exp.log_metric(f"{prefix}/scene_cos_sim", viz.cos_sims[-1], step=step)
+    exp.log_metric(f"{prefix}/scene_cos_sim", viz.scene_cos_sims[-1], step=step)
 
     # Scene MSE (for comparison with train/scene_loss)
     final_scene = viz.outputs[-1].scene
@@ -339,8 +355,9 @@ def eval_and_log(
 
     # CLS metrics (if enabled)
     if model.cls_head is not None:
+        assert cls_target is not None
+        assert viz.cls_cos_sims is not None
         with torch.inference_mode():
-            cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
             cls_pred = model.compute_cls(viz.outputs[-1].canvas)
             cls_cos_sim = (
                 F.cosine_similarity(cls_pred, cls_target, dim=-1).mean().item()
@@ -349,7 +366,7 @@ def eval_and_log(
             exp.log_metric(f"{prefix}/cls_cos_sim", cls_cos_sim, step=step)
             exp.log_metric(f"{prefix}/cls_mse", cls_mse, step=step)
 
-    return viz.cos_sims[-1]
+    return viz.scene_cos_sims[-1]
 
 
 def log_norm_stats(
