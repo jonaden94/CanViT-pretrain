@@ -15,6 +15,7 @@ from avp_vit.train.viewpoint import (
     random_viewpoint,
 )
 from avp_vit.train.viz import (
+    TimestepPredictions,
     fit_pca,
     imagenet_denormalize,
     pca_rgb,
@@ -30,6 +31,7 @@ __all__ = [
     "IMAGENET_STD",
     "InfiniteLoader",
     "SurvivalBatch",
+    "TimestepPredictions",
     "fit_pca",
     "imagenet_denormalize",
     "make_eval_viewpoints",

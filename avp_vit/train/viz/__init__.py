@@ -345,6 +345,10 @@ def plot_multistep_pca(
         assert locals_teacher_cropped is not None
         assert len(locals_teacher_cropped) == n_views
 
+    show_preds = timestep_predictions is not None
+    if show_preds:
+        assert len(timestep_predictions) == n_views
+
     S, G = scene_grid_size, glimpse_grid_size
     n_rows = n_views + 1  # +1 for init row
     colors = timestep_colors(n_views)
@@ -388,9 +392,13 @@ def plot_multistep_pca(
             prev_hidden = h
 
     # Column indices
-    # Trajectory | Glimpse | Teacher | Scene | Scene (own) | [Hidden] | [Local AVP] | [Local Teacher] | [Cropped Teacher] | [Δ Hidden] | Δ Scene | Error
-    C_TRAJ, C_GLIMPSE, C_TEACHER, C_SCENE, C_SCENE_OWN = 0, 1, 2, 3, 4
-    c = 5
+    # [Preds] | Trajectory | Glimpse | Teacher | Scene | Scene (own) | [Hidden] | [Local AVP] | [Local Teacher] | [Cropped Teacher] | [Δ Hidden] | Δ Scene | Error
+    c = 0
+    C_PREDS = c if show_preds else None
+    if show_preds:
+        c += 1
+    C_TRAJ, C_GLIMPSE, C_TEACHER, C_SCENE, C_SCENE_OWN = c, c + 1, c + 2, c + 3, c + 4
+    c += 5
     C_HIDDEN = c if show_hidden else None
     if show_hidden:
         c += 1
@@ -411,6 +419,10 @@ def plot_multistep_pca(
 
     # Row 0: Initial state (before any glimpses)
     row = 0
+    if show_preds:
+        assert C_PREDS is not None
+        axes[row, C_PREDS].axis("off")
+        axes[row, C_PREDS].set_title("Predictions")
     axes[row, C_TRAJ].imshow(full_img)
     axes[row, C_TRAJ].set_title("init")
     axes[row, C_TRAJ].axis("off")
@@ -489,6 +501,28 @@ def plot_multistep_pca(
             if show_cropped:
                 assert locals_teacher_cropped is not None
                 pca_cropped = fit_pca(locals_teacher_cropped[t])
+
+        # Col: Predictions barplot
+        if show_preds:
+            assert C_PREDS is not None and timestep_predictions is not None
+            preds_t = timestep_predictions[t]
+            ax = axes[row, C_PREDS]
+            k = len(preds_t.predictions)
+            # Horizontal barplot: class names on y-axis, probabilities on x-axis
+            y_pos = np.arange(k)
+            probs = [p.probability for p in preds_t.predictions]
+            names_short = [p.class_name[:20] for p in preds_t.predictions]  # Truncate long names
+            bar_colors = ["green" if p.class_idx == preds_t.gt_idx else "steelblue" for p in preds_t.predictions]
+            ax.barh(y_pos, probs, color=bar_colors)
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(names_short, fontsize=8)
+            ax.set_xlim(0, 1)
+            ax.invert_yaxis()  # Top prediction at top
+            ax.set_xlabel("prob", fontsize=8)
+            # Add GT label if not in top-k
+            gt_in_topk = any(p.class_idx == preds_t.gt_idx for p in preds_t.predictions)
+            if not gt_in_topk:
+                ax.set_title(f"GT: {preds_t.gt_name[:15]}", fontsize=8, color="green")
 
         # Col: Trajectory - cumulative boxes up to t
         ax = axes[row, C_TRAJ]

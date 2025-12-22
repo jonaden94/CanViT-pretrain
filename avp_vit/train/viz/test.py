@@ -104,6 +104,7 @@ class TestPlotPcaGrid:
         reference = np.random.randn(16, 64).astype(np.float32)
         samples = [np.random.randn(16, 64).astype(np.float32) for _ in range(3)]
         pca = fit_pca(reference)
+        assert pca is not None
         titles = ["t=0", "t=1", "t=2"]
         fig = plot_pca_grid(pca, reference, samples, grid_size=4, titles=titles)
         assert isinstance(fig, Figure)
@@ -112,6 +113,7 @@ class TestPlotPcaGrid:
         reference = np.random.randn(16, 64).astype(np.float32)
         samples = [np.random.randn(16, 64).astype(np.float32)]
         pca = fit_pca(reference)
+        assert pca is not None
         fig = plot_pca_grid(pca, reference, samples, grid_size=4, titles=["t=0"])
         assert isinstance(fig, Figure)
 
@@ -169,6 +171,7 @@ class TestVisualSmokeTests:
             for scale in [2.0, 1.0, 0.5, 0.2]
         ]
         pca = fit_pca(reference)
+        assert pca is not None
         titles = ["t=0 (far)", "t=1", "t=2", "t=3 (close)"]
 
         fig = plot_pca_grid(pca, reference, samples, grid_size=G, titles=titles)

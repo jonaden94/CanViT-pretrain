@@ -17,9 +17,9 @@ from torch import Tensor
 from dinov3_probes import DINOv3LinearClassificationHead
 
 from avp_vit import ActiveCanViT, StepOutput
-from avp_vit.train import imagenet_denormalize, plot_multistep_pca, plot_norm_stats
+from avp_vit.train import TimestepPredictions, imagenet_denormalize, plot_multistep_pca, plot_norm_stats
 from avp_vit.train.norm import PositionAwareNorm
-from avp_vit.train.probe import compute_in1k_top1, get_probe_resolution
+from avp_vit.train.probe import compute_in1k_top1, get_imagenet_class_names, get_probe_resolution, get_top_k_predictions
 from avp_vit.train.viewpoint import Viewpoint, make_eval_viewpoints, sample_at_viewpoint
 
 log = logging.getLogger(__name__)
@@ -86,6 +86,7 @@ def viz_and_log(
     log_spatial_stats: bool = True,
     log_curves: bool = True,
     show_locals: bool = False,
+    timestep_predictions: list[TimestepPredictions] | None = None,
 ) -> VizResult:
     """Run forward trajectory and log visualization."""
     assert isinstance(model.backbone, DINOv3Backbone)
@@ -250,6 +251,7 @@ def viz_and_log(
         initial_hidden_spatial=initial_canvas_spatial,
         locals_teacher_cropped=locals_teacher_cropped,
         show_locals=show_locals,
+        timestep_predictions=timestep_predictions,
     )
     log_figure(exp, fig_pca, f"{prefix}/pca", step)
 
@@ -382,12 +384,26 @@ def validate(
         # PCA visualization (expensive)
         if log_pca:
             assert teacher is not None
+            # Compute predictions for viz if probe is available
+            pca_predictions: list[TimestepPredictions] | None = None
+            if probe is not None and labels is not None:
+                sample_idx = 0
+                gt_idx = int(labels[sample_idx].item())
+                gt_name = get_imagenet_class_names()[gt_idx]
+                pca_predictions = []
+                for out in outputs:
+                    cls_pred_t = model.predict_teacher_cls(out.cls)
+                    cls_raw = cls_normalizer.denormalize(cls_pred_t)
+                    logits = probe(cls_raw)
+                    top_k = get_top_k_predictions(logits[sample_idx : sample_idx + 1], k=5)[0]
+                    pca_predictions.append(TimestepPredictions(predictions=top_k, gt_idx=gt_idx, gt_name=gt_name))
             viz_and_log(
                 exp, step, prefix, model, teacher, scene_normalizer,
                 images, viewpoints, target, canvas, glimpse_size_px,
                 cls_target=cls_target,
                 log_spatial_stats=log_spatial_stats,
                 log_curves=log_curves,
+                timestep_predictions=pca_predictions,
             )
 
     return cos_sim
