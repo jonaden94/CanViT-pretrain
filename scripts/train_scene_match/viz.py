@@ -100,21 +100,22 @@ def viz_and_log(
         # Compute initial scene BEFORE any forward pass
         initial_scene = model.compute_scene(canvas)
 
-        outputs, _ = model.forward_trajectory(
+        traj = model.forward_trajectory(
             image=images,
             viewpoints=viewpoints,
             canvas_grid_size=canvas_grid_size,
             glimpse_size_px=glimpse_size_px,
             canvas=canvas,
         )
+        outputs = traj.outputs
         scene_cos_sims = [
-            F.cosine_similarity(out.scene, target, dim=-1).mean().item()
+            F.cosine_similarity(out.predicted_scene, target, dim=-1).mean().item()
             for out in outputs
         ]
         cls_cos_sims: list[float] | None = None
         if cls_target is not None:
             cls_cos_sims = [
-                F.cosine_similarity(out.cls, cls_target, dim=-1).mean().item()
+                F.cosine_similarity(out.predicted_cls, cls_target, dim=-1).mean().item()
                 for out in outputs
             ]
 
@@ -136,7 +137,7 @@ def viz_and_log(
         # Log spatial stats for target and final prediction
         if log_spatial_stats:
             target_stats = compute_spatial_stats(target)
-            pred_stats = compute_spatial_stats(outputs[-1].scene)
+            pred_stats = compute_spatial_stats(outputs[-1].predicted_scene)
             exp.log_metrics(
                 {
                     f"{prefix}/target_spatial_mean": target_stats["mean"],
@@ -160,7 +161,7 @@ def viz_and_log(
         # Initial scene from canvas BEFORE any forward pass
         initial_np = initial_scene[sample_idx].cpu().float().numpy()
 
-        scenes = [out.scene[sample_idx].cpu().float().numpy() for out in outputs]
+        scenes = [out.predicted_scene[sample_idx].cpu().float().numpy() for out in outputs]
 
         # Raw canvas spatials (before scene_proj): initial + after each viewpoint
         if show_canvas:
@@ -282,13 +283,14 @@ def val_metrics_only(
     with torch.inference_mode():
         raw_feats = compute_raw_targets(images, scene_size_px)
         target = scene_normalizer(raw_feats.patches)
-        outputs, _ = model.forward_trajectory(
+        traj = model.forward_trajectory(
             image=images,
             viewpoints=viewpoints,
             canvas_grid_size=canvas_grid_size,
             glimpse_size_px=glimpse_size_px,
         )
-        final_scene = outputs[-1].scene
+        outputs = traj.outputs
+        final_scene = outputs[-1].predicted_scene
 
         cos_sim = F.cosine_similarity(final_scene, target, dim=-1).mean().item()
         scene_mse = F.mse_loss(final_scene, target).item()
@@ -376,7 +378,7 @@ def eval_and_log(
     exp.log_metric(f"{prefix}/scene_cos_sim", viz.scene_cos_sims[-1], step=step)
 
     # Scene MSE (for comparison with train/scene_loss)
-    final_scene = viz.outputs[-1].scene
+    final_scene = viz.outputs[-1].predicted_scene
     scene_mse = F.mse_loss(final_scene, target).item()
     exp.log_metric(f"{prefix}/scene_mse", scene_mse, step=step)
 

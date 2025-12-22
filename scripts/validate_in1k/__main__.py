@@ -70,13 +70,13 @@ def run_trajectory(
     """Run coarse-to-fine trajectory and return CLS prediction at each timestep."""
     B = images.shape[0]
     viewpoints = make_eval_viewpoints(B, images.device)
-    outputs, _ = model.forward_trajectory(
+    traj = model.forward_trajectory(
         image=images,
         viewpoints=[CoreViewpoint(v.centers, v.scales) for v in viewpoints],
         canvas_grid_size=canvas_grid,
         glimpse_size_px=glimpse_size_px,
     )
-    return [model.compute_cls(out.canvas) for out in outputs]
+    return [model.compute_cls(out.canvas) for out in traj.outputs]
 
 
 @torch.inference_mode()
