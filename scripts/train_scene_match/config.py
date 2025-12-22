@@ -35,11 +35,11 @@ class Config:
     n_viewpoints_per_step: int = 2  # Inner loop viewpoints
     min_viewpoint_scale: float = 0.05  # Minimum scale for random viewpoints
     # ~ 1 epoch
-    warmup_steps: int = 10_000
+    warmup_steps: int = 100_000
     # ~ 10 epochs
     # warmup_steps: int = 100_000
     grad_clip: float = 1.0
-    n_steps: int = 2_000_000
+    n_steps: int = 500_000
     # Target normalization
     norm_warmup_images: int = 4096
     norm_momentum: float = 0.1
