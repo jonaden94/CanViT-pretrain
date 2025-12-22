@@ -55,7 +55,7 @@ def _load_dinov3(
         log.info(f"Loading {model_slug} from {checkpoint}")
         model = factory(pretrained=True, weights=checkpoint)
 
-    model.rope_embed.rescale_coords = None
+    setattr(model.rope_embed, 'rescale_coords', None)  # disable coord rescaling
     return model.to(device)
 
 
