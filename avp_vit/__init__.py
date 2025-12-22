@@ -10,7 +10,6 @@ from canvit.model.active.pretraining import (
     ActiveCanViTForReconstructivePretraining as ActiveCanViT,
     ActiveCanViTForReconstructivePretrainingConfig as ActiveCanViTConfig,
     LossOutputs,
-    PretrainingGlimpseOutput as StepOutput,
 )
 
 __all__ = [
@@ -20,7 +19,6 @@ __all__ = [
     "CanViTConfig",
     "CanvasAttentionConfig",
     "LossOutputs",
-    "StepOutput",
     "gram_mse",
     "spatial_gram",
 ]
