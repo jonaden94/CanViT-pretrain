@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Callable
 from contextlib import nullcontext
+from typing import NamedTuple
 
 import comet_ml
 import dacite
@@ -12,6 +13,16 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 from tqdm import tqdm
+
+
+class TrainBatch(NamedTuple):
+    """A training batch with precomputed targets."""
+    images: Tensor
+    labels: Tensor  # ImageNet class labels (for probe-based accuracy, if probe available)
+    scene_target: Tensor  # Normalized teacher scene features
+    cls_target: Tensor  # Normalized teacher CLS features
+    canvas: Tensor  # Initial canvas state
+    viewpoints: list  # Sampled viewpoints for this step
 
 # Force FlashAttention for SDPA - fail loud if unavailable
 torch.backends.cuda.enable_flash_sdp(True)
@@ -25,13 +36,13 @@ from avp_vit.checkpoint import load as load_checkpoint  # noqa: E402
 from avp_vit.checkpoint import save as save_checkpoint  # noqa: E402
 from avp_vit.train import InfiniteLoader, warmup_cosine_scheduler  # noqa: E402
 from avp_vit.train.norm import PositionAwareNorm  # noqa: E402
-from avp_vit.train.probe import load_probe  # noqa: E402
+from avp_vit.train.probe import compute_in1k_top1, load_probe  # noqa: E402
 from avp_vit.train.viewpoint import random_viewpoint  # noqa: E402
 
 from .config import Config  # noqa: E402
 from .data import create_loaders, scene_size_px  # noqa: E402
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher  # noqa: E402
-from .viz import eval_and_log, val_metrics_only, viz_and_log  # noqa: E402
+from .viz import validate, viz_and_log  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -197,151 +208,189 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         v = val.detach()
         return v if ema is None else alpha * v + (1 - alpha) * ema
 
-    log.info("Starting training loop...")
-    pbar = tqdm(range(cfg.n_steps), desc="Training", unit="step")
-
-    for step in pbar:
-        # Fresh batch and canvas each step
-        images = train_loader.next_batch().to(cfg.device)
+    def load_train_batch() -> TrainBatch:
+        """Load training batch and compute normalized teacher targets."""
+        images, labels = train_loader.next_batch_with_labels()
+        images = images.to(cfg.device)
+        labels = labels.to(cfg.device)
         with torch.no_grad():
             feats = compute_raw_targets(images, scene_size)
-            targets = scene_norm(feats.patches)
-            cls_targets = cls_norm(feats.cls.unsqueeze(1)).squeeze(1)
+            scene_target = scene_norm(feats.patches)
+            cls_target = cls_norm(feats.cls.unsqueeze(1)).squeeze(1)
         canvas = model.init_canvas(batch_size=cfg.batch_size, canvas_grid_size=G)
-
         viewpoints = [random_viewpoint(cfg.batch_size, cfg.device, min_scale=cfg.min_viewpoint_scale) for _ in range(cfg.n_viewpoints_per_step)]
+        return TrainBatch(
+            images=images,
+            labels=labels,
+            scene_target=scene_target,
+            cls_target=cls_target,
+            canvas=canvas,
+            viewpoints=viewpoints,
+        )
 
-        with amp_ctx:
-            result = model.forward_loss(
-                image=images,
-                viewpoints=viewpoints,  # pyright: ignore[reportArgumentType] - Viewpoint subclass
-                spatial_target=targets,
-                cls_target=cls_targets,
-                glimpse_size_px=glimpse_size_px,
-                canvas_grid_size=G,
-                canvas=canvas,
-                compute_gram=cfg.gram_loss_weight > 0,
-                include_init=cfg.include_init,
-            )
-            losses = result.losses
-            final_canvas = result.canvas
+    # Step semantics: step S = model state after S gradient updates
+    # step=0: before any gradient (initial model)
+    # step=n_steps: after all n_steps gradient updates (final model)
+    log.info("Starting training loop...")
+    pbar = tqdm(range(cfg.n_steps + 1), desc="Training", unit="step")
 
-            total_loss = losses.scene + losses.cls
-            if losses.gram is not None:
-                total_loss = total_loss + cfg.gram_loss_weight * losses.gram
+    for step in pbar:
+        batch: TrainBatch | None = None
 
-            if not torch.isfinite(total_loss):
-                log.warning(f"NaN/Inf loss at step {step}, pruning trial")
-                exp.end()
-                raise optuna.TrialPruned()
-
-            # Compute cos_sim only when logging (cheap: projection heads + dot product)
-            scene_cos_sim: float | None = None
-            cls_cos_sim: float | None = None
-            if step % cfg.log_every == 0:
-                with torch.no_grad():
-                    scene_pred = model.predict_teacher_scene(final_canvas)
-                    scene_cos_sim = F.cosine_similarity(scene_pred, targets, dim=-1).mean().item()
-                    if model.cls_head is not None:
-                        cls_pred = model.predict_teacher_cls(result.cls)
-                        cls_cos_sim = F.cosine_similarity(cls_pred, cls_targets, dim=-1).mean().item()
-
-            optimizer.zero_grad()
-            total_loss.backward()
-
-        grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
-        optimizer.step()
-        scheduler.step()
-
-        # Update EMAs
-        ema_scene = ema_update(ema_scene, losses.scene)
-        ema_cls = ema_update(ema_cls, losses.cls)
-        if losses.gram is not None:
-            ema_gram = ema_update(ema_gram, losses.gram)
-        ema_loss = ema_update(ema_loss, total_loss)
-
-        if step % cfg.log_every == 0:
-            assert ema_loss is not None
-            grad_norm = grad_norm_t.item()
-            lr = scheduler.get_last_lr()[0]
-            metrics = {
-                "train/loss": total_loss.item(),
-                "train/loss_ema": ema_loss.item(),
-                "train/grad_norm": grad_norm,
-                "train/lr": lr,
-            }
-            if losses.gram is not None:
-                assert ema_gram is not None
-                metrics["train/gram_mse"] = losses.gram.item()
-                metrics["train/gram_mse_ema"] = ema_gram.item()
-            assert ema_scene is not None and ema_cls is not None
-            metrics["train/scene_loss"] = losses.scene.item()
-            metrics["train/scene_loss_ema"] = ema_scene.item()
-            metrics["train/cls_loss"] = losses.cls.item()
-            metrics["train/cls_loss_ema"] = ema_cls.item()
-            assert scene_cos_sim is not None
-            metrics["train/scene_cos_sim"] = scene_cos_sim
-            if cls_cos_sim is not None:
-                metrics["train/cls_cos_sim"] = cls_cos_sim
-            exp.log_metrics(metrics, step=step)
-            pbar.set_postfix_str(f"loss={ema_loss.item():.2e} grad={grad_norm:.2e} lr={lr:.2e}")
-
+        # === VALIDATION/VIZ PHASE (state after `step` gradient updates) ===
         if step % cfg.val_every == 0:
-            for name, norm in grad_norms_by_module(model, depth=1).items():
-                exp.log_metric(f"grad_norm/{name}", norm, step=step)
+            do_curves = step in curve_steps
+            do_pca = step in viz_steps
 
-            if step not in viz_steps:
-                val_images, val_labels = val_loader.next_batch_with_labels()
-                val_images = val_images.to(cfg.device)
-                val_labels = val_labels.to(cfg.device) if probe is not None else None
+            # Train PCA viz (only at viz_steps, uses train batch)
+            if do_pca:
+                batch = load_train_batch()
                 with amp_ctx:
-                    val_metrics_only(
-                        exp, step, model, compute_raw_targets, scene_norm, cls_norm,
-                        val_images, G, scene_size, glimpse_size_px, "val",
-                        probe=probe, labels=val_labels,
+                    viz_and_log(
+                        exp, step, "train", model, teacher, scene_norm,
+                        batch.images, batch.viewpoints, batch.scene_target, batch.canvas, glimpse_size_px,
+                        log_spatial_stats=cfg.log_spatial_stats, log_curves=False,
                     )
 
-            if step > 0:
-                trial.report(ema_loss.item(), step)
-                if trial.should_prune():
-                    exp.end()
-                    raise optuna.TrialPruned()
-
-        if step in viz_steps:
+            # Validation on val batch (always at val_every)
+            val_images, val_labels = val_loader.next_batch_with_labels()
+            val_images = val_images.to(cfg.device)
+            val_labels = val_labels.to(cfg.device) if probe is not None else None
             with amp_ctx:
-                viz_and_log(
-                    exp, step, "train", model, teacher, scene_norm,
-                    images, viewpoints, targets, canvas, glimpse_size_px,
-                    log_spatial_stats=cfg.log_spatial_stats, log_curves=False,
-                )
-
-            val_images = val_loader.next_batch().to(cfg.device)
-            with amp_ctx:
-                eval_and_log(
-                    exp, step, model, teacher, compute_raw_targets, scene_norm, cls_norm,
+                validate(
+                    exp, step, model, compute_raw_targets, scene_norm, cls_norm,
                     val_images, G, scene_size, glimpse_size_px, "val",
+                    probe=probe, labels=val_labels,
+                    log_curves=do_curves,
+                    log_pca=do_pca, teacher=teacher if do_pca else None,
                     log_spatial_stats=cfg.log_spatial_stats,
-                    log_curves=(step in curve_steps),
                 )
 
+        # === CHECKPOINT PHASE ===
         if step % cfg.ckpt_every == 0:
             save_checkpoint(
                 ckpt_path, model, cfg.student_model,
-                step=step, train_loss=ema_loss.item(), comet_id=exp.get_key(),
+                step=step, train_loss=ema_loss.item() if ema_loss is not None else None,
+                comet_id=exp.get_key(),
                 scene_norm_state=scene_norm.state_dict(),
                 cls_norm_state=cls_norm.state_dict(),
             )
             exp.log_metric("norm/scene_mean_norm", scene_norm.mean.norm().item(), step=step)
             exp.log_metric("norm/cls_mean_norm", cls_norm.mean.norm().item(), step=step)
 
-    assert ema_loss is not None
-    save_checkpoint(
-        ckpt_path, model, cfg.student_model,
-        step=cfg.n_steps, train_loss=ema_loss.item(), comet_id=exp.get_key(),
-        scene_norm_state=scene_norm.state_dict(),
-        cls_norm_state=cls_norm.state_dict(),
-    )
+        # === TRAINING PHASE (only for step < n_steps) ===
+        if step < cfg.n_steps:
+            if batch is None:
+                batch = load_train_batch()
 
+            with amp_ctx:
+                result = model.forward_loss(
+                    image=batch.images,
+                    viewpoints=batch.viewpoints,  # pyright: ignore[reportArgumentType] - Viewpoint subclass
+                    spatial_target=batch.scene_target,
+                    cls_target=batch.cls_target,
+                    glimpse_size_px=glimpse_size_px,
+                    canvas_grid_size=G,
+                    canvas=batch.canvas,
+                    compute_gram=cfg.gram_loss_weight > 0,
+                    include_init=cfg.include_init,
+                )
+                losses = result.losses
+                final_canvas = result.canvas
+
+                total_loss = losses.scene + losses.cls
+                if losses.gram is not None:
+                    total_loss = total_loss + cfg.gram_loss_weight * losses.gram
+
+                if not torch.isfinite(total_loss):
+                    log.warning(f"NaN/Inf loss at step {step}, pruning trial")
+                    exp.end()
+                    raise optuna.TrialPruned()
+
+                # Compute cos_sim only when logging
+                scene_cos_sim: float | None = None
+                cls_cos_sim: float | None = None
+                if step % cfg.log_every == 0:
+                    with torch.no_grad():
+                        scene_pred = model.predict_teacher_scene(final_canvas)
+                        scene_cos_sim = F.cosine_similarity(scene_pred, batch.scene_target, dim=-1).mean().item()
+                        if model.cls_head is not None:
+                            cls_pred = model.predict_teacher_cls(result.cls)
+                            cls_cos_sim = F.cosine_similarity(cls_pred, batch.cls_target, dim=-1).mean().item()
+
+                optimizer.zero_grad()
+                total_loss.backward()
+
+            grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
+            optimizer.step()
+            scheduler.step()
+
+            # Update EMAs
+            ema_scene = ema_update(ema_scene, losses.scene)
+            ema_cls = ema_update(ema_cls, losses.cls)
+            if losses.gram is not None:
+                ema_gram = ema_update(ema_gram, losses.gram)
+            ema_loss = ema_update(ema_loss, total_loss)
+
+            # Train metrics logging
+            if step % cfg.log_every == 0:
+                assert ema_loss is not None
+                grad_norm = grad_norm_t.item()
+                lr = scheduler.get_last_lr()[0]
+                metrics = {
+                    "train/loss": total_loss.item(),
+                    "train/loss_ema": ema_loss.item(),
+                    "train/grad_norm": grad_norm,
+                    "train/lr": lr,
+                }
+                if losses.gram is not None:
+                    assert ema_gram is not None
+                    metrics["train/gram_mse"] = losses.gram.item()
+                    metrics["train/gram_mse_ema"] = ema_gram.item()
+                assert ema_scene is not None and ema_cls is not None
+                metrics["train/scene_loss"] = losses.scene.item()
+                metrics["train/scene_loss_ema"] = ema_scene.item()
+                metrics["train/cls_loss"] = losses.cls.item()
+                metrics["train/cls_loss_ema"] = ema_cls.item()
+                assert scene_cos_sim is not None
+                metrics["train/scene_cos_sim"] = scene_cos_sim
+                if cls_cos_sim is not None:
+                    metrics["train/cls_cos_sim"] = cls_cos_sim
+                # Train IN1k accuracy (TTS = Teacher-to-Student probe)
+                if probe is not None and model.cls_head is not None:
+                    with torch.no_grad():
+                        cls_pred = model.predict_teacher_cls(result.cls)
+                        cls_raw = cls_norm.denormalize(cls_pred)
+                        logits = probe(cls_raw)
+                        train_in1k = compute_in1k_top1(logits, batch.labels)
+                    metrics["train/in1k_tts_top1"] = train_in1k
+                exp.log_metrics(metrics, step=step)
+                pbar.set_postfix_str(f"loss={ema_loss.item():.2e} grad={grad_norm:.2e} lr={lr:.2e}")
+
+            # Per-module grad norms (at val intervals, after training)
+            if step % cfg.val_every == 0:
+                for name, norm in grad_norms_by_module(model, depth=1).items():
+                    exp.log_metric(f"grad_norm/{name}", norm, step=step)
+
+            # Optuna pruning (skip step 0 - EMA not meaningful yet)
+            if step > 0 and step % cfg.val_every == 0:
+                assert ema_loss is not None
+                trial.report(ema_loss.item(), step)
+                if trial.should_prune():
+                    exp.end()
+                    raise optuna.TrialPruned()
+
+    # Final checkpoint (if not already saved at step=n_steps)
+    if cfg.n_steps % cfg.ckpt_every != 0:
+        assert ema_loss is not None
+        save_checkpoint(
+            ckpt_path, model, cfg.student_model,
+            step=cfg.n_steps, train_loss=ema_loss.item(), comet_id=exp.get_key(),
+            scene_norm_state=scene_norm.state_dict(),
+            cls_norm_state=cls_norm.state_dict(),
+        )
+
+    assert ema_loss is not None
     log.info(f"Final: train_ema={ema_loss.item():.4f}")
     exp.end()
     return ema_loss.item()
