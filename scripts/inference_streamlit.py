@@ -269,6 +269,7 @@ def run_inference_step(
     model: ActiveCanViT,
     image: Tensor,
     canvas: Tensor,
+    cls: Tensor,
     vp: Viewpoint,
     glimpse_size_px: int,
     canvas_grid: int,
@@ -278,13 +279,14 @@ def run_inference_step(
     apply_hidden_ln: bool,
     probe: DINOv3LinearClassificationHead | None,
     cls_norm: PositionAwareNorm | None,
-) -> tuple[Tensor, StepResult]:
+) -> tuple[Tensor, Tensor, StepResult]:
     """Run one inference step and compute metrics.
 
     Metrics are computed at teacher_grid resolution (same as training).
 
     Returns:
         new_canvas: Updated canvas tensor
+        new_cls: Updated cls tensor
         result: StepResult with features and metrics
     """
     sync_device(image.device)
@@ -292,6 +294,7 @@ def run_inference_step(
     out = model.forward_step(
         image=image,
         canvas=canvas,
+        cls=cls,
         viewpoint=vp,
         glimpse_size_px=glimpse_size_px,
     )
@@ -301,7 +304,7 @@ def run_inference_step(
     spatial = model.get_spatial(out.canvas)[0]
     assert spatial.shape == (canvas_grid * canvas_grid, spatial.shape[-1])
 
-    scene = model.compute_scene(out.canvas)
+    scene = model.predict_teacher_scene(out.canvas)
     assert scene.shape == (1, canvas_grid * canvas_grid, scene.shape[-1])
 
     hidden = spatial
@@ -331,7 +334,7 @@ def run_inference_step(
         corr_gram_loss = correlation_gram_mse(pred_batch, target_batch).item()
 
     cls_cos_sim = None
-    cls_pred = model.compute_cls(out.canvas)
+    cls_pred = model.predict_teacher_cls(out.cls)
     if cls_target is not None:
         cls_cos_sim = F.cosine_similarity(cls_pred, cls_target, dim=-1).mean().item()
 
@@ -347,7 +350,7 @@ def run_inference_step(
 
     glimpse_np = imagenet_denormalize(out.glimpse[0].cpu()).numpy()
 
-    return out.canvas, StepResult(
+    return out.canvas, out.cls, StepResult(
         hidden=hidden.cpu().numpy(),
         projected=scene[0].cpu().numpy(),
         scene_cos_sim=scene_cos_sim,
@@ -437,6 +440,7 @@ if st.session_state.get("_state_key") != current_key:
     st.session_state.results = []
     st.session_state.pending_click = None
     st.session_state.canvas = model.init_canvas(batch_size=1, canvas_grid_size=canvas_grid)
+    st.session_state.cls = model.init_cls(batch_size=1)
 
 # Persistent latency storage: dict[config_label, LatencyRecord]
 if "latency_records" not in st.session_state:
@@ -503,10 +507,11 @@ with c1:
             st.session_state.viewpoints.append(vp)
 
             with torch.no_grad():
-                new_canvas, result = run_inference_step(
+                new_canvas, new_cls, result = run_inference_step(
                     model=model,
                     image=image,
                     canvas=st.session_state.canvas,
+                    cls=st.session_state.cls,
                     vp=vp,
                     glimpse_size_px=glimpse_size_px,
                     canvas_grid=canvas_grid,
@@ -518,6 +523,7 @@ with c1:
                     cls_norm=cls_norm,
                 )
                 st.session_state.canvas = new_canvas
+                st.session_state.cls = new_cls
                 st.session_state.results.append(result)
                 latency_records[model_key].add(result.model_step_ms)
 
