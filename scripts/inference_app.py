@@ -301,6 +301,7 @@ def main() -> None:
                 st.session_state.pop("last_click", None)
                 st.session_state.pop("_config", None)  # Force reinit
                 log.info("Cleared all viewpoints")
+                st.rerun()
         with col_undo:
             if st.button("Undo last", help="Removes last viewpoint from display (canvas state preserved)"):
                 vps = st.session_state.get("viewpoints", [])
@@ -309,6 +310,7 @@ def main() -> None:
                     st.session_state.results.pop()
                     st.session_state.last_click = None
                     log.info(f"Undid viewpoint {removed.name}, {len(vps)} remaining")
+                    st.rerun()
 
         col_teacher, col_latency = st.columns(2)
         with col_teacher:
@@ -317,6 +319,7 @@ def main() -> None:
             if st.button("Clear latency", help="Clear all latency measurements"):
                 st.session_state.pop("latency_data", None)
                 log.info("Cleared latency data")
+                st.rerun()
 
     uploaded = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
 
