@@ -294,13 +294,17 @@ def val_metrics_only(
         final_scene = outputs[-1].scene
 
         cos_sim = F.cosine_similarity(final_scene, target, dim=-1).mean().item()
+        scene_mse = F.mse_loss(final_scene, target).item()
         exp.log_metric(f"{prefix}/scene_cos_sim", cos_sim, step=step)
+        exp.log_metric(f"{prefix}/scene_mse", scene_mse, step=step)
 
         if model.cls_head is not None:
             cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
             cls_pred = model.compute_cls(outputs[-1].canvas)
             cls_cos_sim = F.cosine_similarity(cls_pred, cls_target, dim=-1).mean().item()
+            cls_mse = F.mse_loss(cls_pred, cls_target).item()
             exp.log_metric(f"{prefix}/cls_cos_sim", cls_cos_sim, step=step)
+            exp.log_metric(f"{prefix}/cls_mse", cls_mse, step=step)
 
     return cos_sim
 
@@ -343,13 +347,20 @@ def eval_and_log(
         exp.log_metric(f"{prefix}/scene_cos_sim_t{t}", cos_sim, step=step)
     exp.log_metric(f"{prefix}/scene_cos_sim", viz.cos_sims[-1], step=step)
 
-    # CLS cosine similarity (if enabled)
+    # Scene MSE (for comparison with train/scene_loss)
+    final_scene = viz.outputs[-1].scene
+    scene_mse = F.mse_loss(final_scene, target).item()
+    exp.log_metric(f"{prefix}/scene_mse", scene_mse, step=step)
+
+    # CLS metrics (if enabled)
     if model.cls_head is not None:
         with torch.inference_mode():
             cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
             cls_pred = model.compute_cls(viz.outputs[-1].canvas)
             cls_cos_sim = F.cosine_similarity(cls_pred, cls_target, dim=-1).mean().item()
+            cls_mse = F.mse_loss(cls_pred, cls_target).item()
             exp.log_metric(f"{prefix}/cls_cos_sim", cls_cos_sim, step=step)
+            exp.log_metric(f"{prefix}/cls_mse", cls_mse, step=step)
 
     return viz.cos_sims[-1]
 
