@@ -1,14 +1,32 @@
 """IN1k classification probe utilities for DINOv3 features."""
 
+from functools import lru_cache
+from typing import NamedTuple
+
 import torch
+import torch.nn.functional as F
 from dinov3_probes import DINOv3LinearClassificationHead
 from torch import Tensor
+from torchvision.models import ResNet50_Weights
 
 PROBE_REPOS = {
     "dinov3_vits16": "yberreby/dinov3-vits16-lvd1689m-in1k-512x512-linear-clf-probe",
     "dinov3_vitb16": "yberreby/dinov3-vitb16-lvd1689m-in1k-512x512-linear-clf-probe",
     "dinov3_vitl16": "yberreby/dinov3-vitl16-lvd1689m-in1k-512x512-linear-clf-probe",
 }
+
+
+class TopKPrediction(NamedTuple):
+    """A single top-k prediction with class info and probability."""
+    class_idx: int
+    class_name: str
+    probability: float
+
+
+@lru_cache(maxsize=1)
+def get_imagenet_class_names() -> list[str]:
+    """Get ImageNet-1k class names from torchvision."""
+    return list(ResNet50_Weights.IMAGENET1K_V1.meta["categories"])
 
 
 def load_probe(backbone: str, device: torch.device) -> DINOv3LinearClassificationHead | None:
@@ -24,3 +42,32 @@ def compute_in1k_top1(logits: Tensor, labels: Tensor) -> float:
     preds = logits.argmax(dim=-1)
     correct = (preds == labels).sum().item()
     return 100.0 * correct / labels.shape[0]
+
+
+def get_top_k_predictions(logits: Tensor, k: int = 5) -> list[list[TopKPrediction]]:
+    """Get top-k predictions with class names and probabilities.
+
+    Args:
+        logits: [B, num_classes] logits tensor
+        k: number of top predictions to return
+
+    Returns:
+        List of length B, each containing k TopKPrediction items.
+    """
+    class_names = get_imagenet_class_names()
+    probs = F.softmax(logits, dim=-1)
+    top_probs, top_indices = probs.topk(k, dim=-1)
+
+    results: list[list[TopKPrediction]] = []
+    for b in range(logits.shape[0]):
+        preds = []
+        for i in range(k):
+            idx = top_indices[b, i].item()
+            assert isinstance(idx, int)
+            preds.append(TopKPrediction(
+                class_idx=idx,
+                class_name=class_names[idx],
+                probability=top_probs[b, i].item(),
+            ))
+        results.append(preds)
+    return results
