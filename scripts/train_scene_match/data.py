@@ -46,8 +46,10 @@ def create_loaders(cfg: Config) -> tuple[InfiniteLoader, InfiniteLoader]:
         train_ds, batch_size=cfg.batch_size, shuffle=True,
         num_workers=cfg.num_workers, pin_memory=True, drop_last=True, persistent_workers=persistent,
     ))
+    # CRITICAL: shuffle=True required for validation! Without it, batches are sequential
+    # (all tench, then all goldfish, etc.) which gives misleading metrics due to class bias.
     val_loader = InfiniteLoader(DataLoader(
-        val_ds, batch_size=cfg.batch_size, shuffle=False,
+        val_ds, batch_size=cfg.batch_size, shuffle=True,
         num_workers=cfg.num_workers, pin_memory=True, drop_last=True, persistent_workers=persistent,
     ))
 
