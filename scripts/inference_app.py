@@ -254,12 +254,20 @@ def main() -> None:
         l2_norm = st.checkbox("L2 normalize hidden", value=False)
 
         st.markdown("---")
-        if st.button("Clear viewpoints"):
-            st.session_state.pop("viewpoints", None)
-            st.session_state.pop("results", None)
-            st.session_state.pop("canvas", None)
-            st.session_state.pop("cls", None)
-            st.session_state.pop("last_click", None)
+        col_clear, col_teacher = st.columns(2)
+        with col_clear:
+            if st.button("Clear viewpoints"):
+                st.session_state.pop("viewpoints", None)
+                st.session_state.pop("results", None)
+                st.session_state.pop("canvas", None)
+                st.session_state.pop("cls", None)
+                st.session_state.pop("last_click", None)
+                st.rerun()
+        with col_teacher:
+            rerun_teacher = st.button("Rerun teacher")
+
+        if st.button("Clear latency data"):
+            st.session_state.pop("latency_data", None)
             st.rerun()
 
     uploaded = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
@@ -278,6 +286,10 @@ def main() -> None:
     img_size = canvas_grid * res.patch_size
     teacher_grid = res.scene_norm.grid_size if res.scene_norm else 16
 
+    # Persistent latency data (survives config changes)
+    if "latency_data" not in st.session_state:
+        st.session_state.latency_data = {}  # dict[str, list[float]]
+
     # Config change detection (excludes scale, l2_norm)
     config_key = f"{ckpt_path}:{device_name}:{canvas_grid}:{glimpse_grid}:{uploaded.file_id}"
     if st.session_state.get("_config") != config_key:
@@ -287,7 +299,6 @@ def main() -> None:
         st.session_state.canvas = res.model.init_canvas(batch_size=1, canvas_grid_size=canvas_grid)
         st.session_state.cls = res.model.init_cls(batch_size=1)
         st.session_state.last_click = None
-        st.session_state.teacher_ms = 0.0
 
     # Load image
     transform = transforms.Compose([
@@ -304,11 +315,19 @@ def main() -> None:
     H, W = img_np.shape[:2]
     img_pil = Image.fromarray((img_np * 255).astype(np.uint8))
 
-    # Teacher target (compute once per image)
+    # Teacher target
+    latency_data: dict[str, list[float]] = st.session_state.latency_data
+    teacher_key = f"Teacher {teacher_grid}²"
+    model_key = f"Model {glimpse_grid}→{canvas_grid}"
+
     with torch.no_grad():
         scene_target, cls_target, teacher_ms = get_teacher_target(res, image, teacher_grid)
         if teacher_ms > 0:
-            st.session_state.teacher_ms = teacher_ms
+            if teacher_key not in latency_data:
+                latency_data[teacher_key] = []
+            # First run for this config or rerun button pressed
+            if not latency_data[teacher_key] or rerun_teacher:
+                latency_data[teacher_key].append(teacher_ms)
 
     viewpoints: list[Viewpoint] = st.session_state.viewpoints
     results: list[StepResult] = st.session_state.results
@@ -342,6 +361,10 @@ def main() -> None:
                     st.session_state.canvas = new_canvas
                     st.session_state.cls = new_cls
                     results.append(result)
+                    # Add to persistent latency data
+                    if model_key not in latency_data:
+                        latency_data[model_key] = []
+                    latency_data[model_key].append(result.step_ms)
                 st.rerun()
 
     with c2:
@@ -378,7 +401,6 @@ def main() -> None:
     if n > 0:
         st.markdown("---")
         scene_sims = [r.scene_cos for r in results if r.scene_cos is not None]
-        step_times = [r.step_ms for r in results]
 
         col_sim, col_lat = st.columns(2)
 
@@ -390,20 +412,15 @@ def main() -> None:
                 st.plotly_chart(fig, width="stretch")
 
         with col_lat:
-            if step_times:
+            if latency_data:
                 fig = go.Figure()
-                # Teacher baseline
-                teacher_ms = st.session_state.get("teacher_ms", 0)
-                if teacher_ms > 0:
+                colors = ["rgba(100,100,100,0.6)", "rgba(66,133,244,0.6)", "rgba(244,66,66,0.6)",
+                          "rgba(66,244,66,0.6)", "rgba(244,166,66,0.6)", "rgba(166,66,244,0.6)"]
+                for i, (label, times) in enumerate(sorted(latency_data.items())):
                     fig.add_trace(go.Box(
-                        y=[teacher_ms], name=f"Teacher {teacher_grid}²",
-                        marker_color="rgba(100,100,100,0.6)", boxpoints="all"
+                        y=times, name=f"{label} (n={len(times)})",
+                        marker_color=colors[i % len(colors)], boxpoints="all", jitter=0.3
                     ))
-                # Model steps
-                fig.add_trace(go.Box(
-                    y=step_times, name=f"Model {glimpse_grid}→{canvas_grid}",
-                    boxpoints="all", jitter=0.3, pointpos=0, marker_color="rgba(66,133,244,0.6)"
-                ))
                 fig.update_layout(
                     title="Latency Distribution",
                     yaxis_title="ms", height=250, margin=dict(l=20, r=20, t=40, b=40), showlegend=False
@@ -427,11 +444,12 @@ def main() -> None:
     # Debug
     st.markdown("---")
     with st.expander(f"Debug ({n} viewpoints)"):
+        latency_summary = ", ".join(f"{k}: {np.mean(v):.1f}ms (n={len(v)})" for k, v in sorted(latency_data.items()))
         st.code(f"""backbone: {res.backbone}, step: {res.ckpt_step}
 patch: {res.patch_size}px, img: {img_size}px, glimpse: {glimpse_px}px
 teacher: {'✓' if res.teacher else '✗'}, scene_norm: {res.scene_norm.grid_size if res.scene_norm else '✗'}², probe: {'✓' if res.probe else '✗'}
 canvas: {tuple(st.session_state.canvas.shape)}, cls: {tuple(st.session_state.cls.shape)}
-teacher_ms: {st.session_state.get('teacher_ms', 0):.1f}, avg_step_ms: {sum(r.step_ms for r in results)/max(1,n):.1f}""")
+latency: {latency_summary or 'none'}""")
 
 
 if __name__ == "__main__":
