@@ -44,8 +44,10 @@ def _load_dinov3(
 
 def load_teacher(cfg: Config) -> DINOv3Backbone:
     """Load frozen DINOv3 teacher backbone."""
+    from dinov3.models.vision_transformer import DinoVisionTransformer
     model = _load_dinov3(cfg.teacher_model, str(cfg.teacher_ckpt), cfg.device)
-    backbone = DINOv3Backbone(model.eval())  # type: ignore[arg-type]
+    assert isinstance(model, DinoVisionTransformer)
+    backbone = DINOv3Backbone(model.eval())
     for p in backbone.parameters():
         p.requires_grad = False
     log.info(
@@ -57,9 +59,11 @@ def load_teacher(cfg: Config) -> DINOv3Backbone:
 
 def load_student_backbone(cfg: Config) -> DINOv3Backbone:
     """Load student DINOv3 backbone (pretrained or random init)."""
+    from dinov3.models.vision_transformer import DinoVisionTransformer
     ckpt = str(cfg.student_ckpt) if cfg.student_ckpt is not None else None
     model = _load_dinov3(cfg.student_model, ckpt, cfg.device)
-    backbone = DINOv3Backbone(model)  # type: ignore[arg-type]
+    assert isinstance(model, DinoVisionTransformer)
+    backbone = DINOv3Backbone(model)
     log.info(
         f"Student backbone ready: {cfg.student_model}, "
         f"{backbone.n_blocks} blocks, embed_dim={backbone.embed_dim}, "
