@@ -32,6 +32,7 @@ from torchvision.models.resnet import ResNet50_Weights
 from avp_vit.checkpoint import _get_backbone_factory
 from avp_vit.checkpoint import load as load_ckpt
 from avp_vit.checkpoint import load_model
+from avp_vit.train.config import Config as TrainConfig
 from avp_vit.train.data import imagenet_normalize
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.probe import load_probe
@@ -287,9 +288,10 @@ def main() -> None:
         assert isinstance(device_name, str)
 
         st.markdown("---")
+        train_cfg = TrainConfig()
         scale = st.slider("Viewpoint scale", 0.05, 1.0, 0.25, 0.05)
-        glimpse_grid = st.slider("Glimpse grid", 2, 16, 8, 1)
-        canvas_grid = st.slider("Canvas grid", 8, 256, 32, 8)
+        glimpse_grid = st.slider("Glimpse grid", 2, 16, train_cfg.glimpse_grid_size, 1)
+        canvas_grid = st.slider("Canvas grid", 8, 256, train_cfg.grid_size, 8)
         l2_norm = st.checkbox("L2 normalize hidden", value=False)
 
         st.markdown("---")
