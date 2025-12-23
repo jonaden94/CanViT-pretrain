@@ -1,6 +1,7 @@
 """Data loading."""
 
 import logging
+from typing import NamedTuple
 
 from torch.utils.data import DataLoader, Dataset
 from torchvision.datasets import ImageFolder
@@ -13,11 +14,18 @@ from .config import Config
 log = logging.getLogger(__name__)
 
 
+class Loaders(NamedTuple):
+    """Train and validation data loaders."""
+
+    train: InfiniteLoader
+    val: InfiniteLoader
+
+
 def scene_size_px(grid_size: int, patch_size: int) -> int:
     return grid_size * patch_size
 
 
-def create_loaders(cfg: Config) -> tuple[InfiniteLoader, InfiniteLoader]:
+def create_loaders(cfg: Config) -> Loaders:
     assert cfg.train_dir.is_dir(), f"train_dir not found: {cfg.train_dir}"
     assert cfg.val_dir.is_dir(), f"val_dir not found: {cfg.val_dir}"
 
@@ -53,4 +61,4 @@ def create_loaders(cfg: Config) -> tuple[InfiniteLoader, InfiniteLoader]:
         num_workers=cfg.num_workers, pin_memory=True, drop_last=True, persistent_workers=persistent,
     ))
 
-    return train_loader, val_loader
+    return Loaders(train=train_loader, val=val_loader)
