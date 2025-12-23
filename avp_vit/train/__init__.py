@@ -4,7 +4,6 @@ from avp_vit.train.data import (
     IMAGENET_MEAN,
     IMAGENET_STD,
     InfiniteLoader,
-    make_loader,
     train_transform,
     val_transform,
 )
@@ -32,7 +31,6 @@ __all__ = [
     "fit_pca",
     "imagenet_denormalize",
     "make_eval_viewpoints",
-    "make_loader",
     "pca_rgb",
     "plot_multistep_pca",
     "plot_pca_grid",

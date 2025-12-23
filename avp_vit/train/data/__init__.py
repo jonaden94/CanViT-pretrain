@@ -48,25 +48,6 @@ def val_transform(size: int) -> transforms.Compose:
     ])
 
 
-def make_loader(
-    root: Path,
-    transform: transforms.Compose,
-    batch_size: int,
-    num_workers: int,
-    shuffle: bool,
-) -> DataLoader[ImageBatch]:
-    """Create a DataLoader for ImageFolder dataset."""
-    dataset = ImageFolder(str(root), transform=transform)
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=True,
-    )
-
-
 class InfiniteLoader:
     """Infinite iterator over a DataLoader, yields images only."""
 
