@@ -1,8 +1,12 @@
 """Tests for avp_vit.train.viz module."""
 
 import numpy as np
+import torch
 
+from avp_vit.train.viz.image import imagenet_denormalize
+from avp_vit.train.viz.metrics import compute_spatial_stats, cosine_dissimilarity
 from avp_vit.train.viz.pca import fit_pca, pca_rgb
+from avp_vit.train.viz.plot import timestep_colors
 
 
 class TestFitPca:
@@ -36,3 +40,54 @@ class TestPcaRgb:
         rgb = pca_rgb(None, features, H=8, W=8)
         assert rgb.shape == (8, 8, 3)
         assert np.allclose(rgb, 0.5)
+
+
+class TestImagenetDenormalize:
+    def test_output_shape(self) -> None:
+        t = torch.zeros(3, 4, 4)
+        out = imagenet_denormalize(t)
+        assert out.shape == (4, 4, 3)
+
+    def test_output_range(self) -> None:
+        t = torch.randn(3, 8, 8)
+        out = imagenet_denormalize(t)
+        assert out.min() >= 0.0
+        assert out.max() <= 1.0
+
+
+class TestCosineDissimilarity:
+    def test_identical_vectors(self) -> None:
+        a = np.random.randn(10, 64).astype(np.float32)
+        result = cosine_dissimilarity(a, a)
+        assert result.shape == (10,)
+        assert np.allclose(result, 0.0, atol=1e-6)
+
+    def test_orthogonal_vectors(self) -> None:
+        a = np.array([[1.0, 0.0]])
+        b = np.array([[0.0, 1.0]])
+        result = cosine_dissimilarity(a, b)
+        assert np.allclose(result, 1.0, atol=1e-6)
+
+
+class TestComputeSpatialStats:
+    def test_output_keys(self) -> None:
+        x = torch.randn(2, 16, 32)
+        stats = compute_spatial_stats(x)
+        assert "mean" in stats
+        assert "std" in stats
+
+    def test_std_positive(self) -> None:
+        x = torch.randn(2, 16, 32)
+        stats = compute_spatial_stats(x)
+        assert stats["std"] > 0
+
+
+class TestTimestepColors:
+    def test_returns_correct_count(self) -> None:
+        colors = timestep_colors(5)
+        assert len(colors) == 5
+
+    def test_rgba_format(self) -> None:
+        colors = timestep_colors(3)
+        for c in colors:
+            assert len(c) == 4

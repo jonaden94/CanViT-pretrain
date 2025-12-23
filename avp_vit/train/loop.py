@@ -253,9 +253,19 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 try:
                     with amp_ctx:
                         viz_and_log(
-                            exp, step, "train", model, teacher, scene_norm,
-                            batch.images, batch.viewpoints, batch.scene_target, batch.canvas, glimpse_size_px,
-                            log_spatial_stats=cfg.log_spatial_stats, log_curves=False,
+                            exp=exp,
+                            step=step,
+                            prefix="train",
+                            model=model,
+                            teacher=teacher,
+                            normalizer=scene_norm,
+                            images=batch.images,
+                            viewpoints=batch.viewpoints,
+                            target=batch.scene_target,
+                            canvas=batch.canvas,
+                            glimpse_size_px=glimpse_size_px,
+                            log_spatial_stats=cfg.log_spatial_stats,
+                            log_curves=False,
                         )
                 except Exception:
                     log.error(f"!!! VIZ FAILED at step {step} !!!\n{traceback.format_exc()}")
@@ -267,14 +277,24 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             try:
                 with amp_ctx:
                     validate(
-                        exp, step, model, compute_raw_targets, scene_norm, cls_norm,
-                        val_images, G, scene_size, glimpse_size_px, "val",
-                        probe=probe, labels=val_labels,
+                        exp=exp,
+                        step=step,
+                        model=model,
+                        compute_raw_targets=compute_raw_targets,
+                        scene_normalizer=scene_norm,
+                        cls_normalizer=cls_norm,
+                        images=val_images,
+                        canvas_grid_size=G,
+                        scene_size_px=scene_size,
+                        glimpse_size_px=glimpse_size_px,
+                        prefix="val",
+                        probe=probe,
+                        labels=val_labels,
                         log_curves=do_curves,
                         log_pca=do_pca,
-                        teacher=teacher,  # Always pass for teacher baseline (when probe available)
+                        teacher=teacher,
                         log_spatial_stats=cfg.log_spatial_stats,
-                        backbone=cfg.teacher_model,  # For probe resolution lookup
+                        backbone=cfg.teacher_model,
                     )
             except Exception:
                 log.error(f"!!! VALIDATION FAILED at step {step} !!!\n{traceback.format_exc()}")
