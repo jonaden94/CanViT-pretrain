@@ -1,6 +1,5 @@
 """Tests for avp_vit.train module."""
 
-import numpy as np
 import torch
 from PIL import Image
 from torch import Tensor
@@ -21,12 +20,7 @@ from avp_vit.train.viewpoint import (
     make_eval_viewpoints,
     viewpoint_to_pixel_box,
 )
-from avp_vit.train.viz import (
-    fit_pca,
-    imagenet_denormalize,
-    pca_rgb,
-    timestep_colors,
-)
+from avp_vit.train.viz import imagenet_denormalize, timestep_colors
 
 
 # === Data Tests ===
@@ -173,23 +167,3 @@ class TestTimestepColors:
             assert len(c) == 4  # RGBA
 
 
-class TestFitPca:
-    def test_returns_pca(self) -> None:
-        features = np.random.randn(100, 64).astype(np.float32)
-        pca = fit_pca(features, n_components=12)
-        assert pca is not None
-
-    def test_returns_none_for_low_variance(self) -> None:
-        # fit_pca returns None when variance is too low
-        features = np.ones((100, 64), dtype=np.float32)  # constant = zero variance
-        pca = fit_pca(features, n_components=12)
-        assert pca is None
-
-
-class TestPcaRgb:
-    def test_output_shape(self) -> None:
-        features = np.random.randn(64, 128).astype(np.float32)
-        pca = fit_pca(features)
-        assert pca is not None
-        rgb = pca_rgb(pca, features, H=8, W=8)
-        assert rgb.shape == (8, 8, 3)
