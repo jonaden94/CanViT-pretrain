@@ -12,12 +12,9 @@ from .plot import (
     plot_trajectory,
     timestep_colors,
 )
-from ._core import (
-    ValAccumulator,
-    VizSampleData,
-    validate,
-    viz_and_log,
-)
+from .sample import VizSampleData, extract_sample0_viz
+from .train_viz import viz_and_log
+from .validate import ValAccumulator, validate
 
 __all__ = [
     # comet
@@ -38,9 +35,12 @@ __all__ = [
     "plot_pca_grid",
     "plot_trajectory",
     "timestep_colors",
-    # _core (orchestration)
-    "ValAccumulator",
+    # sample
     "VizSampleData",
-    "validate",
+    "extract_sample0_viz",
+    # train_viz
     "viz_and_log",
+    # validate
+    "ValAccumulator",
+    "validate",
 ]
