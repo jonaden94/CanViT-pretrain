@@ -31,6 +31,8 @@ class Config:
     # Training
     batch_size: int = 128
     peak_lr: float = 5e-4
+    start_lr: float | None = 1e-6  # None = peak_lr / warmup_steps (old behavior)
+    end_lr: float | None = 1e-6  # None = 0 (old behavior)
     # weight_decay: float = 0.05  # standard in ViTs
     # we can use a much lower weight decay due to the richness of our training signal
     # and we *should*, due to the use of small batches

@@ -100,16 +100,41 @@ class TestPositionAwareNorm:
 # === Scheduler Tests ===
 
 class TestWarmupCosineScheduler:
-    def test_warmup_phase(self) -> None:
-        optimizer = torch.optim.Adam([torch.zeros(1, requires_grad=True)], lr=1e-3)
-        scheduler = warmup_cosine_scheduler(optimizer, total_steps=100, warmup_steps=10)
-        # At step 0, lr = base_lr * (1/warmup_steps) = 1e-3 * 0.1 = 1e-4
-        assert scheduler.get_last_lr()[0] <= 1e-4
+    def test_warmup_with_explicit_lr(self) -> None:
+        peak_lr = 1e-3
+        start_lr = 1e-4
+        end_lr = 1e-5
+        optimizer = torch.optim.Adam([torch.zeros(1, requires_grad=True)], lr=peak_lr)
+        scheduler = warmup_cosine_scheduler(
+            optimizer, total_steps=100, warmup_steps=10, peak_lr=peak_lr,
+            start_lr=start_lr, end_lr=end_lr,
+        )
+        # At step 0, lr = start_lr
+        assert abs(scheduler.get_last_lr()[0] - start_lr) < 1e-6
         # Warmup
         for _ in range(10):
             scheduler.step()
         # After warmup, should be at peak
-        assert abs(scheduler.get_last_lr()[0] - 1e-3) < 1e-5
+        assert abs(scheduler.get_last_lr()[0] - peak_lr) < 1e-5
+
+    def test_warmup_with_none_defaults(self) -> None:
+        peak_lr = 1e-3
+        warmup_steps = 10
+        optimizer = torch.optim.Adam([torch.zeros(1, requires_grad=True)], lr=peak_lr)
+        scheduler = warmup_cosine_scheduler(
+            optimizer, total_steps=100, warmup_steps=warmup_steps, peak_lr=peak_lr,
+        )
+        # At step 0, lr = peak_lr / warmup_steps (old behavior)
+        expected_start = peak_lr / warmup_steps
+        assert abs(scheduler.get_last_lr()[0] - expected_start) < 1e-7
+        # Warmup to peak
+        for _ in range(warmup_steps):
+            scheduler.step()
+        assert abs(scheduler.get_last_lr()[0] - peak_lr) < 1e-5
+        # Decay to 0
+        for _ in range(90):
+            scheduler.step()
+        assert scheduler.get_last_lr()[0] < 1e-6
 
 
 # === Viewpoint Tests ===
