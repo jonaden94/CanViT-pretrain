@@ -27,8 +27,8 @@ def plot_policy_predictions(
         (starts_full, preds_full.position, "tab:blue", "full→policy"),
         (starts_random, preds_random.position, "tab:orange", "random→policy"),
     ]:
-        start_np = start.cpu().numpy()
-        pred_np = pred.cpu().numpy()
+        start_np = start.cpu().float().numpy()
+        pred_np = pred.cpu().float().numpy()
         dx = pred_np[:, 0] - start_np[:, 0]
         dy = pred_np[:, 1] - start_np[:, 1]
         ax_pos.quiver(
@@ -58,14 +58,14 @@ def plot_policy_predictions(
     # Right: scale histogram
     bins = 20
     ax_scale.hist(
-        preds_full.scale.cpu().numpy(),
+        preds_full.scale.cpu().float().numpy(),
         bins=bins,
         alpha=0.6,
         label="full→policy",
         color="tab:blue",
     )
     ax_scale.hist(
-        preds_random.scale.cpu().numpy(),
+        preds_random.scale.cpu().float().numpy(),
         bins=bins,
         alpha=0.6,
         label="random→policy",
