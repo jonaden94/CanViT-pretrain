@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from canvit.backbone.dinov3 import DINOv3Backbone, NormFeatures
 from canvit.model.active.base import GlimpseOutput
+from canvit.policy import PolicyHead
 from canvit.viewpoint import Viewpoint as CanvitViewpoint
 from torch import Tensor
 
@@ -24,8 +25,9 @@ from ..probe import (
     get_top_k_predictions,
     labels_are_in1k,
 )
-from ..viewpoint import make_eval_viewpoints
+from ..viewpoint import Viewpoint, make_eval_viewpoints
 from .comet import log_curve, log_figure
+from .policy import plot_policy_predictions
 from .image import imagenet_denormalize
 from .plot import TimestepPredictions, plot_multistep_pca
 from .sample import VizSampleData, extract_sample0_viz
@@ -119,6 +121,59 @@ def _log_pca(
             )
 
 
+def _log_policy_viz(
+    *,
+    exp: comet_ml.Experiment,
+    step: int,
+    prefix: str,
+    model: "ActiveCanViT",
+    images: Tensor,
+    canvas_grid_size: int,
+    glimpse_size_px: int,
+    min_viewpoint_scale: float,
+) -> None:
+    """Log policy prediction visualization (positions + scales)."""
+    assert isinstance(model.policy, PolicyHead)
+
+    B = images.shape[0]
+    canvas_init = model.init_canvas(batch_size=B, canvas_grid_size=canvas_grid_size)
+    cls_init = model.init_cls(batch_size=B)
+
+    # Full scene context
+    vp_full = Viewpoint.full_scene(batch_size=B, device=images.device)
+    out_full = model.forward_step(
+        image=images,
+        canvas=canvas_init,
+        viewpoint=vp_full,
+        glimpse_size_px=glimpse_size_px,
+        cls=cls_init,
+    )
+    assert out_full.vpe is not None
+    preds_full = model.policy(out_full.vpe)
+
+    # Random context
+    vp_rand = Viewpoint.random(
+        batch_size=B, device=images.device, min_scale=min_viewpoint_scale
+    )
+    out_rand = model.forward_step(
+        image=images,
+        canvas=canvas_init,
+        viewpoint=vp_rand,
+        glimpse_size_px=glimpse_size_px,
+        cls=cls_init,
+    )
+    assert out_rand.vpe is not None
+    preds_rand = model.policy(out_rand.vpe)
+
+    fig_policy = plot_policy_predictions(
+        starts_full=vp_full.centers,
+        starts_random=vp_rand.centers,
+        preds_full=preds_full,
+        preds_random=preds_rand,
+    )
+    log_figure(exp, fig_policy, f"{prefix}/policy_viz", step)
+
+
 def validate(
     *,
     exp: comet_ml.Experiment,
@@ -132,6 +187,7 @@ def validate(
     scene_size_px: int,
     glimpse_size_px: int,
     n_eval_viewpoints: int = 10,
+    min_viewpoint_scale: float = 0.05,
     prefix: str = "val",
     probe: DINOv3LinearClassificationHead | None = None,
     labels: Tensor | None = None,
@@ -286,6 +342,18 @@ def validate(
                     log_spatial_stats=log_spatial_stats,
                     log_curves=log_curves,
                 )
+
+                if isinstance(model.policy, PolicyHead):
+                    _log_policy_viz(
+                        exp=exp,
+                        step=step,
+                        prefix=prefix,
+                        model=model,
+                        images=images,
+                        canvas_grid_size=canvas_grid_size,
+                        glimpse_size_px=glimpse_size_px,
+                        min_viewpoint_scale=min_viewpoint_scale,
+                    )
 
             return final_cos_sim
     finally:
