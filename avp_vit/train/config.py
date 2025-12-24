@@ -17,7 +17,6 @@ class Config:
     # Student
     student_model: str = "dinov3_vitb16"
     student_ckpt: Path | None = None  # None = random init
-    freeze_student_backbone: bool = False
     # Model config (PretrainingConfig via alias)
     # teacher_dim placeholder - overridden by create_model based on actual teacher
     model: ActiveCanViTConfig = field(
