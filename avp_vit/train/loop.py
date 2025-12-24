@@ -137,6 +137,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     if cfg.compile and cfg.model.gradient_checkpointing:
         raise ValueError("compile=True and gradient_checkpointing=True may be incompatible.")
 
+    if cfg.enable_policy and cfg.model.vpe is None:
+        raise ValueError("enable_policy=True requires cfg.model.vpe to be configured (VPE provides policy input)")
+
+    if cfg.enable_policy:
+        log.info("Policy training enabled - VPE token will be used for policy input")
+
     if cfg.compile:
         log.info("Compiling teacher and model")
         compile_teacher(teacher)
@@ -184,6 +190,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         ckpt_cfg = dacite.from_dict(ActiveCanViTConfig, ckpt_data["model_config"])
         if ckpt_cfg != cfg.model:
             log.warning("Checkpoint config differs from current config!")
+            log.warning(f"  Checkpoint: {ckpt_cfg}")
+            log.warning(f"  Current:    {cfg.model}")
         incompat = model.load_state_dict(ckpt_data["state_dict"], strict=False)
         if incompat.missing_keys:
             log.warning(f"Checkpoint missing keys (freshly initialized): {incompat.missing_keys}")
