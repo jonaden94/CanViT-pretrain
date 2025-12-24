@@ -38,9 +38,9 @@ class Config:
     # 1e-3 has proven to be safe and work well in our early experiments in this project
     # 1e-4 was used by the AdaGlimpse authors
     weight_decay: float = 1e-4
-    trajectory_length: int = 2  # Viewpoints per trajectory
     min_viewpoint_scale: float = 0.05  # Minimum scale for random viewpoints
-    n_random_trajectories: int = 2  # Random trajectories per step (+ 2 canonical)
+    enable_policy: bool = False  # Enable policy branch (t=1 POLICY viewpoint type)
+    ema_alpha: float = 0.1  # EMA smoothing for metrics
     warmup_steps: int = 10_000
     grad_clip: float = 1.0
     n_steps: int = 500_000
