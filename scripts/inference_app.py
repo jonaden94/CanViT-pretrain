@@ -22,6 +22,7 @@ import streamlit as st
 import torch
 import torch.nn.functional as F
 from canvit.backbone.dinov3 import DINOv3Backbone
+from canvit.policy import PolicyHead
 from PIL import Image, ImageDraw
 from streamlit_image_coordinates import streamlit_image_coordinates
 from torch import Tensor
@@ -60,6 +61,7 @@ class StepResult:
     cls_cos: float | None = None
     step_ms: float = 0.0
     top5: list[tuple[str, float]] = field(default_factory=list)
+    policy_pred: Viewpoint | None = None  # Next viewpoint predicted by policy
 
 
 @dataclass
@@ -111,6 +113,8 @@ def load_resources(ckpt_path: str, device_name: str) -> Resources:
 
     probe = load_probe(ckpt["backbone"], device)
     log.info(f"Probe: {'loaded' if probe else 'not available'}")
+
+    log.info(f"Policy: {'enabled' if model.policy is not None else 'disabled'}")
 
     return Resources(
         model=model,
@@ -229,6 +233,16 @@ def run_step(
     glimpse_np = imagenet_denormalize(out.glimpse[0].cpu()).numpy()
     assert glimpse_np.shape[0] == glimpse_px and glimpse_np.shape[1] == glimpse_px, f"glimpse shape {glimpse_np.shape[:2]} != {glimpse_px}²"
 
+    # Policy prediction for next viewpoint
+    policy_pred = None
+    if isinstance(res.model.policy, PolicyHead) and out.vpe is not None:
+        pol = res.model.policy(out.vpe)
+        policy_pred = Viewpoint(
+            name="policy",
+            centers=pol.position,  # [1, 2] in (y, x) order
+            scales=pol.scale,      # [1]
+        )
+
     return out.canvas, out.cls, StepResult(
         hidden=spatial.cpu().numpy(),
         projected=scene[0].cpu().numpy(),
@@ -237,6 +251,7 @@ def run_step(
         cls_cos=cls_cos,
         step_ms=step_ms,
         top5=top5,
+        policy_pred=policy_pred,
     )
 
 
@@ -278,7 +293,13 @@ def to_viewpoint(cx: float, cy: float, scale: float, H: int, W: int, device: tor
     )
 
 
-def draw_boxes(img: Image.Image, viewpoints: list[Viewpoint], H: int, W: int) -> Image.Image:
+def draw_boxes(
+    img: Image.Image,
+    viewpoints: list[Viewpoint],
+    H: int,
+    W: int,
+    policy_pred: Viewpoint | None = None,
+) -> Image.Image:
     out = img.copy()
     draw = ImageDraw.Draw(out, "RGBA")
     colors = timestep_colors(len(viewpoints)) if viewpoints else []
@@ -290,6 +311,18 @@ def draw_boxes(img: Image.Image, viewpoints: list[Viewpoint], H: int, W: int) ->
         cx, cy = int(box.center_x), int(box.center_y)
         draw.ellipse([cx - 8, cy - 8, cx + 8, cy + 8], fill=(r, g, b, 200))
         draw.text((cx, cy), str(i), fill=(255, 255, 255, 255), anchor="mm")
+
+    # Policy prediction ghost box (yellow, dashed effect via thinner line)
+    if policy_pred is not None:
+        box = policy_pred.to_pixel_box(0, H, W)
+        draw.rectangle(
+            [box.left, box.top, box.left + box.width, box.top + box.height],
+            outline=(255, 200, 0, 200),
+            width=2,
+        )
+        cx, cy = int(box.center_x), int(box.center_y)
+        draw.text((cx, cy), "→", fill=(255, 200, 0, 255), anchor="mm")
+
     return out
 
 
@@ -437,7 +470,8 @@ def main() -> None:
 
     with c1:
         st.markdown("**Input** (click to add)")
-        display = draw_boxes(img_pil, viewpoints, H, W).resize((col_w, col_w), Image.Resampling.LANCZOS)
+        last_policy = results[-1].policy_pred if results else None
+        display = draw_boxes(img_pil, viewpoints, H, W, policy_pred=last_policy).resize((col_w, col_w), Image.Resampling.LANCZOS)
         coords = streamlit_image_coordinates(display, key="img")
 
         if coords is not None:
@@ -465,6 +499,31 @@ def main() -> None:
                     latency_data[model_key].append(result.step_ms)
                     cos_str = f"{result.scene_cos:.4f}" if result.scene_cos else "?"
                     log.info(f"T{n}: pos=({cx:.1f},{cy:.1f}) scale={scale:.2f} cos={cos_str} time={result.step_ms:.1f}ms")
+                st.rerun()
+
+        # "Use Policy" button - accept policy's suggested next viewpoint
+        if last_policy is not None:
+            if st.button("Use Policy →", help="Accept policy's suggested viewpoint"):
+                viewpoints.append(Viewpoint(
+                    name=f"pol_t{n}",
+                    centers=last_policy.centers.clone(),
+                    scales=last_policy.scales.clone(),
+                ))
+                with torch.no_grad():
+                    sync_device(device)
+                    new_canvas, new_cls, result = run_step(
+                        res, image, st.session_state.canvas, st.session_state.cls,
+                        last_policy, glimpse_px, canvas_grid, teacher.scene, teacher.cls,
+                        teacher_grid, l2_norm,
+                    )
+                    sync_device(device)
+                    st.session_state.canvas = new_canvas
+                    st.session_state.cls = new_cls
+                    results.append(result)
+                    if model_key not in latency_data:
+                        latency_data[model_key] = []
+                    latency_data[model_key].append(result.step_ms)
+                    log.info(f"T{n}: policy viewpoint, cos={result.scene_cos:.4f if result.scene_cos else '?'}")
                 st.rerun()
 
     with c2:
@@ -593,11 +652,17 @@ def main() -> None:
     st.markdown("---")
     with st.expander(f"Debug ({n} viewpoints)"):
         latency_summary = ", ".join(f"{k}: {np.mean(v):.1f}ms (n={len(v)})" for k, v in sorted(latency_data.items()))
+        policy_status = "✓" if res.model.policy is not None else "✗"
         st.code(f"""backbone: {res.backbone}, step: {res.ckpt_step}
 patch: {res.patch_size}px, img: {img_size}px, glimpse: {glimpse_px}px
-teacher: {'✓' if res.teacher else '✗'}, scene_norm: {res.scene_norm.grid_size if res.scene_norm else '✗'}², probe: {'✓' if res.probe else '✗'}
+teacher: {'✓' if res.teacher else '✗'}, scene_norm: {res.scene_norm.grid_size if res.scene_norm else '✗'}², probe: {'✓' if res.probe else '✗'}, policy: {policy_status}
 canvas: {tuple(st.session_state.canvas.shape)}, cls: {tuple(st.session_state.cls.shape)}
 latency: {latency_summary or 'none'}""")
+
+        if last_policy is not None:
+            cy, cx = last_policy.centers[0].tolist()
+            s = last_policy.scales[0].item()
+            st.code(f"policy prediction: cy={cy:+.3f} cx={cx:+.3f} scale={s:.3f}")
 
         if viewpoints:
             st.markdown("**Viewpoints**")
