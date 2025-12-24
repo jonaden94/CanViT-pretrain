@@ -184,7 +184,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         ckpt_cfg = dacite.from_dict(ActiveCanViTConfig, ckpt_data["model_config"])
         if ckpt_cfg != cfg.model:
             log.warning("Checkpoint config differs from current config!")
-        model.load_state_dict(ckpt_data["state_dict"])
+        incompat = model.load_state_dict(ckpt_data["state_dict"], strict=False)
+        if incompat.missing_keys:
+            log.warning(f"Checkpoint missing keys (freshly initialized): {incompat.missing_keys}")
+        if incompat.unexpected_keys:
+            log.warning(f"Checkpoint has unexpected keys (ignored): {incompat.unexpected_keys}")
 
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}.pt"
 
