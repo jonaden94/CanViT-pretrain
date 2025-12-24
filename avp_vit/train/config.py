@@ -25,13 +25,12 @@ class Config:
     )
     # Glimpse/canvas sizes (runtime, not in model config)
     gram_loss_weight: float = 0
-    include_init: bool = False  # include initial canvas in scene/cls loss
-    glimpse_grid_size: int = 3  # tokens per glimpse side
+    glimpse_grid_size: int = 8  # tokens per glimpse side
     grid_size: int = 32  # canvas grid size
     # Training
-    batch_size: int = 128
-    peak_lr: float = 5e-4
-    start_lr: float | None = 1e-6  # None = peak_lr / warmup_steps (old behavior)
+    batch_size: int = 64
+    peak_lr: float = 1e-4
+    start_lr: float | None = 1e-7  # None = peak_lr / warmup_steps (old behavior)
     end_lr: float | None = 1e-6  # None = 0 (old behavior)
     # weight_decay: float = 0.05  # standard in ViTs
     # we can use a much lower weight decay due to the richness of our training signal
@@ -39,9 +38,10 @@ class Config:
     # 1e-3 has proven to be safe and work well in our early experiments in this project
     # 1e-4 was used by the AdaGlimpse authors
     weight_decay: float = 1e-4
-    n_viewpoints_per_step: int = 2  # Inner loop viewpoints
+    trajectory_length: int = 2  # Viewpoints per trajectory
     min_viewpoint_scale: float = 0.05  # Minimum scale for random viewpoints
-    warmup_steps: int = 100_000
+    n_random_trajectories: int = 2  # Random trajectories per step (+ 2 canonical)
+    warmup_steps: int = 10_000
     grad_clip: float = 1.0
     n_steps: int = 500_000
     # Target normalization
