@@ -137,8 +137,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     if cfg.compile and cfg.model.gradient_checkpointing:
         raise ValueError("compile=True and gradient_checkpointing=True may be incompatible.")
 
-    if cfg.enable_policy and cfg.model.vpe is None:
-        raise ValueError("enable_policy=True requires cfg.model.vpe to be configured (VPE provides policy input)")
+    if cfg.enable_policy and not cfg.model.enable_vpe:
+        raise ValueError("enable_policy=True requires cfg.model.enable_vpe=True (VPE provides policy input)")
 
     if cfg.enable_policy:
         log.info("Policy training enabled - VPE token will be used for policy input")
