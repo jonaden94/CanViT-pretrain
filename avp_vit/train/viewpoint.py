@@ -8,6 +8,7 @@ Extends canvit.viewpoint with training-specific utilities:
 
 import random
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import NamedTuple
 
 import torch
@@ -18,11 +19,20 @@ from torch import Tensor
 __all__ = [
     "PixelBox",
     "Viewpoint",
+    "ViewpointType",
     "sample_at_viewpoint",
     "random_viewpoint",
     "make_eval_viewpoints",
     "viewpoint_to_pixel_box",
 ]
+
+
+class ViewpointType(Enum):
+    """Type of viewpoint for training branches."""
+
+    RANDOM = auto()
+    FULL = auto()
+    POLICY = auto()
 
 
 class PixelBox(NamedTuple):
@@ -87,6 +97,32 @@ class Viewpoint(CoreViewpoint):
             scales=torch.full((B,), 0.5, device=device),
         )
 
+    @staticmethod
+    def random(
+        *, batch_size: int, device: torch.device, min_scale: float, max_scale: float = 1.0
+    ) -> "Viewpoint":
+        """Sample random viewpoints with uniform safe-box-area distribution.
+
+        Geometry: viewpoint has center (x, y) ∈ [-1, 1]² and scale s ∈ [min_scale, max_scale].
+        Constraint: |x| + s ≤ 1 and |y| + s ≤ 1 (viewpoint must fit in scene).
+        Given scale s, valid centers form a "safe box": [-(1-s), (1-s)]² with area A = 4·(1-s)².
+
+        We sample UNIFORMLY OVER SAFE-BOX AREA because large scales have fewer valid centers.
+        """
+        assert 0.0 <= min_scale <= max_scale <= 1.0
+
+        L_min = 1 - max_scale
+        L_max = 1 - min_scale
+
+        u = torch.rand(batch_size, device=device)
+        L_sq = L_min**2 + u * (L_max**2 - L_min**2)
+        L = torch.sqrt(L_sq)
+
+        scales = 1 - L
+        centers = (torch.rand(batch_size, 2, device=device) * 2 - 1) * L.unsqueeze(1)
+
+        return Viewpoint(name="random", centers=centers, scales=scales)
+
 
 def random_viewpoint(
     B: int,
@@ -94,27 +130,10 @@ def random_viewpoint(
     min_scale: float = 0.0,
     max_scale: float = 1.0,
 ) -> Viewpoint:
-    """Sample random viewpoints with uniform safe-box-area distribution.
-
-    Geometry: viewpoint has center (x, y) ∈ [-1, 1]² and scale s ∈ [min_scale, max_scale].
-    Constraint: |x| + s ≤ 1 and |y| + s ≤ 1 (viewpoint must fit in scene).
-    Given scale s, valid centers form a "safe box": [-(1-s), (1-s)]² with area A = 4·(1-s)².
-
-    We sample UNIFORMLY OVER SAFE-BOX AREA because large scales have fewer valid centers.
-    """
-    assert 0.0 <= min_scale <= max_scale <= 1.0
-
-    L_min = 1 - max_scale
-    L_max = 1 - min_scale
-
-    u = torch.rand(B, device=device)
-    L_sq = L_min**2 + u * (L_max**2 - L_min**2)
-    L = torch.sqrt(L_sq)
-
-    scales = 1 - L
-    centers = (torch.rand(B, 2, device=device) * 2 - 1) * L.unsqueeze(1)
-
-    return Viewpoint(name="random", centers=centers, scales=scales)
+    """Sample random viewpoints. Thin wrapper for backward compat."""
+    return Viewpoint.random(
+        batch_size=B, device=device, min_scale=min_scale, max_scale=max_scale
+    )
 
 
 def make_eval_viewpoints(B: int, device: torch.device) -> list[Viewpoint]:
