@@ -1,8 +1,10 @@
 """Policy prediction visualization."""
 
 import matplotlib.pyplot as plt
+import numpy as np
 from canvit.policy import PolicyOutput
 from matplotlib.figure import Figure
+from scipy.stats import gaussian_kde
 from torch import Tensor
 
 
@@ -11,14 +13,16 @@ def plot_policy_predictions(
     starts_random: Tensor,
     preds_full: PolicyOutput,
     preds_random: PolicyOutput,
+    min_scale: float = 0.05,
 ) -> Figure:
-    """Plot policy predictions: positions (scatter+arrows) and scales (histogram).
+    """Plot policy predictions: positions (lines) and scales (KDE + scatter).
 
     Args:
         starts_full: (B, 2) centers from full scene viewpoints (all zeros)
         starts_random: (B, 2) centers from random viewpoints
         preds_full: Policy predictions given full scene context
         preds_random: Policy predictions given random context
+        min_scale: Minimum scale for x-axis limits
     """
     fig, (ax_pos, ax_scale) = plt.subplots(1, 2, figsize=(10, 5))
 
@@ -45,24 +49,20 @@ def plot_policy_predictions(
     ax_pos.legend(loc="upper right", fontsize=8)
     ax_pos.set_title("Policy positions")
 
-    # Right: scale histogram
-    bins = 20
-    ax_scale.hist(
-        preds_full.scale.cpu().float().numpy(),
-        bins=bins,
-        alpha=0.6,
-        label="full→policy",
-        color="tab:blue",
-    )
-    ax_scale.hist(
-        preds_random.scale.cpu().float().numpy(),
-        bins=bins,
-        alpha=0.6,
-        label="random→policy",
-        color="tab:orange",
-    )
+    # Right: scale distribution (KDE + scatter)
+    x_kde = np.linspace(min_scale, 1.0, 200)
+    for scales, color, label, y_offset in [
+        (preds_full.scale, "tab:blue", "full→policy", 0.02),
+        (preds_random.scale, "tab:orange", "random→policy", -0.02),
+    ]:
+        s_np = scales.cpu().float().numpy()
+        kde = gaussian_kde(s_np, bw_method=0.1)
+        ax_scale.plot(x_kde, kde(x_kde), color=color, lw=2, label=label)
+        ax_scale.scatter(s_np, np.full_like(s_np, y_offset), c=color, s=15, alpha=0.5)
+    ax_scale.axhline(0, color="gray", lw=0.5, alpha=0.3)
+    ax_scale.set_xlim(min_scale, 1.0)
     ax_scale.set_xlabel("Scale")
-    ax_scale.set_ylabel("Count")
+    ax_scale.set_ylabel("Density")
     ax_scale.legend(loc="upper right", fontsize=8)
     ax_scale.set_title("Policy scales")
 

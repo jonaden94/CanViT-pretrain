@@ -170,6 +170,7 @@ def _log_policy_viz(
         starts_random=vp_rand.centers,
         preds_full=preds_full,
         preds_random=preds_rand,
+        min_scale=min_viewpoint_scale,
     )
     log_figure(exp, fig_policy, f"{prefix}/policy_viz", step)
 
