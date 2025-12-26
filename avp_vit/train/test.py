@@ -166,14 +166,28 @@ class TestMakeEvalViewpoints:
 
 class TestPixelBox:
     def test_viewpoint_to_pixel_box(self) -> None:
+        # Pixel center convention: normalized [-1, 1] maps to pixel [0, W-1]
         centers = torch.tensor([[0.0, 0.0]])
         scales = torch.tensor([0.5])
         box = viewpoint_to_pixel_box(centers, scales, 0, H=100, W=100)
         assert isinstance(box, PixelBox)
-        assert box.center_x == 50.0
-        assert box.center_y == 50.0
-        assert box.width == 50.0
-        assert box.height == 50.0
+        # center at norm (0,0) -> pixel (99/2, 99/2) = (49.5, 49.5)
+        assert box.center_x == 49.5
+        assert box.center_y == 49.5
+        # scale 0.5 -> width/height = 0.5 * 99 = 49.5
+        assert box.width == 49.5
+        assert box.height == 49.5
+
+    def test_full_image_box(self) -> None:
+        # scale=1.0 should cover [0, W-1] and [0, H-1]
+        centers = torch.tensor([[0.0, 0.0]])
+        scales = torch.tensor([1.0])
+        box = viewpoint_to_pixel_box(centers, scales, 0, H=100, W=100)
+        assert box.left == 0.0
+        assert box.top == 0.0
+        # right = left + width = 0 + 99 = 99 (last pixel)
+        assert box.left + box.width == 99.0
+        assert box.top + box.height == 99.0
 
 
 # === Viz Tests ===

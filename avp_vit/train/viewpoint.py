@@ -49,13 +49,17 @@ class PixelBox(NamedTuple):
 def viewpoint_to_pixel_box(
     centers: Tensor, scales: Tensor, batch_idx: int, H: int, W: int
 ) -> PixelBox:
-    """Convert viewpoint geometry to pixel coordinates for visualization."""
+    """Convert viewpoint geometry to pixel coordinates for visualization.
+
+    Maps normalized [-1, 1] to pixel centers [0, W-1] and [0, H-1].
+    """
     cy, cx = centers[batch_idx].tolist()
     scale = scales[batch_idx].item()
-    center_x = (cx + 1) / 2 * W
-    center_y = (cy + 1) / 2 * H
-    width = scale * W
-    height = scale * H
+    # Map normalized [-1, 1] to pixel [0, W-1] (pixel center convention)
+    center_x = (cx + 1) / 2 * (W - 1)
+    center_y = (cy + 1) / 2 * (H - 1)
+    width = scale * (W - 1)
+    height = scale * (H - 1)
     return PixelBox(
         left=center_x - width / 2,
         top=center_y - height / 2,

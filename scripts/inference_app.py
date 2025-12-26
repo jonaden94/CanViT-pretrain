@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Streamlit app for AVP-ViT inference. Click image to add viewpoints."""
 
+import gc
 import io
 import logging
 import time
@@ -71,6 +72,7 @@ class Config:
     show_up: bool
     normalize: bool
     pc_offset: int
+    sim_sharpness: float
     projected_basis: str  # "teacher" | "own"
     up_basis: str  # "teacher" | "own"
     rerun_teacher: bool
@@ -118,6 +120,14 @@ class SeqState:
     viewpoints: list[Viewpoint]
     results: list[StepResult]
     latency: dict[str, list[float]]
+
+
+@dataclass
+class FeatViz:
+    """Feature visualization data for similarity computation."""
+    label: str
+    features: np.ndarray | None
+    grid: int
 
 
 # --- Loading ---
@@ -255,6 +265,94 @@ def upscale(arr: np.ndarray, size: int) -> Image.Image:
     return Image.fromarray((np.clip(arr, 0, 1) * 255).astype(np.uint8)).resize((size, size), Image.Resampling.NEAREST)
 
 
+def cos_sim_heatmap(features: np.ndarray, indices: list[int]) -> np.ndarray:
+    """Cosine similarity vs anchor tokens (averaged if multiple). Returns [N] in [-1, 1]."""
+    # Average anchor features
+    q = np.mean([features[i] for i in indices], axis=0)
+    q_n = q / (np.linalg.norm(q) + 1e-8)
+    f_n = features / (np.linalg.norm(features, axis=-1, keepdims=True) + 1e-8)
+    return f_n @ q_n
+
+
+def sim_to_img(sim: np.ndarray, grid: int, size: int, vmin: float, vmax: float, sharpness: float = 1.0) -> Image.Image:
+    """Convert similarity [N] to heatmap. Blue=vmin, red=vmax. Sharpness via power scaling."""
+    s = sim.reshape(grid, grid)
+    s = ((s - vmin) / (vmax - vmin + 1e-8)).clip(0, 1)
+    s = np.power(s, sharpness)  # sharpness > 1 = more contrast
+    rgb = np.zeros((grid, grid, 3), dtype=np.uint8)
+    rgb[..., 0] = (s * 255).astype(np.uint8)
+    rgb[..., 2] = ((1 - s) * 255).astype(np.uint8)
+    return Image.fromarray(rgb).resize((size, size), Image.Resampling.NEAREST)
+
+
+def pos_to_token(nx: float, ny: float, grid: int) -> tuple[int, int, int]:
+    """Normalized [0,1] position to (row, col, flat_idx). nx=horizontal, ny=vertical."""
+    col = min(int(nx * grid), grid - 1)  # x -> col
+    row = min(int(ny * grid), grid - 1)  # y -> row
+    return row, col, row * grid + col
+
+
+def draw_token_box(img: Image.Image, row: int, col: int, grid: int, color: tuple = (255, 255, 0)) -> Image.Image:
+    """Draw rectangle around token position. img is size x size, grid is token grid."""
+    out = img.copy()
+    draw = ImageDraw.Draw(out)
+    cell = img.width / grid
+    x0, y0 = col * cell, row * cell
+    draw.rectangle([x0, y0, x0 + cell, y0 + cell], outline=color, width=2)
+    return out
+
+
+def clickable_pca(img: Image.Image, key: str) -> tuple[float, float] | None:
+    """Render clickable image, return normalized (x, y) only if NEW click."""
+    coords = streamlit_image_coordinates(img, key=key)
+    if not coords:
+        return None
+    pos = (coords["x"] / img.width, coords["y"] / img.height)
+    # Track per-image last seen position to avoid re-triggering on old clicks
+    seen_key = f"_sim_seen_{key}"
+    if pos == st.session_state.get(seen_key):
+        return None  # same as before, not a new click
+    st.session_state[seen_key] = pos
+    return pos
+
+
+def render_similarity_row(feat_vizs: list[FeatViz], sim_positions: list[tuple[float, float]], sharpness: float = 1.0) -> None:
+    """Render similarity heatmaps for all features given anchor positions."""
+    if not sim_positions:
+        return
+    # Compute all similarities first for global scaling
+    sims: list[tuple[FeatViz, np.ndarray, list[tuple[int, int]], list[int]] | None] = []
+    for fv in feat_vizs:
+        if fv.features is not None:
+            tokens = [pos_to_token(nx, ny, fv.grid) for nx, ny in sim_positions]
+            indices = [t[2] for t in tokens]
+            row_cols = [(t[0], t[1]) for t in tokens]
+            sim = cos_sim_heatmap(fv.features, indices)
+            sims.append((fv, sim, row_cols, indices))
+        else:
+            sims.append(None)
+    # Global scaling
+    all_sim_vals = [s[1] for s in sims if s is not None]
+    if not all_sim_vals:
+        return
+    vmin = min(s.min() for s in all_sim_vals)
+    vmax = max(s.max() for s in all_sim_vals)
+    # Render row
+    cols = st.columns(len(feat_vizs))
+    for col, entry in zip(cols, sims):
+        with col:
+            if entry is None:
+                st.empty()
+            else:
+                fv, sim, row_cols, indices = entry
+                img = sim_to_img(sim, fv.grid, COL_W, vmin, vmax, sharpness)
+                for row, c in row_cols:
+                    img = draw_token_box(img, row, c, fv.grid)
+                st.image(img, width=COL_W)
+                idx_str = ",".join(str(i) for i in indices)
+                st.caption(f"{fv.label} idx:[{idx_str}] range:[{vmin:.2f},{vmax:.2f}]")
+
+
 def upsample(latents: np.ndarray, src: int, dst: int) -> np.ndarray:
     D = latents.shape[-1]
     t = torch.from_numpy(latents).float().view(src, src, D).permute(2, 0, 1).unsqueeze(0)
@@ -301,7 +399,7 @@ def sidebar() -> Config:
 
         st.markdown("---")
         defaults = TrainConfig()
-        scale = st.slider("Scale", 0.05, 1.0, 0.25, 0.05)
+        scale = st.slider("Scale", 0.05, 1.0, 1.0, 0.05)
         glimpse = st.slider("Glimpse grid", 2, 16, defaults.glimpse_grid_size, 1)
         canvas = st.slider("Canvas grid", 8, 256, defaults.grid_size, 8)
         l2 = st.checkbox("L2 norm hidden", value=False)
@@ -314,15 +412,18 @@ def sidebar() -> Config:
         normalize = st.checkbox("Normalize", value=True, help="Full: exact stats. Glimpse: interpolated.")
 
         st.markdown("---")
-        st.markdown("**PCA**")
+        st.markdown("**PCA / Similarity**")
         pc_off = st.slider("PC offset", 0, 9, 0, 1)
+        sim_sharpness = st.slider("Sim sharpness", 0.1, 5.0, 1.0, 0.1, help="Higher = sharper contrast")
         proj_basis = st.radio("Projected", ["teacher", "own"], horizontal=True)
         up_basis = st.radio("Upsampled", ["teacher", "own"], horizontal=True)
 
         st.markdown("---")
         c1, c2 = st.columns(2)
         if c1.button("Clear"):
-            for k in ["viewpoints", "results", "canvas", "cls", "last_click", "_cfg"]:
+            keys_to_clear = ["viewpoints", "results", "canvas", "cls", "last_click", "_cfg", "sim_positions"]
+            keys_to_clear += [k for k in st.session_state if k.startswith("_sim_seen_")]
+            for k in keys_to_clear:
                 st.session_state.pop(k, None)
             st.rerun()
         if c2.button("Undo"):
@@ -342,8 +443,8 @@ def sidebar() -> Config:
     return Config(
         ckpt_path=ckpt, device=dev, scale=scale, glimpse_grid=glimpse, canvas_grid=canvas,
         l2_norm=l2, show_full=show_full, show_glimpse=show_glimpse, show_up=show_up,
-        normalize=normalize, pc_offset=pc_off, projected_basis=proj_basis, up_basis=up_basis,
-        rerun_teacher=rerun,
+        normalize=normalize, pc_offset=pc_off, sim_sharpness=sim_sharpness,
+        projected_basis=proj_basis, up_basis=up_basis, rerun_teacher=rerun,
     )
 
 
@@ -355,6 +456,16 @@ def init_seq(res: Resources, cfg: Config, file_key: str) -> SeqState:
     cfg_key = f"{cfg.ckpt_path}:{cfg.device}:{cfg.canvas_grid}:{cfg.glimpse_grid}:{file_key}"
     if st.session_state.get("_cfg") != cfg_key:
         log.info("Config changed, reset")
+        device = torch.device(cfg.device)
+        sync_device(device)
+        st.session_state.pop("canvas", None)
+        st.session_state.pop("cls", None)
+        st.session_state.pop("viewpoints", None)
+        st.session_state.pop("results", None)
+        gc.collect()
+        if cfg.device == "mps":
+            torch.mps.empty_cache()
+        sync_device(device)
         st.session_state._cfg = cfg_key
         st.session_state.viewpoints = []
         st.session_state.results = []
@@ -492,6 +603,16 @@ def render_timeline(seq: SeqState, cfg: Config, pca_teacher: PCA | None, teacher
 def main() -> None:
     cfg = sidebar()
 
+    # Clean up orphaned GPU tensors from previous runs (e.g., ImageCtx that went
+    # out of scope but wasn't collected). Without this, MPS crashes when loading
+    # a second image because old tensors race with new GPU operations.
+    gc.collect()
+    if cfg.device == "mps":
+        device = torch.device("mps")
+        sync_device(device)
+        torch.mps.empty_cache()
+        sync_device(device)
+
     # Upload
     up = st.file_uploader("Image", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
     if up:
@@ -524,8 +645,15 @@ def main() -> None:
     # Count: input + hidden + projected + conditionals
     n_cols = 3 + cfg.show_full + cfg.show_glimpse + cfg.show_up + (cfg.show_glimpse and cfg.show_up)
     cols = iter(st.columns(n_cols))
+    feat_vizs: list[FeatViz] = []  # collect for similarity row
+    new_sim_pos: tuple[float, float] | None = None
 
-    # Input
+    def check_click(pos: tuple[float, float] | None) -> None:
+        nonlocal new_sim_pos
+        if pos and pos not in st.session_state.get("sim_positions", []):
+            new_sim_pos = pos
+
+    # Input (viewpoint clicks, not similarity)
     with next(cols):
         st.markdown("**Input** (click)")
         last_pol = seq.results[-1].policy if seq.results else None
@@ -539,60 +667,104 @@ def main() -> None:
         if last_pol and st.button("Policy →"):
             vp = Viewpoint(name=f"pol_t{len(seq.viewpoints)}", centers=last_pol.centers.clone(), scales=last_pol.scales.clone())
             do_step(res, cfg, ctx, seq, vp)
+    feat_vizs.append(FeatViz("Input", None, 0))  # placeholder for column alignment
 
     # Teacher full
     if cfg.show_full and full_np is not None and ctx.pca_full:
         with next(cols):
             st.markdown(f"**Teacher {tg}²**" + ("" if cfg.normalize else " (raw)"))
-            st.image(pca_img(full_np, tg, ctx.pca_full, cfg.pc_offset, norm=False), width=COL_W)
+            img = pca_img(full_np, tg, ctx.pca_full, cfg.pc_offset, norm=False)
+            check_click(clickable_pca(img, "t_full"))
+            feat_vizs.append(FeatViz(f"T{tg}²", full_np, tg))
 
     # Teacher glimpse
     if cfg.show_glimpse and glimpse_np is not None and ctx.pca_glimpse:
         with next(cols):
             st.markdown(f"**Teacher {cfg.glimpse_grid}²**" + (" (interp)" if cfg.normalize else " (raw)"))
-            st.image(pca_img(glimpse_np, cfg.glimpse_grid, ctx.pca_glimpse, cfg.pc_offset, norm=False), width=COL_W)
+            img = pca_img(glimpse_np, cfg.glimpse_grid, ctx.pca_glimpse, cfg.pc_offset, norm=False)
+            check_click(clickable_pca(img, "t_glimpse"))
+            feat_vizs.append(FeatViz(f"T{cfg.glimpse_grid}²", glimpse_np, cfg.glimpse_grid))
 
     # Hidden
     with next(cols):
         suf = " (L2)" if cfg.l2_norm else ""
         st.markdown(f"**Hidden {cfg.canvas_grid}²**{suf}" + (f" T{len(seq.results)-1}" if seq.results else ""))
-        if seq.results:
-            h = seq.results[-1].hidden
+        h = seq.results[-1].hidden if seq.results else None
+        if h is not None:
             pca_h = fit_pca(h)
             if pca_h:
-                st.image(pca_img(h, cfg.canvas_grid, pca_h, cfg.pc_offset, norm=False), width=COL_W)
+                img = pca_img(h, cfg.canvas_grid, pca_h, cfg.pc_offset, norm=False)
+                check_click(clickable_pca(img, "hidden"))
+        feat_vizs.append(FeatViz(f"H{cfg.canvas_grid}²", h, cfg.canvas_grid))
 
     # Projected
     with next(cols):
         basis_lbl = " (own)" if cfg.projected_basis == "own" else f" ({tg}²)"
         st.markdown(f"**Projected {cfg.canvas_grid}²**{basis_lbl}" + (f" T{len(seq.results)-1}" if seq.results else ""))
-        if seq.results:
-            p = seq.results[-1].projected
+        p = seq.results[-1].projected if seq.results else None
+        if p is not None:
             pca = fit_pca(p) if cfg.projected_basis == "own" else ctx.pca_full
             if pca:
-                st.image(pca_img(p, cfg.canvas_grid, pca, cfg.pc_offset, norm=(cfg.projected_basis == "teacher")), width=COL_W)
+                img = pca_img(p, cfg.canvas_grid, pca, cfg.pc_offset, norm=(cfg.projected_basis == "teacher"))
+                check_click(clickable_pca(img, "projected"))
                 if seq.results[-1].scene_cos is not None:
                     st.caption(f"cos vs {tg}² = {seq.results[-1].scene_cos:.4f}")
+        feat_vizs.append(FeatViz(f"P{cfg.canvas_grid}²", p, cfg.canvas_grid))
 
     # Teacher↑ full
+    up_full: np.ndarray | None = None
     if cfg.show_up and full_np is not None:
         with next(cols):
             basis_lbl = " (own)" if cfg.up_basis == "own" else f" ({tg}²)"
             st.markdown(f"**Teacher↑ {tg}²→{cfg.canvas_grid}²**{basis_lbl}")
-            up = upsample(full_np, tg, cfg.canvas_grid)
-            pca = fit_pca(up) if cfg.up_basis == "own" else ctx.pca_full
+            up_full = upsample(full_np, tg, cfg.canvas_grid)
+            pca = fit_pca(up_full) if cfg.up_basis == "own" else ctx.pca_full
             if pca:
-                st.image(pca_img(up, cfg.canvas_grid, pca, cfg.pc_offset, norm=(cfg.up_basis == "teacher")), width=COL_W)
+                img = pca_img(up_full, cfg.canvas_grid, pca, cfg.pc_offset, norm=(cfg.up_basis == "teacher"))
+                check_click(clickable_pca(img, "t_up_full"))
+            feat_vizs.append(FeatViz(f"T↑{cfg.canvas_grid}²", up_full, cfg.canvas_grid))
 
     # Teacher↑ glimpse
+    up_glimpse: np.ndarray | None = None
     if cfg.show_glimpse and cfg.show_up and glimpse_np is not None:
         with next(cols):
             basis_lbl = " (own)" if cfg.up_basis == "own" else f" ({cfg.glimpse_grid}²)"
             st.markdown(f"**Teacher↑ {cfg.glimpse_grid}²→{cfg.canvas_grid}²**{basis_lbl}")
-            up = upsample(glimpse_np, cfg.glimpse_grid, cfg.canvas_grid)
-            pca = fit_pca(up) if cfg.up_basis == "own" else ctx.pca_glimpse
+            up_glimpse = upsample(glimpse_np, cfg.glimpse_grid, cfg.canvas_grid)
+            pca = fit_pca(up_glimpse) if cfg.up_basis == "own" else ctx.pca_glimpse
             if pca:
-                st.image(pca_img(up, cfg.canvas_grid, pca, cfg.pc_offset, norm=(cfg.up_basis == "teacher")), width=COL_W)
+                img = pca_img(up_glimpse, cfg.canvas_grid, pca, cfg.pc_offset, norm=(cfg.up_basis == "teacher"))
+                check_click(clickable_pca(img, "t_up_glimpse"))
+            feat_vizs.append(FeatViz(f"Tg↑{cfg.canvas_grid}²", up_glimpse, cfg.canvas_grid))
+
+    # Update sim_positions if new click (accumulate anchors)
+    if new_sim_pos:
+        if "sim_positions" not in st.session_state:
+            st.session_state.sim_positions = []
+        st.session_state.sim_positions.append(new_sim_pos)
+
+    # Similarity controls and debug
+    sim_positions = st.session_state.get("sim_positions", [])
+    if sim_positions:
+        ctrl_cols = st.columns([1, 1, 4])
+        with ctrl_cols[0]:
+            if st.button("Clear anchors"):
+                st.session_state.sim_positions = []
+                for k in list(st.session_state.keys()):
+                    if isinstance(k, str) and k.startswith("_sim_seen_"):
+                        del st.session_state[k]
+                st.rerun()
+        with ctrl_cols[1]:
+            if st.button("Undo anchor") and sim_positions:
+                st.session_state.sim_positions.pop()
+                st.rerun()
+        with ctrl_cols[2]:
+            # Debug: show anchor positions
+            pos_strs = [f"({p[0]:.2f},{p[1]:.2f})" for p in sim_positions]
+            st.caption(f"Anchors ({len(sim_positions)}): {' '.join(pos_strs)}")
+
+    # Similarity row
+    render_similarity_row(feat_vizs, sim_positions, cfg.sim_sharpness)
 
     # --- Bottom ---
     st.markdown("---")
