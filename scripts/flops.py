@@ -206,6 +206,8 @@ def _print_tables(
     table2.add_column("Canvas", style="bold")
     table2.add_column("Mode", style="bold")
     table2.add_column("Total", justify="right")
+    table2.add_column("ViT@Glimpse", justify="right", style="dim")
+    table2.add_column("Overhead", justify="right", style="yellow")
     table2.add_column("ViT@Canvas", justify="right", style="dim")
     table2.add_column("Savings", justify="right", style="green")
 
@@ -245,6 +247,8 @@ def _print_tables(
                 f"{c}×{c}",
                 "w/o Heads",
                 fmt(total_no_heads),
+                fmt(backbone_flops),
+                f"×{total_no_heads / backbone_flops:.2f}",
                 fmt(vit_at_canvas),
                 f"×{vit_at_canvas / total_no_heads:.1f}",
             )
@@ -253,6 +257,8 @@ def _print_tables(
                 "",
                 "[cyan]w/ Heads[/cyan]",
                 f"[cyan]{fmt(total_with_heads)}[/cyan]",
+                "",
+                f"[cyan]×{total_with_heads / backbone_flops:.2f}[/cyan]",
                 "",
                 f"[cyan]×{vit_at_canvas / total_with_heads:.1f}[/cyan]",
                 end_section=True,
