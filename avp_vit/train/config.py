@@ -15,7 +15,7 @@ class Config:
     teacher_model: str = "dinov3_vitb16"
     teacher_ckpt: Path = Path("dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth")
     # Student
-    student_model: str = "dinov3_vits16"
+    student_model: str = "dinov3_vitb16"
     student_ckpt: Path | None = None  # None = random init
     # Model config (PretrainingConfig via alias)
     # teacher_dim placeholder - overridden by create_model based on actual teacher
@@ -38,7 +38,7 @@ class Config:
     # 1e-4 was used by the AdaGlimpse authors
     weight_decay: float = 1e-4
     min_viewpoint_scale: float = 0.05  # Minimum scale for random viewpoints
-    enable_policy: bool = False  # Enable policy branch (t=1 POLICY viewpoint type)
+    enable_policy: bool = True  # Enable policy branch (t=1 POLICY viewpoint type)
     ema_alpha: float = 0.1  # EMA smoothing for metrics
     warmup_steps: int = 100_000
     grad_clip: float = 1.0
@@ -52,6 +52,7 @@ class Config:
     index_dir: Path | None = None
     ckpt_dir: Path = Path("checkpoints")
     resume_ckpt: Path | None = None
+    reset_policy: bool = False  # Reinitialize policy weights when resuming
     # Training
     num_workers: int = 8
     crop_scale_min: float = 0.8

@@ -192,7 +192,13 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             log.warning("Checkpoint config differs from current config!")
             log.warning(f"  Checkpoint: {ckpt_cfg}")
             log.warning(f"  Current:    {cfg.model}")
-        incompat = model.load_state_dict(ckpt_data["state_dict"], strict=False)
+        state_dict = ckpt_data["state_dict"]
+        if cfg.reset_policy:
+            n_before = len(state_dict)
+            state_dict = {k: v for k, v in state_dict.items() if not k.startswith("policy.")}
+            n_removed = n_before - len(state_dict)
+            log.info(f"Reset policy: removed {n_removed} policy keys, will use fresh init")
+        incompat = model.load_state_dict(state_dict, strict=False)
         if incompat.missing_keys:
             log.warning(f"Checkpoint missing keys (freshly initialized): {incompat.missing_keys}")
         if incompat.unexpected_keys:
