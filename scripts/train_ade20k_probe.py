@@ -490,12 +490,9 @@ def main(cfg: Config) -> None:
         log.warning(f"    This may cause issues! Consider using image_size={scene_norm.grid_size * patch_size}")
 
     # Get glimpse settings from model config
-    model_config = ckpt.get("model_config", {})
-    if "glimpse_grid_size" not in model_config:
-        log.warning("⚠️  glimpse_grid_size not in checkpoint model_config! Using fallback=8")
-        glimpse_grid = 8
-    else:
-        glimpse_grid = model_config["glimpse_grid_size"]
+    model_config = ckpt["model_config"]
+    assert "glimpse_grid_size" in model_config, "glimpse_grid_size missing from checkpoint - ancient checkpoint?"
+    glimpse_grid = model_config["glimpse_grid_size"]
     glimpse_px = glimpse_grid * patch_size
     log.info(f"Glimpse: grid={glimpse_grid}, px={glimpse_px}")
 
@@ -560,30 +557,6 @@ def main(cfg: Config) -> None:
     log.info("Starting training...")
     pbar = tqdm(total=cfg.max_steps, desc="Training")
 
-    # Val at step 0
-    log.info("Running validation at step 0...")
-    val_metrics = validate(extractor, probes, val_loader, device, enabled)
-    for k, v in val_metrics.items():
-        exp.log_metric(k, v, step=0)
-        log.info(f"  {k}: {v:.4f}")
-
-    # Viz at step 0
-    log.info("Logging visualization at step 0...")
-    viz_iter = iter(train_loader)
-    viz_images, viz_masks = next(viz_iter)
-    viz_images = viz_images.to(device)
-    viz_masks = viz_masks.to(device)
-    with torch.no_grad():
-        viz_features = extractor.extract(viz_images)
-        predictions = {}
-        for name in enabled:
-            logits = probes.probes[name].probe(viz_features[name])
-            pred = logits.argmax(dim=1)
-            pred_up = F.interpolate(pred.unsqueeze(1).float(), size=cfg.image_size, mode="nearest").squeeze(1).long()
-            predictions[name] = pred_up
-    log_viz(exp, 0, viz_images, viz_masks, predictions, cfg.n_viz_samples)
-    del viz_iter, viz_images, viz_masks, viz_features, predictions
-
     while step < cfg.max_steps:
         for images, masks in train_loader:
             if step >= cfg.max_steps:
@@ -592,37 +565,21 @@ def main(cfg: Config) -> None:
             images = images.to(device, non_blocking=True)
             masks = masks.to(device, non_blocking=True)
 
-            # Extract features
+            # Extract features (needed for viz before training)
             features = extractor.extract(images)
-
-            # Downsample masks
             H_feat = features["hidden"].shape[1]
             masks_down = F.interpolate(
                 masks.unsqueeze(1).float(), size=(H_feat, H_feat), mode="nearest"
             ).squeeze(1).long()
 
-            # Train step (returns tensors, no GPU sync)
-            train_metrics = probes.train_step(features, masks_down, cfg.grad_clip, cfg.ema_alpha)
-
-            step += 1
-            pbar.update(1)
-
-            # Logging (sync here is OK)
-            if step % cfg.log_every == 0:
-                probes.update_ema(train_metrics, cfg.ema_alpha)
-                log_dict = {"lr": probes.get_lr()}
-                for name, (loss, grad_norm) in train_metrics.items():
-                    log_dict[f"{name}/train_loss"] = probes.probes[name].loss_ema
-                    log_dict[f"{name}/grad_norm"] = grad_norm.item()
-                exp.log_metrics(log_dict, step=step)
-
-            # Validation
+            # Validation BEFORE training (step 0 = untrained baseline)
             if step % cfg.val_every == 0:
                 val_metrics = validate(extractor, probes, val_loader, device, enabled)
                 for k, v in val_metrics.items():
                     exp.log_metric(k, v, step=step)
+                    if step == 0:
+                        log.info(f"  {k}: {v:.4f}")
 
-                # Check for best and save
                 postfix = {}
                 for name in enabled:
                     miou = val_metrics[f"{name}/val_miou"]
@@ -633,24 +590,35 @@ def main(cfg: Config) -> None:
                         torch.save(state.probe.state_dict(), ckpt_path)
                         log.info(f"Step {step}: new best {name} mIoU: {miou:.4f} -> {ckpt_path}")
                     postfix[f"{name[:3]}"] = f"{miou:.3f}"
-
                 pbar.set_postfix(postfix)
 
-            # Visualization
+            # Visualization BEFORE training
             if step % cfg.viz_every == 0:
                 for state in probes.probes.values():
                     state.probe.eval()
-
                 with torch.no_grad():
                     predictions = {}
                     for name in enabled:
                         logits = probes.probes[name].probe(features[name])
                         pred = logits.argmax(dim=1)
-                        # Upsample for viz
                         pred_up = F.interpolate(pred.unsqueeze(1).float(), size=cfg.image_size, mode="nearest").squeeze(1).long()
                         predictions[name] = pred_up
-
                 log_viz(exp, step, images, masks, predictions, cfg.n_viz_samples)
+
+            # Train step (returns tensors, no GPU sync)
+            train_metrics = probes.train_step(features, masks_down, cfg.grad_clip, cfg.ema_alpha)
+
+            step += 1
+            pbar.update(1)
+
+            # Log training metrics
+            if step % cfg.log_every == 0:
+                probes.update_ema(train_metrics, cfg.ema_alpha)
+                log_dict = {"lr": probes.get_lr()}
+                for name, (loss, grad_norm) in train_metrics.items():
+                    log_dict[f"{name}/train_loss"] = probes.probes[name].loss_ema
+                    log_dict[f"{name}/grad_norm"] = grad_norm.item()
+                exp.log_metrics(log_dict, step=step)
 
     pbar.close()
 
