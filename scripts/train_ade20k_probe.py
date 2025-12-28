@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
-"""Train ADE20K segmentation probes on AVP features.
+"""Train ADE20K segmentation probes on AVP and/or teacher features.
 
-Three probe types (enable via flags):
+AVP probes (require --avp-ckpt):
 - probe_hidden: model.get_spatial(canvas) - internal representation
 - probe_predicted_norm: model.predict_teacher_scene(canvas) - normalized DINOv3 space
 - probe_predicted_denorm: denorm(predict_teacher_scene) - raw DINOv3 space
+
+Teacher probes (baseline comparison, raw DINOv3 output):
+- probe_teacher_full: teacher at full canvas resolution
+- probe_teacher_glimpse: teacher at glimpse resolution
 
 Usage:
     COMET_API_KEY=$(cat ~/comet_api_key.txt) uv run python scripts/train_ade20k_probe.py \
         --avp-ckpt path/to/checkpoint.pt \
         --ade20k-root /datasets/ADE20k/ADEChallengeData2016 \
-        --probe-hidden --probe-predicted-norm --probe-predicted-denorm
+        --probe-hidden --probe-predicted-norm --probe-teacher-full
 """
 
 import logging
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -42,31 +47,76 @@ IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225])
 COMET_WORKSPACE = "m2b3-ava"
 
 
+def implicit_upsample_ce(
+    logits: Tensor,
+    masks: Tensor,
+    scale: int,
+    ignore_index: int = IGNORE_LABEL,
+) -> Tensor:
+    """Cross-entropy with implicit nearest-neighbor upsampling of logits.
+
+    Computes CE as if logits were upsampled to mask resolution, but without
+    materializing the upsampled tensor. ~95x memory reduction vs naive.
+
+    Args:
+        logits: (B, C, h, w) predictions at patch resolution
+        masks: (B, H, W) targets at pixel resolution, H=h*scale, W=w*scale
+        scale: upsampling factor
+        ignore_index: label to ignore (default: 255)
+    """
+    B, C, h, w = logits.shape
+    H, W = masks.shape[1], masks.shape[2]
+    assert H == h * scale and W == w * scale, f"{H}!={h}*{scale} or {W}!={w}*{scale}"
+
+    # log_softmax at low res, flatten to (n_positions, C)
+    log_probs = F.log_softmax(logits, dim=1).permute(0, 2, 3, 1).reshape(-1, C)
+
+    # Group scale² high-res targets per low-res position
+    mask_patches = (
+        masks.reshape(B, h, scale, w, scale)
+        .permute(0, 1, 3, 2, 4)
+        .reshape(-1, scale * scale)
+    )
+
+    # Gather log probs for target classes, masking ignored pixels
+    valid = mask_patches != ignore_index
+    target_indices = mask_patches.clamp(0, C - 1).long()
+    gathered = log_probs.gather(1, target_indices)
+
+    return -(gathered * valid).sum() / valid.sum().clamp(min=1)
+
+
 @dataclass
 class Config:
     avp_ckpt: Path
     ade20k_root: Path = Path("/datasets/ADE20k/ADEChallengeData2016")
 
-    # Which probes to train (at least one must be True)
+    # AVP probes (at least one probe must be enabled)
     probe_hidden: bool = True
     probe_predicted_norm: bool = True
     probe_predicted_denorm: bool = True
 
+    # Teacher probes (baseline comparison)
+    probe_teacher_full: bool = True
+    probe_teacher_glimpse: bool = True
+
     # Image/grid settings - will be validated against checkpoint
     image_size: int = 512
 
-    batch_size: int = 32
+    # Training HPs (matched to ava_dv3/train_seg_probe)
+    batch_size: int = 128
+    eval_batch_size: int = 32
     num_workers: int = 4
 
-    ref_lr: float = 1e-5
+    ref_lr: float = 2.5e-5
     weight_decay: float = 1e-4
     warmup_ratio: float = 0.1
-    max_steps: int = 5000
+    max_steps: int = 20_000
     grad_clip: float = 1.0
 
     log_every: int = 10
-    val_every: int = 100
-    viz_every: int = 200
+    val_every: int = 200
+    viz_every: int = 500
     n_viz_samples: int = 4
     ema_alpha: float = 0.1
 
@@ -156,24 +206,38 @@ def imagenet_denorm(t: Tensor) -> np.ndarray:
     return (t * 255).astype(np.uint8)
 
 
+def compute_entropy(logits: Tensor, target_size: int) -> Tensor:
+    """Compute per-pixel entropy of categorical distribution."""
+    logits_up = F.interpolate(logits, size=(target_size, target_size), mode="bilinear", align_corners=False)
+    log_probs = F.log_softmax(logits_up, dim=1)
+    probs = log_probs.exp()
+    return -(probs * log_probs).sum(dim=1)
+
+
+MAX_ENTROPY = math.log(NUM_CLASSES)
+
+
 def log_viz(
     exp: comet_ml.Experiment,
     step: int,
     images: Tensor,
     masks: Tensor,
-    predictions: dict[str, Tensor],
+    logits_dict: dict[str, Tensor],
     n_samples: int,
+    image_size: int,
 ) -> None:
-    """Log sample predictions to Comet."""
+    """Log sample predictions and entropy maps to Comet."""
     import matplotlib.pyplot as plt
 
     n = min(n_samples, images.shape[0])
-    n_preds = len(predictions)
-    fig, axes = plt.subplots(n, 2 + n_preds, figsize=(3 * (2 + n_preds), 3 * n))
+    n_probes = len(logits_dict)
+    # Columns: image, GT, then for each probe: pred + entropy
+    n_cols = 2 + 2 * n_probes
+    fig, axes = plt.subplots(n, n_cols, figsize=(2.5 * n_cols, 2.5 * n))
     if n == 1:
         axes = axes[np.newaxis, :]
 
-    pred_names = list(predictions.keys())
+    probe_names = list(logits_dict.keys())
     for i in range(n):
         img_np = imagenet_denorm(images[i])
         mask_np = masks[i].cpu().numpy()
@@ -183,10 +247,22 @@ def log_viz(
         axes[i, 1].imshow(colorize_mask(mask_np))
         axes[i, 1].set_title("GT")
 
-        for j, name in enumerate(pred_names):
-            pred_np = predictions[name][i].cpu().numpy()
-            axes[i, 2 + j].imshow(colorize_mask(pred_np))
-            axes[i, 2 + j].set_title(name)
+        col = 2
+        for name in probe_names:
+            logits = logits_dict[name]
+            H_mask = masks.shape[1]
+
+            # Prediction
+            pred_up = pred_nearest(logits[i:i+1], H_mask)[0].cpu().numpy()
+            axes[i, col].imshow(colorize_mask(pred_up))
+            axes[i, col].set_title(f"{name[:8]}")
+            col += 1
+
+            # Entropy
+            entropy = compute_entropy(logits[i:i+1], H_mask)[0].cpu().numpy()
+            axes[i, col].imshow(entropy, cmap="magma", vmin=0, vmax=MAX_ENTROPY)
+            axes[i, col].set_title(f"{name[:8]}_H")
+            col += 1
 
         for ax in axes[i]:
             ax.axis("off")
@@ -198,73 +274,88 @@ def log_viz(
 
 # === Feature extraction ===
 class FeatureExtractor:
-    """Extracts features from AVP model with proper normalization handling."""
+    """Extracts features from AVP model and optionally teacher."""
 
     def __init__(
         self,
         model: nn.Module,
         scene_norm: nn.Module | None,
         canvas_grid: int,
+        glimpse_grid: int,
         glimpse_px: int,
+        patch_size: int,
         device: torch.device,
+        teacher: nn.Module | None = None,
     ):
         self.model = model
         self.scene_norm = scene_norm
         self.canvas_grid = canvas_grid
+        self.glimpse_grid = glimpse_grid
         self.glimpse_px = glimpse_px
+        self.patch_size = patch_size
         self.device = device
+        self.teacher = teacher
 
-        # Import here to avoid circular imports
         from canvit.viewpoint import Viewpoint
         self.Viewpoint = Viewpoint
 
-    def extract(self, images: Tensor) -> dict[str, Tensor]:
-        """Extract all feature types at t=0 (full scene).
+    def extract(self, images: Tensor, enabled: set[str]) -> dict[str, Tensor]:
+        """Extract requested feature types at t=0 (full scene).
 
-        Returns dict with keys: 'hidden', 'predicted_norm', 'predicted_denorm'
-        All shapes: (B, H, W, D)
+        Returns dict with keys from enabled set.
+        Note: teacher_glimpse has different spatial resolution than others!
+        Shapes: (B, H, W, D) where H=canvas_grid for most, H=glimpse_grid for teacher_glimpse
         """
         B = images.shape[0]
+        result: dict[str, Tensor] = {}
 
-        canvas = self.model.init_canvas(batch_size=B, canvas_grid_size=self.canvas_grid)
-        cls = self.model.init_cls(batch_size=B)
-
-        # Full scene viewpoint: center=(0,0), scale=1.0
-        vp = self.Viewpoint(
-            centers=torch.zeros(B, 2, device=self.device),
-            scales=torch.ones(B, device=self.device),
-        )
-
-        with torch.inference_mode():
-            out = self.model.forward_step(
-                image=images,
-                canvas=canvas,
-                cls=cls,
-                viewpoint=vp,
-                glimpse_size_px=self.glimpse_px,
+        # AVP features (hidden, predicted_norm, predicted_denorm)
+        need_avp = bool(enabled & {"hidden", "predicted_norm", "predicted_denorm"})
+        if need_avp:
+            canvas = self.model.init_canvas(batch_size=B, canvas_grid_size=self.canvas_grid)
+            cls = self.model.init_cls(batch_size=B)
+            vp = self.Viewpoint(
+                centers=torch.zeros(B, 2, device=self.device),
+                scales=torch.ones(B, device=self.device),
             )
 
-        # Extract features
-        hidden_flat = self.model.get_spatial(out.canvas)  # (B, N, D_hidden)
-        predicted_norm_flat = self.model.predict_teacher_scene(out.canvas)  # (B, N, D_teacher)
+            with torch.inference_mode():
+                out = self.model.forward_step(
+                    image=images, canvas=canvas, cls=cls,
+                    viewpoint=vp, glimpse_size_px=self.glimpse_px,
+                )
 
-        # Denormalize if we have normalizer
-        if self.scene_norm is not None:
-            predicted_denorm_flat = self.scene_norm.denormalize(predicted_norm_flat)
-        else:
-            log.warning("No scene_norm available - predicted_denorm will equal predicted_norm")
-            predicted_denorm_flat = predicted_norm_flat
+            if "hidden" in enabled:
+                hidden_flat = self.model.get_spatial(out.canvas)
+                result["hidden"] = hidden_flat.view(B, self.canvas_grid, self.canvas_grid, -1)
 
-        # Reshape to spatial
-        N = hidden_flat.shape[1]
-        H = W = int(N ** 0.5)
-        assert H * W == N, f"N={N} is not a perfect square"
+            if "predicted_norm" in enabled or "predicted_denorm" in enabled:
+                predicted_norm_flat = self.model.predict_teacher_scene(out.canvas)
+                if "predicted_norm" in enabled:
+                    result["predicted_norm"] = predicted_norm_flat.view(B, self.canvas_grid, self.canvas_grid, -1)
+                if "predicted_denorm" in enabled:
+                    if self.scene_norm is not None:
+                        predicted_denorm_flat = self.scene_norm.denormalize(predicted_norm_flat)
+                    else:
+                        predicted_denorm_flat = predicted_norm_flat
+                    result["predicted_denorm"] = predicted_denorm_flat.view(B, self.canvas_grid, self.canvas_grid, -1)
 
-        return {
-            "hidden": hidden_flat.view(B, H, W, -1),
-            "predicted_norm": predicted_norm_flat.view(B, H, W, -1),
-            "predicted_denorm": predicted_denorm_flat.view(B, H, W, -1),
-        }
+        # Teacher features
+        if self.teacher is not None:
+            if "teacher_full" in enabled:
+                with torch.inference_mode():
+                    feats = self.teacher.forward_norm_features(images)
+                result["teacher_full"] = feats.patches.view(B, self.canvas_grid, self.canvas_grid, -1)
+
+            if "teacher_glimpse" in enabled:
+                # Resize to glimpse resolution
+                glimpse_size = self.glimpse_grid * self.patch_size
+                images_small = F.interpolate(images, size=(glimpse_size, glimpse_size), mode="bilinear", align_corners=False)
+                with torch.inference_mode():
+                    feats = self.teacher.forward_norm_features(images_small)
+                result["teacher_glimpse"] = feats.patches.view(B, self.glimpse_grid, self.glimpse_grid, -1)
+
+        return result
 
 
 # === Probe manager ===
@@ -314,20 +405,29 @@ class ProbeManager:
     ) -> dict[str, tuple[Tensor, Tensor]]:
         """Train all probes on given features. Returns (loss, grad_norm) tensors per probe.
 
+        Args:
+            features: Dict of feature tensors, each (B, H, W, D) - resolutions may differ
+            masks: Full-resolution masks (B, H_img, W_img) - upsampled implicitly
+
         NOTE: Returns tensors to avoid GPU sync. Call .item() only at log intervals.
         """
         metrics: dict[str, tuple[Tensor, Tensor]] = {}
+        H_mask = masks.shape[1]
 
         for name, state in self.probes.items():
             if name not in features:
                 continue
 
             feat = features[name].detach()
+            H_feat = feat.shape[1]
+            scale = H_mask // H_feat
+            assert H_mask == H_feat * scale, f"mask {H_mask} not divisible by feat {H_feat}"
+
             state.probe.train()
             state.optimizer.zero_grad()
 
-            logits = state.probe(feat)
-            loss = F.cross_entropy(logits, masks, ignore_index=IGNORE_LABEL)
+            logits = state.probe(feat)  # (B, C, H_feat, W_feat)
+            loss = implicit_upsample_ce(logits, masks, scale)
             loss.backward()
 
             grad_norm = nn.utils.clip_grad_norm_(state.probe.parameters(), grad_clip)
@@ -353,6 +453,17 @@ class ProbeManager:
 
 
 # === Validation ===
+def pred_nearest(logits: Tensor, target_size: int) -> Tensor:
+    """Argmax at low-res then nearest-neighbor upsample to target_size."""
+    _, _, h, _ = logits.shape
+    scale = target_size // h
+    return (
+        logits.argmax(dim=1)
+        .repeat_interleave(scale, dim=1)
+        .repeat_interleave(scale, dim=2)
+    )
+
+
 @torch.no_grad()
 def validate(
     extractor: FeatureExtractor,
@@ -360,12 +471,12 @@ def validate(
     loader: DataLoader,
     device: torch.device,
     enabled_probes: set[str],
+    image_size: int,
 ) -> dict[str, float]:
-    """Compute val metrics for all probes."""
+    """Compute val metrics for all probes (upsample preds, not downsample masks)."""
     for state in probes.probes.values():
         state.probe.eval()
 
-    # Metrics per probe
     metrics_iou = {name: MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(device)
                    for name in enabled_probes}
     loss_sums = {name: 0.0 for name in enabled_probes}
@@ -375,22 +486,26 @@ def validate(
         images = images.to(device)
         masks = masks.to(device)
         B = images.shape[0]
+        H_mask = masks.shape[1]
 
-        features = extractor.extract(images)
-
-        # Downsample masks to feature grid
-        H_feat = features["hidden"].shape[1]
-        masks_down = F.interpolate(
-            masks.unsqueeze(1).float(), size=(H_feat, H_feat), mode="nearest"
-        ).squeeze(1).long()
+        features = extractor.extract(images, enabled_probes)
 
         for name in enabled_probes:
             if name not in features:
                 continue
+            feat = features[name]
+            H_feat = feat.shape[1]
+            scale = H_mask // H_feat
+
             state = probes.probes[name]
-            logits = state.probe(features[name])
-            loss_sums[name] += F.cross_entropy(logits, masks_down, ignore_index=IGNORE_LABEL).item() * B
-            metrics_iou[name].update(logits.argmax(dim=1), masks_down)
+            logits = state.probe(feat)
+
+            # Loss: implicit upsample CE
+            loss_sums[name] += implicit_upsample_ce(logits, masks, scale).item() * B
+
+            # mIoU: upsample predictions to mask resolution
+            preds_up = pred_nearest(logits, H_mask)
+            metrics_iou[name].update(preds_up, masks)
 
         n += B
 
@@ -412,11 +527,16 @@ def main(cfg: Config) -> None:
         enabled.add("predicted_norm")
     if cfg.probe_predicted_denorm:
         enabled.add("predicted_denorm")
+    if cfg.probe_teacher_full:
+        enabled.add("teacher_full")
+    if cfg.probe_teacher_glimpse:
+        enabled.add("teacher_glimpse")
 
     if not enabled:
-        raise ValueError("At least one probe must be enabled (--probe-hidden, --probe-predicted-norm, --probe-predicted-denorm)")
+        raise ValueError("At least one probe must be enabled")
 
     log.info(f"Enabled probes: {enabled}")
+    need_teacher = bool(enabled & {"teacher_full", "teacher_glimpse"})
 
     device = torch.device(cfg.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     log.info(f"Device: {device}")
@@ -496,8 +616,29 @@ def main(cfg: Config) -> None:
     glimpse_px = glimpse_grid * patch_size
     log.info(f"Glimpse: grid={glimpse_grid}, px={glimpse_px}")
 
+    # === Load teacher if needed ===
+    from canvit.backbone.dinov3 import DINOv3Backbone
+    teacher: DINOv3Backbone | None = None
+    if need_teacher:
+        log.info(f"Loading teacher: {backbone_name}")
+        teacher = create_backbone(backbone_name, pretrained=True)
+        assert isinstance(teacher, DINOv3Backbone)
+        teacher = teacher.to(device).eval()
+        for p in teacher.parameters():
+            p.requires_grad_(False)
+        log.info(f"Teacher loaded: embed_dim={teacher.embed_dim}, patch_size={teacher.patch_size_px}")
+
     # === Create feature extractor ===
-    extractor = FeatureExtractor(model, scene_norm, canvas_grid, glimpse_px, device)
+    extractor = FeatureExtractor(
+        model=model,
+        scene_norm=scene_norm,
+        canvas_grid=canvas_grid,
+        glimpse_grid=glimpse_grid,
+        glimpse_px=glimpse_px,
+        patch_size=patch_size,
+        device=device,
+        teacher=teacher,
+    )
 
     # === Create probes ===
     probe_dims = {}
@@ -507,6 +648,12 @@ def main(cfg: Config) -> None:
         probe_dims["predicted_norm"] = teacher_dim
     if "predicted_denorm" in enabled:
         probe_dims["predicted_denorm"] = teacher_dim
+    if "teacher_full" in enabled:
+        assert teacher is not None
+        probe_dims["teacher_full"] = teacher.embed_dim
+    if "teacher_glimpse" in enabled:
+        assert teacher is not None
+        probe_dims["teacher_glimpse"] = teacher.embed_dim
 
     peak_lr = cfg.ref_lr * cfg.batch_size
     warmup_steps = int(cfg.warmup_ratio * cfg.max_steps)
@@ -533,7 +680,7 @@ def main(cfg: Config) -> None:
 
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True,
                               num_workers=cfg.num_workers, pin_memory=True, drop_last=True)
-    val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False,
+    val_loader = DataLoader(val_ds, batch_size=cfg.eval_batch_size, shuffle=False,
                             num_workers=cfg.num_workers, pin_memory=True)
 
     # === Comet ===
@@ -566,15 +713,11 @@ def main(cfg: Config) -> None:
             masks = masks.to(device, non_blocking=True)
 
             # Extract features (needed for viz before training)
-            features = extractor.extract(images)
-            H_feat = features["hidden"].shape[1]
-            masks_down = F.interpolate(
-                masks.unsqueeze(1).float(), size=(H_feat, H_feat), mode="nearest"
-            ).squeeze(1).long()
+            features = extractor.extract(images, enabled)
 
             # Validation BEFORE training (step 0 = untrained baseline)
             if step % cfg.val_every == 0:
-                val_metrics = validate(extractor, probes, val_loader, device, enabled)
+                val_metrics = validate(extractor, probes, val_loader, device, enabled, cfg.image_size)
                 for k, v in val_metrics.items():
                     exp.log_metric(k, v, step=step)
                     if step == 0:
@@ -597,16 +740,13 @@ def main(cfg: Config) -> None:
                 for state in probes.probes.values():
                     state.probe.eval()
                 with torch.no_grad():
-                    predictions = {}
+                    logits_dict = {}
                     for name in enabled:
-                        logits = probes.probes[name].probe(features[name])
-                        pred = logits.argmax(dim=1)
-                        pred_up = F.interpolate(pred.unsqueeze(1).float(), size=cfg.image_size, mode="nearest").squeeze(1).long()
-                        predictions[name] = pred_up
-                log_viz(exp, step, images, masks, predictions, cfg.n_viz_samples)
+                        logits_dict[name] = probes.probes[name].probe(features[name])
+                log_viz(exp, step, images, masks, logits_dict, cfg.n_viz_samples, cfg.image_size)
 
-            # Train step (returns tensors, no GPU sync)
-            train_metrics = probes.train_step(features, masks_down, cfg.grad_clip, cfg.ema_alpha)
+            # Train step - pass full-res masks, resize per-probe inside
+            train_metrics = probes.train_step(features, masks, cfg.grad_clip, cfg.ema_alpha)
 
             step += 1
             pbar.update(1)
