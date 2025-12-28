@@ -845,7 +845,39 @@ def main(cfg: Config) -> None:
                         log.info(f"Step {step}: new best {name} mIoU: {miou:.4f} -> {ckpt_path}")
                     postfix[f"{name[:3]}"] = f"{miou:.3f}"
 
-                # TODO: validate finetune probes (separate pass since they modify backbone)
+                # Validate finetune probes (uses ft_model, separate from frozen)
+                if ft_extractor is not None and ft_model is not None:
+                    for ft in finetune_probes:
+                        ft.probe.eval()
+                        ft_iou = MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(device)
+                        ft_loss_sum = 0.0
+                        ft_n = 0
+                        with torch.no_grad():
+                            for val_images, val_masks in val_loader:
+                                val_images = val_images.to(device)
+                                val_masks = val_masks.to(device)
+                                B = val_images.shape[0]
+                                H_mask = val_masks.shape[1]
+                                feat = ft_extractor.extract_for_finetune(val_images, ft.name)
+                                H_feat = feat.shape[1]
+                                scale = H_mask // H_feat
+                                logits = ft.probe(feat)
+                                ft_loss_sum += implicit_upsample_ce(logits, val_masks, scale).item() * B
+                                ft_iou.update(pred_nearest(logits, H_mask), val_masks)
+                                ft_n += B
+                        ft_val_loss = ft_loss_sum / ft_n
+                        ft_val_miou = ft_iou.compute().item()
+                        exp.log_metric(f"{ft.name}/val_loss", ft_val_loss, step=step)
+                        exp.log_metric(f"{ft.name}/val_miou", ft_val_miou, step=step)
+                        if step == 0:
+                            log.info(f"  {ft.name}/val_miou: {ft_val_miou:.4f}")
+                        if ft_val_miou > ft.best_miou:
+                            ft.best_miou = ft_val_miou
+                            ckpt_path = f"probe_{ft.name}_best_{exp.id}.pt"
+                            torch.save({"probe": ft.probe.state_dict(), "backbone": ft_model.state_dict()}, ckpt_path)
+                            log.info(f"Step {step}: new best {ft.name} mIoU: {ft_val_miou:.4f} -> {ckpt_path}")
+                        postfix[f"{ft.name[:6]}"] = f"{ft_val_miou:.3f}"
+
                 pbar.set_postfix(postfix)
 
             # Visualization BEFORE training
