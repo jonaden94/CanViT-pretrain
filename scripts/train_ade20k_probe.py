@@ -312,9 +312,12 @@ class ProbeManager:
         masks: Tensor,
         grad_clip: float,
         ema_alpha: float,
-    ) -> dict[str, dict[str, float]]:
-        """Train all probes on given features. Returns metrics per probe."""
-        metrics = {}
+    ) -> dict[str, tuple[Tensor, Tensor]]:
+        """Train all probes on given features. Returns (loss, grad_norm) tensors per probe.
+
+        NOTE: Returns tensors to avoid GPU sync. Call .item() only at log intervals.
+        """
+        metrics: dict[str, tuple[Tensor, Tensor]] = {}
 
         for name, state in self.probes.items():
             if name not in features:
@@ -332,16 +335,17 @@ class ProbeManager:
             state.optimizer.step()
             state.scheduler.step()
 
-            # EMA loss
-            loss_val = loss.item()
-            state.loss_ema = ema_alpha * loss_val + (1 - ema_alpha) * state.loss_ema if state.loss_ema > 0 else loss_val
-
-            metrics[name] = {
-                "train_loss": state.loss_ema,
-                "grad_norm": grad_norm.item(),
-            }
+            # Store tensors - NO .item() here to avoid sync
+            metrics[name] = (loss.detach(), grad_norm.detach() if isinstance(grad_norm, Tensor) else torch.tensor(grad_norm))
 
         return metrics
+
+    def update_ema(self, metrics: dict[str, tuple[Tensor, Tensor]], ema_alpha: float) -> None:
+        """Update EMA loss from metrics. Call at log intervals (syncs GPU)."""
+        for name, (loss, _) in metrics.items():
+            loss_val = loss.item()  # sync here is OK - only at log intervals
+            state = self.probes[name]
+            state.loss_ema = ema_alpha * loss_val + (1 - ema_alpha) * state.loss_ema if state.loss_ema > 0 else loss_val
 
     def get_lr(self) -> float:
         """Get current LR (same for all probes)."""
@@ -557,18 +561,19 @@ def main(cfg: Config) -> None:
                 masks.unsqueeze(1).float(), size=(H_feat, H_feat), mode="nearest"
             ).squeeze(1).long()
 
-            # Train step
+            # Train step (returns tensors, no GPU sync)
             train_metrics = probes.train_step(features, masks_down, cfg.grad_clip, cfg.ema_alpha)
 
             step += 1
             pbar.update(1)
 
-            # Logging
+            # Logging (sync here is OK)
             if step % cfg.log_every == 0:
+                probes.update_ema(train_metrics, cfg.ema_alpha)
                 log_dict = {"lr": probes.get_lr()}
-                for name, m in train_metrics.items():
-                    log_dict[f"{name}/train_loss"] = m["train_loss"]
-                    log_dict[f"{name}/grad_norm"] = m["grad_norm"]
+                for name, (loss, grad_norm) in train_metrics.items():
+                    log_dict[f"{name}/train_loss"] = probes.probes[name].loss_ema
+                    log_dict[f"{name}/grad_norm"] = grad_norm.item()
                 exp.log_metrics(log_dict, step=step)
 
             # Validation
@@ -619,4 +624,4 @@ def main(cfg: Config) -> None:
 
 
 if __name__ == "__main__":
-    tyro.cli(main)
+    main(tyro.cli(Config))
