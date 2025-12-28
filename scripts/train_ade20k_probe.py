@@ -381,7 +381,7 @@ class ProbeState:
     probe: LinearSegmentationHead
     optimizer: AdamW
     scheduler: SequentialLR
-    loss_sum: float = 0.0  # accumulate losses between log intervals
+    loss_sum: Tensor | None = None  # accumulated on device, no sync
     loss_count: int = 0
     best_miou: float = 0.0
 
@@ -438,7 +438,10 @@ class ProbeManager:
             state.scheduler.step()
 
             # Accumulate loss (no sync) - will be averaged at log time
-            state.loss_sum += loss.detach()
+            if state.loss_sum is None:
+                state.loss_sum = loss.detach()
+            else:
+                state.loss_sum = state.loss_sum + loss.detach()
             state.loss_count += 1
             grad_norms[name] = grad_norm.detach()
 
@@ -448,9 +451,9 @@ class ProbeManager:
         """Get average losses since last call, reset accumulators. Syncs GPU."""
         losses = {}
         for name, state in self.probes.items():
-            if state.loss_count > 0:
+            if state.loss_count > 0 and state.loss_sum is not None:
                 losses[name] = (state.loss_sum / state.loss_count).item()
-                state.loss_sum = 0.0
+                state.loss_sum = None
                 state.loss_count = 0
         return losses
 
@@ -574,6 +577,8 @@ def validate(
 
 # === Main ===
 def main(cfg: Config) -> None:
+    torch.set_float32_matmul_precision("high")
+
     # Validate at least one probe enabled
     enabled = set()
     if cfg.probe_hidden:
