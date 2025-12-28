@@ -366,8 +366,8 @@ def main(cfg: Config) -> None:
         bb = create_backbone(backbone_name, pretrained=False)
         policy = None
         if (pc := ckpt.get("policy_config")) is not None:
-            policy = PolicyHead(bb.embed_dim, dacite.from_dict(PolicyConfig, pc))
-        m = ActiveCanViT(bb, model_cfg, policy)
+            policy = PolicyHead(embed_dim=bb.embed_dim, cfg=dacite.from_dict(PolicyConfig, pc))
+        m = ActiveCanViT(backbone=bb, cfg=model_cfg, policy=policy)
         m.load_state_dict(ckpt["state_dict"], strict=False)
         m = m.to(device)
         if train:
