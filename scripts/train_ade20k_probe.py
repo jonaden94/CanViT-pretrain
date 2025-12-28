@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """Train ADE20K segmentation probes on AVP and/or teacher features.
 
-AVP probes (require --avp-ckpt):
-- probe_hidden: model.get_spatial(canvas) - internal representation
-- probe_predicted_norm: model.predict_teacher_scene(canvas) - normalized DINOv3 space
-- probe_predicted_denorm: denorm(predict_teacher_scene) - raw DINOv3 space
+Frozen probes (backbone frozen, only probe head trained):
+- hidden: model.get_spatial(canvas)
+- predicted_norm: model.predict_teacher_scene(canvas) - normalized DINOv3 space
+- predicted_denorm: denorm(predict_teacher_scene) - raw DINOv3 space
+- teacher_full: DINOv3 at full canvas resolution (baseline)
+- teacher_glimpse: DINOv3 at glimpse resolution
 
-Teacher probes (baseline comparison, raw DINOv3 output):
-- probe_teacher_full: teacher at full canvas resolution
-- probe_teacher_glimpse: teacher at glimpse resolution
+Finetune probes (backbone gradients enabled, separate model copy):
+- finetune_hidden: same as hidden, but backbone is trained too
 
 Usage:
     COMET_API_KEY=$(cat ~/comet_api_key.txt) uv run python scripts/train_ade20k_probe.py \
         --avp-ckpt path/to/checkpoint.pt \
-        --ade20k-root /datasets/ADE20k/ADEChallengeData2016 \
-        --probe-hidden --probe-predicted-norm --probe-teacher-full
+        --ade20k-root /datasets/ADE20k/ADEChallengeData2016
 """
 
 import logging
