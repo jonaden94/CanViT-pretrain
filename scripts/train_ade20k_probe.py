@@ -65,9 +65,10 @@ class Config:
     num_workers: int = 4
 
     peak_lr: float = 1e-5
+    min_lr: float = 1e-7
     ft_backbone_lr: float = 1e-6  # backbone LR for finetune
     weight_decay: float = 1e-4
-    warmup_ratio: float = 0.5
+    warmup_ratio: float = 0.1
     max_steps: int = 20_000
     grad_clip: float = 1.0
 
@@ -457,7 +458,7 @@ def main(cfg: Config) -> None:
             params = [{"params": list(head.parameters()), "lr": peak_lr}]
         opt = AdamW(params, weight_decay=cfg.weight_decay)
         warmup = LinearLR(opt, 1e-3, 1.0, max(1, warmup_steps))
-        cosine = CosineAnnealingLR(opt, cfg.max_steps - warmup_steps)
+        cosine = CosineAnnealingLR(opt, cfg.max_steps - warmup_steps, eta_min=cfg.min_lr)
         sched = SequentialLR(opt, [warmup, cosine], [warmup_steps])
         return Probe(name, feature, finetune, head, opt, sched)
 
