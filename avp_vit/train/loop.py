@@ -1,6 +1,7 @@
 """Main training loop."""
 
 import logging
+import signal
 import traceback
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -44,6 +45,15 @@ from .step import training_step  # noqa: E402
 from .viz import validate  # noqa: E402
 
 log = logging.getLogger(__name__)
+
+# Signal-triggered checkpoint
+_checkpoint_requested = False
+
+
+def _handle_sigusr1(signum: int, frame: object) -> None:
+    global _checkpoint_requested
+    _checkpoint_requested = True
+    log.info("SIGUSR1 received - will save checkpoint after current step")
 
 
 def log_spaced_steps(n: int, max_step: int, K: float | None = None) -> frozenset[int]:
@@ -101,6 +111,7 @@ def warmup_normalizer(
 
 def train(cfg: Config, trial: optuna.Trial) -> float:
     """Train with stochastic reset. Returns best val_loss."""
+    signal.signal(signal.SIGUSR1, _handle_sigusr1)
     log.info(f"Starting trial {trial.number}")
     log.info(f"Device: {cfg.device}")
 
@@ -334,7 +345,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 log.error(f"!!! VALIDATION FAILED at step {step} !!!\n{traceback.format_exc()}")
 
         # === CHECKPOINT PHASE ===
-        if step % cfg.ckpt_every == 0:
+        global _checkpoint_requested
+        if step % cfg.ckpt_every == 0 or _checkpoint_requested:
+            if _checkpoint_requested:
+                log.info(f"Saving signal-triggered checkpoint at step {step}")
+                _checkpoint_requested = False
             ema_loss = ema.get("total_loss")
             save_checkpoint(
                 ckpt_path, model, cfg.student_model,
