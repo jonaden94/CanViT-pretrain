@@ -98,7 +98,6 @@ class Config:
     device: str | None = None
     amp: bool = True
     resume_ckpt: Path | None = None  # resume from combined checkpoint
-    resume_exp_id: str | None = None  # resume from old per-probe checkpoints by exp ID
 
 
 # === Loss ===
@@ -758,54 +757,19 @@ def main(cfg: Config) -> None:
 
     # Resume from checkpoint
     start_step = 0
-    if cfg.resume_exp_id is not None:
-        # Load from old per-probe checkpoints: probe_{name}_best_{exp_id}.pt
-        exp_id = cfg.resume_exp_id
-        for p in probes:
-            ckpt_path = Path(f"probe_{p.name}_best_{exp_id}.pt")
-            if ckpt_path.exists():
-                state = torch.load(ckpt_path, map_location=device, weights_only=False)
-                p.head.load_state_dict(state["head"])
-                log.info(f"Loaded {p.name} from {ckpt_path}")
-                if p.finetune and ft_model is not None and "backbone" in state:
-                    ft_model.load_state_dict(state["backbone"])
-                    log.info(f"Loaded ft_model backbone from {ckpt_path}")
-            else:
-                log.warning(f"Checkpoint not found: {ckpt_path}")
-    elif cfg.resume_ckpt is not None:
+    if cfg.resume_ckpt is not None:
         resume = torch.load(cfg.resume_ckpt, map_location=device, weights_only=False)
-        if "probes" in resume:
-            # New combined format
-            start_step = resume.get("step", 0)
-            for p in probes:
-                if p.name in resume["probes"]:
-                    state = resume["probes"][p.name]
-                    p.head.load_state_dict(state["head"])
-                    if "optimizer" in state:
-                        p.optimizer.load_state_dict(state["optimizer"])
-                    if "scheduler" in state:
-                        p.scheduler.load_state_dict(state["scheduler"])
-                    p.best_miou = state.get("best_miou", 0.0)
-                    log.info(f"Resumed {p.name}: best_miou={p.best_miou:.4f}")
-                else:
-                    log.warning(f"Probe {p.name} not found in checkpoint")
-            if ft_model is not None and "ft_model" in resume:
-                ft_model.load_state_dict(resume["ft_model"])
-                log.info("Resumed ft_model weights")
-        elif "head" in resume:
-            # Old single-probe format: apply to all probes with matching dim
-            head_state = resume["head"]
-            for p in probes:
-                try:
-                    p.head.load_state_dict(head_state)
-                    log.info(f"Loaded head weights into {p.name}")
-                except RuntimeError as e:
-                    log.warning(f"Could not load into {p.name}: {e}")
-            if ft_model is not None and "backbone" in resume:
-                ft_model.load_state_dict(resume["backbone"])
-                log.info("Loaded backbone weights into ft_model")
-        else:
-            log.warning(f"Unknown checkpoint format: {list(resume.keys())}")
+        start_step = resume["step"]
+        for p in probes:
+            state = resume["probes"][p.name]
+            p.head.load_state_dict(state["head"])
+            p.optimizer.load_state_dict(state["optimizer"])
+            p.scheduler.load_state_dict(state["scheduler"])
+            p.best_miou = state["best_miou"]
+            log.info(f"Resumed {p.name}: best_miou={p.best_miou:.4f}")
+        if ft_model is not None and "ft_model" in resume:
+            ft_model.load_state_dict(resume["ft_model"])
+            log.info("Resumed ft_model weights")
         log.info(f"Resuming from step {start_step}")
 
     trainer = ProbeTrainer(probes, frozen_ext, ft_ext, ft_model, device, cfg.grad_clip, amp_ctx, cfg.boundary_width)
