@@ -85,6 +85,13 @@ def _log_pca(
     glimpses = [vs.glimpse for vs in acc.viz_samples]
     canvas_spatials = [vs.canvas_spatial for vs in acc.viz_samples]
 
+    # Extract local stream patches if available (for show_locals)
+    locals_avp_raw = [vs.local_patches for vs in acc.viz_samples]
+    has_locals = all(lp is not None for lp in locals_avp_raw)
+    locals_avp: list[np.ndarray] | None = None
+    if has_locals:
+        locals_avp = [lp for lp in locals_avp_raw if lp is not None]
+
     fig_pca = plot_multistep_pca(
         full_img=full_img,
         teacher=teacher_np,
@@ -95,8 +102,10 @@ def _log_pca(
         scene_grid_size=canvas_grid_size,
         glimpse_grid_size=glimpse_grid_size,
         initial_scene=acc.initial_scene,
+        locals_avp=locals_avp,
         hidden_spatials=canvas_spatials if canvas_spatials[0] is not None else None,
         initial_hidden_spatial=acc.initial_canvas_spatial,
+        show_locals=has_locals,
         timestep_predictions=acc.pca_predictions if acc.pca_predictions else None,
     )
     log_figure(exp, fig_pca, f"{prefix}/pca", step)
