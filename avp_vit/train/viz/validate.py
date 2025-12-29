@@ -347,7 +347,7 @@ def validate(
 
     B = images.shape[0]
     viewpoints = make_eval_viewpoints(B, images.device, n_viewpoints=n_eval_viewpoints)
-    has_cls = model.cls_proj is not None
+    has_cls = model.scene_cls_proj is not None
     has_probe = probe is not None and labels is not None and labels_are_in1k(labels)
 
     scene_was_training = scene_normalizer.training
