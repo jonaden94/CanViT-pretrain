@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
+import albumentations as A
 import comet_ml
 import dacite
 import numpy as np
@@ -105,25 +106,44 @@ class ProbeHead(nn.Module):
 
 
 # === Dataset ===
+def make_train_transform(size: int) -> A.Compose:
+    return A.Compose([
+        A.RandomScale(scale_limit=(-0.5, 1.0), p=1.0),  # 0.5x to 2.0x
+        A.HorizontalFlip(p=0.5),
+        A.PadIfNeeded(size, size, border_mode=0, fill=0, fill_mask=IGNORE_LABEL),
+        A.RandomCrop(size, size),
+    ])
+
+
 class ADE20kDataset(Dataset):
-    def __init__(self, root: Path, split: str, size: int) -> None:
+    def __init__(self, root: Path, split: str, size: int, augment: bool = False) -> None:
         self.size = size
+        self.transform = make_train_transform(size) if augment else None
         img_dir = root / "images" / split
         ann_dir = root / "annotations" / split
         self.imgs = sorted(img_dir.glob("*.jpg"))
         self.anns = [ann_dir / (p.stem + ".png") for p in self.imgs]
-        log.info(f"ADE20k {split}: {len(self)} images @ {size}x{size}")
+        log.info(f"ADE20k {split}: {len(self)} images @ {size}x{size}, augment={augment}")
 
     def __len__(self) -> int:
         return len(self.imgs)
 
     def __getitem__(self, i: int) -> tuple[Tensor, Tensor]:
-        img = Image.open(self.imgs[i]).convert("RGB").resize((self.size, self.size), Image.Resampling.BILINEAR)
-        img_t = torch.from_numpy(np.array(img)).float().permute(2, 0, 1) / 255.0
+        img = np.array(Image.open(self.imgs[i]).convert("RGB"))
+        mask = np.array(Image.open(self.anns[i]))
+
+        if self.transform:
+            out = self.transform(image=img, mask=mask)
+            img, mask = out["image"], out["mask"]
+        else:
+            # Validation: simple resize
+            img = np.array(Image.fromarray(img).resize((self.size, self.size), Image.Resampling.BILINEAR))
+            mask = np.array(Image.fromarray(mask).resize((self.size, self.size), Image.Resampling.NEAREST))
+
+        img_t = torch.from_numpy(img).float().permute(2, 0, 1) / 255.0
         img_t = (img_t - IMAGENET_MEAN.view(3, 1, 1)) / IMAGENET_STD.view(3, 1, 1)
 
-        mask = Image.open(self.anns[i]).resize((self.size, self.size), Image.Resampling.NEAREST)
-        mask_t = torch.from_numpy(np.array(mask, dtype=np.int64))
+        mask_t = torch.from_numpy(mask.astype(np.int64))
         mask_t = torch.where(mask_t == 0, IGNORE_LABEL, mask_t - 1)  # remap
         return img_t, mask_t
 
@@ -470,8 +490,8 @@ def main(cfg: Config) -> None:
     log.info(f"Probes: {[p.name for p in probes]}")
 
     # Data
-    train_ds = ADE20kDataset(cfg.ade20k_root, "training", cfg.image_size)
-    val_ds = ADE20kDataset(cfg.ade20k_root, "validation", cfg.image_size)
+    train_ds = ADE20kDataset(cfg.ade20k_root, "training", cfg.image_size, augment=True)
+    val_ds = ADE20kDataset(cfg.ade20k_root, "validation", cfg.image_size, augment=False)
     train_loader = DataLoader(train_ds, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True, drop_last=True)
     val_loader = DataLoader(val_ds, cfg.eval_batch_size, num_workers=cfg.num_workers, pin_memory=True)
 
