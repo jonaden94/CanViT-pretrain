@@ -159,10 +159,10 @@ def training_step(
                 )
 
                 traj_loss = (step_0.loss + step_1.loss) / 2
-                # No NaN check here - would cause GPU sync. NaNs will show up in logged metrics.
 
-                is_last_for_this_t0 = j == len(t1_types) - 1
-                (traj_loss / n_branches).backward(retain_graph=not is_last_for_this_t0)
+            # Backward outside autocast (recommended by PyTorch docs)
+            is_last_for_this_t0 = j == len(t1_types) - 1
+            (traj_loss / n_branches).backward(retain_graph=not is_last_for_this_t0)
 
             # Metrics from ALREADY COMPUTED predictions (no recomputation!)
             with torch.no_grad():
