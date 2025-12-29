@@ -339,46 +339,43 @@ class ProbeTrainer:
         H_mask = masks.shape[1]
         grad_norms: dict[str, Tensor] = {}
 
-        # Frozen probes
-        frozen_features = {p.feature for p in self.frozen_probes}
-        if frozen_features:
-            with self.amp_ctx:
+        with self.amp_ctx:
+            # Frozen probes
+            frozen_features = {p.feature for p in self.frozen_probes}
+            if frozen_features:
                 feats = self.frozen_ext.extract(images, frozen_features, with_grad=False)
-            for p in self.frozen_probes:
-                feat = feats[p.feature]
-                scale = H_mask // feat.shape[1]
-                p.head.train()
-                p.optimizer.zero_grad()
-                with self.amp_ctx:
+                for p in self.frozen_probes:
+                    feat = feats[p.feature]
+                    scale = H_mask // feat.shape[1]
+                    p.head.train()
+                    p.optimizer.zero_grad()
                     loss = implicit_upsample_focal(p.head(feat.detach()), masks, scale)
-                loss.backward()
-                grad_norms[p.name] = nn.utils.clip_grad_norm_(
-                    p.head.parameters(), self.grad_clip
-                ).detach()
-                p.optimizer.step()
-                p.scheduler.step()
-                p.accumulate_loss(loss)
+                    loss.backward()
+                    grad_norms[p.name] = nn.utils.clip_grad_norm_(
+                        p.head.parameters(), self.grad_clip
+                    ).detach()
+                    p.optimizer.step()
+                    p.scheduler.step()
+                    p.accumulate_loss(loss)
 
-        # Finetune probes
-        if self.ft_ext is not None and self.ft_model is not None:
-            for p in self.ft_probes:
-                with self.amp_ctx:
+            # Finetune probes
+            if self.ft_ext is not None and self.ft_model is not None:
+                for p in self.ft_probes:
                     feat = self.ft_ext.extract(images, {p.feature}, with_grad=True)[
                         p.feature
                     ]
-                scale = H_mask // feat.shape[1]
-                p.head.train()
-                p.optimizer.zero_grad()
-                with self.amp_ctx:
+                    scale = H_mask // feat.shape[1]
+                    p.head.train()
+                    p.optimizer.zero_grad()
                     loss = implicit_upsample_focal(p.head(feat), masks, scale)
-                loss.backward()
-                params = list(self.ft_model.parameters()) + list(p.head.parameters())
-                grad_norms[p.name] = nn.utils.clip_grad_norm_(
-                    params, self.grad_clip
-                ).detach()
-                p.optimizer.step()
-                p.scheduler.step()
-                p.accumulate_loss(loss)
+                    loss.backward()
+                    params = list(self.ft_model.parameters()) + list(p.head.parameters())
+                    grad_norms[p.name] = nn.utils.clip_grad_norm_(
+                        params, self.grad_clip
+                    ).detach()
+                    p.optimizer.step()
+                    p.scheduler.step()
+                    p.accumulate_loss(loss)
 
         return grad_norms
 
