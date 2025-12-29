@@ -199,15 +199,15 @@ def training_step(
     t1_options = [ViewpointType.RANDOM, ViewpointType.POLICY] if model.policy else [ViewpointType.RANDOM]
     for t0 in [ViewpointType.RANDOM, ViewpointType.FULL]:
         for t1 in t1_options:
-            mask = torch.tensor([vp_types[0][i] == t0 and vp_types[1][i] == t1 for i in range(n_branches)])
-            if mask.any():
+            indices = [i for i in range(n_branches) if vp_types[0][i] == t0 and vp_types[1][i] == t1]
+            if indices:
                 branches[(t0, t1)] = BranchMetrics(
-                    loss=traj_losses[mask].mean(),
-                    scene_loss=scene_losses[mask].mean(),
-                    cls_loss=cls_losses[mask].mean(),
+                    loss=traj_losses[indices].mean(),
+                    scene_loss=scene_losses[indices].mean(),
+                    cls_loss=cls_losses[indices].mean(),
                     gram_loss=None,
-                    scene_cos=scene_cos[mask].mean(),
-                    cls_cos=cls_cos[mask].mean(),
+                    scene_cos=scene_cos[indices].mean(),
+                    cls_cos=cls_cos[indices].mean(),
                 )
 
     return StepMetrics(total_loss=traj_losses.mean(), branches=branches)
