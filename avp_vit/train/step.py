@@ -1,4 +1,4 @@
-"""Training step with 2×3 branching for policy learning."""
+"""Training step with memory-efficient balanced branches."""
 
 from contextlib import AbstractContextManager
 from typing import NamedTuple
@@ -6,32 +6,21 @@ from typing import NamedTuple
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
-from avp_vit import ActiveCanViT, GlimpseOutput, gram_mse
+from avp_vit import ActiveCanViT, GlimpseOutput
 from canvit import Viewpoint
-from canvit.policy import PolicyHead
 
 from .viewpoint import Viewpoint as TrainViewpoint, ViewpointType
 
 
-class StepOutput(NamedTuple):
-    """Output from compute_step_loss - keeps predictions for metrics."""
-
-    loss: Tensor  # combined loss for backward
-    scene_loss: Tensor  # raw MSE
-    cls_loss: Tensor  # raw MSE
-    gram_loss: Tensor | None  # raw gram MSE (unweighted), None if not computed
-    scene_pred: Tensor  # for metrics, no recomputation
-    cls_pred: Tensor  # for metrics, no recomputation
-
-
 class BranchMetrics(NamedTuple):
-    """Metrics for one (t0_type, t1_type) branch."""
+    """Metrics for a (t0_type, t1_type) combination."""
 
-    loss: Tensor  # total trajectory loss
+    loss: Tensor
     scene_loss: Tensor
     cls_loss: Tensor
-    gram_loss: Tensor | None
+    gram_loss: Tensor | None  # unused, kept for compat
     scene_cos: Tensor
     cls_cos: Tensor
 
@@ -43,36 +32,6 @@ class StepMetrics(NamedTuple):
     branches: dict[tuple[ViewpointType, ViewpointType], BranchMetrics]
 
 
-def compute_step_loss(
-    model: ActiveCanViT,
-    out: GlimpseOutput,
-    scene_target: Tensor,
-    cls_target: Tensor,
-    compute_gram: bool,
-    gram_loss_weight: float,
-) -> StepOutput:
-    """Compute loss for one step. Returns predictions for reuse in metrics."""
-    scene_pred = model.predict_teacher_scene(out.canvas)
-    cls_pred = model.predict_teacher_cls(out.cls, out.canvas)
-
-    scene_loss = F.mse_loss(scene_pred, scene_target)
-    cls_loss = F.mse_loss(cls_pred, cls_target)
-    gram_loss = gram_mse(scene_pred, scene_target) if compute_gram else None
-
-    loss = scene_loss + cls_loss
-    if gram_loss is not None:
-        loss = loss + gram_loss_weight * gram_loss
-
-    return StepOutput(
-        loss=loss,
-        scene_loss=scene_loss,
-        cls_loss=cls_loss,
-        gram_loss=gram_loss,
-        scene_pred=scene_pred,
-        cls_pred=cls_pred,
-    )
-
-
 def training_step(
     *,
     model: ActiveCanViT,
@@ -81,109 +40,189 @@ def training_step(
     cls_target: Tensor,
     glimpse_size_px: int,
     canvas_grid_size: int,
-    t0_types: list[ViewpointType],
-    t1_types: list[ViewpointType],
+    n_branches: int,
+    n_glimpses: int,
     min_viewpoint_scale: float,
-    compute_gram: bool,
-    gram_loss_weight: float,
     amp_ctx: AbstractContextManager,
 ) -> StepMetrics:
-    """Run training step with 2×N branching.
+    """Memory-efficient training with balanced branches.
 
-    For each t0_type, runs forward at t=0, then branches to each t1_type at t=1.
-    Uses retain_graph=True to share t=0 computation across t=1 branches.
-    Accumulates gradients with proper scaling. Does NOT call optimizer.step().
+    n_branches (>= 2, even): parallel trajectories
+    n_glimpses (>= 1): glimpses per trajectory
 
-    Returns metrics for logging.
+    At each timestep t:
+      - Half branches use RANDOM, half use FULL (t=0) or POLICY (t>=1)
+      - Which branches get which is randomly permuted each timestep
+
+    FULL at t=0 is computed once and shared (deterministic).
+    RANDOM viewpoints are independent per branch (stochastic).
+
+    Memory: ~6.6 GB constant (FULL t=0 shared, RANDOM branches processed one at a time)
     """
+    assert n_branches >= 2 and n_branches % 2 == 0
+    assert n_glimpses >= 1
     device = images.device
-    batch_size = images.shape[0]
-    n_branches = len(t0_types) * len(t1_types)
+    B = images.shape[0]
 
-    branches: dict[tuple[ViewpointType, ViewpointType], BranchMetrics] = {}
-    total_loss_acc = torch.zeros((), device=device)
+    canvas_init = model.init_canvas(batch_size=B, canvas_grid_size=canvas_grid_size)
+    cls_init = model.init_cls(batch_size=B)
 
-    canvas_init = model.init_canvas(batch_size=batch_size, canvas_grid_size=canvas_grid_size)
-    cls_init = model.init_cls(batch_size=batch_size)
-
-    for t0_type in t0_types:
-        # Create t=0 viewpoint
-        if t0_type == ViewpointType.FULL:
-            vp0 = TrainViewpoint.full_scene(batch_size=batch_size, device=device)
-        elif t0_type == ViewpointType.RANDOM:
-            vp0 = TrainViewpoint.random(batch_size=batch_size, device=device, min_scale=min_viewpoint_scale)
+    # Assign viewpoint types: at each timestep, random permutation of half/half split
+    vp_types: list[list[ViewpointType]] = []
+    for t in range(n_glimpses):
+        perm = torch.randperm(n_branches, device=device)
+        if t == 0:
+            base = [ViewpointType.RANDOM] * (n_branches // 2) + [ViewpointType.FULL] * (n_branches // 2)
+        elif model.policy is not None:
+            base = [ViewpointType.RANDOM] * (n_branches // 2) + [ViewpointType.POLICY] * (n_branches // 2)
         else:
-            raise ValueError(f"Invalid t0_type: {t0_type}")
+            base = [ViewpointType.RANDOM] * n_branches
+        vp_types.append([base[int(perm[i].item())] for i in range(n_branches)])
 
-        # Convert to canvit Viewpoint for model
-        vp0_core = Viewpoint(centers=vp0.centers, scales=vp0.scales)
+    full_indices = [i for i in range(n_branches) if vp_types[0][i] == ViewpointType.FULL]
+    random_indices = [i for i in range(n_branches) if vp_types[0][i] == ViewpointType.RANDOM]
 
+    # Preallocate metrics
+    traj_losses = torch.zeros(n_branches, device=device)
+    scene_losses = torch.zeros(n_branches, device=device)
+    cls_losses = torch.zeros(n_branches, device=device)
+    scene_cos = torch.zeros(n_branches, device=device)
+    cls_cos = torch.zeros(n_branches, device=device)
+
+    def make_random_vp() -> Viewpoint:
+        v = TrainViewpoint.random(batch_size=B, device=device, min_scale=min_viewpoint_scale)
+        return Viewpoint(centers=v.centers, scales=v.scales)
+
+    def make_policy_vp(vpe: Tensor) -> Viewpoint:
+        assert model.policy is not None
+        p = model.policy(vpe)
+        return Viewpoint(centers=p.position, scales=p.scale)
+
+    def fwd_step(canvas: Tensor, cls: Tensor, centers: Tensor, scales: Tensor) -> GlimpseOutput:
+        return model.forward_step(
+            image=images,
+            canvas=canvas,
+            viewpoint=Viewpoint(centers=centers, scales=scales),
+            glimpse_size_px=glimpse_size_px,
+            cls=cls,
+        )
+
+    def compute_loss(out: GlimpseOutput) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        scene_pred = model.predict_teacher_scene(out.canvas)
+        cls_pred = model.predict_teacher_cls(out.cls, out.canvas)
+        return (
+            F.mse_loss(scene_pred, scene_target) + F.mse_loss(cls_pred, cls_target),
+            F.mse_loss(scene_pred, scene_target),
+            F.mse_loss(cls_pred, cls_target),
+            scene_pred,
+            cls_pred,
+        )
+
+    def run_trajectory(
+        i: int,
+        out_t0: GlimpseOutput,
+        loss_t0: Tensor,
+        scene_loss_t0: Tensor,
+        cls_loss_t0: Tensor,
+        scene_pred_t0: Tensor,
+        cls_pred_t0: Tensor,
+    ) -> Tensor:
+        """Run t>=1 for branch i, return trajectory loss."""
+        loss_sum = loss_t0
+        scene_loss_sum = scene_loss_t0
+        cls_loss_sum = cls_loss_t0
+        scene_pred, cls_pred = scene_pred_t0, cls_pred_t0
+        canvas, cls_tok, vpe = out_t0.canvas, out_t0.cls, out_t0.vpe
+
+        for t in range(1, n_glimpses):
+            vp_type = vp_types[t][i]
+            if vp_type == ViewpointType.RANDOM:
+                vp = make_random_vp()
+            else:
+                assert vpe is not None
+                vp = make_policy_vp(vpe)
+
+            with amp_ctx:
+                out_raw = checkpoint(fwd_step, canvas, cls_tok, vp.centers, vp.scales, use_reentrant=False)
+                assert isinstance(out_raw, GlimpseOutput)
+                out = out_raw
+                loss_t, scene_loss_t, cls_loss_t, scene_pred, cls_pred = compute_loss(out)
+                loss_sum = loss_sum + loss_t
+                scene_loss_sum = scene_loss_sum + scene_loss_t
+                cls_loss_sum = cls_loss_sum + cls_loss_t
+                canvas, cls_tok, vpe = out.canvas, out.cls, out.vpe
+
+        traj_loss = loss_sum / n_glimpses
+        with torch.no_grad():
+            traj_losses[i] = traj_loss
+            scene_losses[i] = scene_loss_sum / n_glimpses
+            cls_losses[i] = cls_loss_sum / n_glimpses
+            scene_cos[i] = F.cosine_similarity(scene_pred, scene_target, dim=-1).mean()
+            cls_cos[i] = F.cosine_similarity(cls_pred, cls_target, dim=-1).mean()
+
+        return traj_loss
+
+    # === FULL branches: share t=0, process one-at-a-time with retain_graph ===
+    if full_indices:
         with amp_ctx:
-            out_0 = model.forward_step(
+            full_vp = TrainViewpoint.full_scene(batch_size=B, device=device)
+            out_full = model.forward_step(
                 image=images,
                 canvas=canvas_init,
-                viewpoint=vp0_core,
+                viewpoint=Viewpoint(centers=full_vp.centers, scales=full_vp.scales),
                 glimpse_size_px=glimpse_size_px,
                 cls=cls_init,
             )
-            step_0 = compute_step_loss(
-                model, out_0, scene_target, cls_target, compute_gram, gram_loss_weight
+            loss_full, scene_loss_full, cls_loss_full, scene_pred_full, cls_pred_full = compute_loss(out_full)
+
+        for idx, i in enumerate(full_indices):
+            traj_loss = run_trajectory(i, out_full, loss_full, scene_loss_full, cls_loss_full, scene_pred_full, cls_pred_full)
+            is_last = idx == len(full_indices) - 1
+            (traj_loss / n_branches).backward(retain_graph=not is_last)
+
+    # === RANDOM branches: each has unique t=0, process one at a time ===
+    for i in random_indices:
+        with amp_ctx:
+            rand_vp = make_random_vp()
+            out = model.forward_step(
+                image=images,
+                canvas=canvas_init,
+                viewpoint=rand_vp,
+                glimpse_size_px=glimpse_size_px,
+                cls=cls_init,
             )
+            loss, scene_loss, cls_loss, scene_pred, cls_pred = compute_loss(out)
 
-        for j, t1_type in enumerate(t1_types):
-            # Create t=1 viewpoint
-            if t1_type == ViewpointType.POLICY:
-                assert out_0.vpe is not None, "VPE required for policy"
-                assert isinstance(model.policy, PolicyHead), "Policy head required"
-                policy_out = model.policy(out_0.vpe)
-                vp1_core = Viewpoint(centers=policy_out.position, scales=policy_out.scale)
-            elif t1_type == ViewpointType.FULL:
-                vp1 = TrainViewpoint.full_scene(batch_size=batch_size, device=device)
-                vp1_core = Viewpoint(centers=vp1.centers, scales=vp1.scales)
-            elif t1_type == ViewpointType.RANDOM:
-                vp1 = TrainViewpoint.random(batch_size=batch_size, device=device, min_scale=min_viewpoint_scale)
-                vp1_core = Viewpoint(centers=vp1.centers, scales=vp1.scales)
-            else:
-                raise ValueError(f"Invalid t1_type: {t1_type}")
+        traj_loss = run_trajectory(i, out, loss, scene_loss, cls_loss, scene_pred, cls_pred)
+        (traj_loss / n_branches).backward()
 
-            with amp_ctx:
-                out_1 = model.forward_step(
-                    image=images,
-                    canvas=out_0.canvas,
-                    viewpoint=vp1_core,
-                    glimpse_size_px=glimpse_size_px,
-                    cls=out_0.cls,
+    # Aggregate metrics by (t0, t1) for compatibility
+    branches: dict[tuple[ViewpointType, ViewpointType], BranchMetrics] = {}
+    if n_glimpses >= 2:
+        t1_options = [ViewpointType.RANDOM, ViewpointType.POLICY] if model.policy else [ViewpointType.RANDOM]
+        for t0 in [ViewpointType.RANDOM, ViewpointType.FULL]:
+            for t1 in t1_options:
+                mask = torch.tensor([vp_types[0][i] == t0 and vp_types[1][i] == t1 for i in range(n_branches)])
+                if mask.any():
+                    branches[(t0, t1)] = BranchMetrics(
+                        loss=traj_losses[mask].mean(),
+                        scene_loss=scene_losses[mask].mean(),
+                        cls_loss=cls_losses[mask].mean(),
+                        gram_loss=None,
+                        scene_cos=scene_cos[mask].mean(),
+                        cls_cos=cls_cos[mask].mean(),
+                    )
+    else:
+        for t0 in [ViewpointType.RANDOM, ViewpointType.FULL]:
+            mask = torch.tensor([vp_types[0][i] == t0 for i in range(n_branches)])
+            if mask.any():
+                branches[(t0, t0)] = BranchMetrics(
+                    loss=traj_losses[mask].mean(),
+                    scene_loss=scene_losses[mask].mean(),
+                    cls_loss=cls_losses[mask].mean(),
+                    gram_loss=None,
+                    scene_cos=scene_cos[mask].mean(),
+                    cls_cos=cls_cos[mask].mean(),
                 )
-                step_1 = compute_step_loss(
-                    model, out_1, scene_target, cls_target, compute_gram, gram_loss_weight
-                )
 
-                traj_loss = (step_0.loss + step_1.loss) / 2
-
-            # Backward outside autocast (recommended by PyTorch docs)
-            is_last_for_this_t0 = j == len(t1_types) - 1
-            (traj_loss / n_branches).backward(retain_graph=not is_last_for_this_t0)
-
-            # Metrics from ALREADY COMPUTED predictions (no recomputation!)
-            with torch.no_grad():
-                scene_cos = F.cosine_similarity(step_1.scene_pred, scene_target, dim=-1).mean()
-                cls_cos = F.cosine_similarity(step_1.cls_pred, cls_target, dim=-1).mean()
-
-            # Average losses over t=0 and t=1
-            avg_scene_loss = (step_0.scene_loss + step_1.scene_loss) / 2
-            avg_cls_loss = (step_0.cls_loss + step_1.cls_loss) / 2
-            avg_gram_loss: Tensor | None = None
-            if step_0.gram_loss is not None and step_1.gram_loss is not None:
-                avg_gram_loss = (step_0.gram_loss + step_1.gram_loss) / 2
-
-            branches[(t0_type, t1_type)] = BranchMetrics(
-                loss=traj_loss.detach(),
-                scene_loss=avg_scene_loss.detach(),
-                cls_loss=avg_cls_loss.detach(),
-                gram_loss=avg_gram_loss.detach() if avg_gram_loss is not None else None,
-                scene_cos=scene_cos,
-                cls_cos=cls_cos,
-            )
-            total_loss_acc = total_loss_acc + traj_loss.detach()
-
-    return StepMetrics(total_loss=total_loss_acc / n_branches, branches=branches)
+    return StepMetrics(total_loss=traj_losses.mean(), branches=branches)

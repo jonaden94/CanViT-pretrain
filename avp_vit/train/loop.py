@@ -41,7 +41,6 @@ from .norm import PositionAwareNorm  # noqa: E402
 from .probe import load_probe  # noqa: E402
 from .scheduler import warmup_cosine_scheduler  # noqa: E402
 from .step import training_step  # noqa: E402
-from .viewpoint import ViewpointType  # noqa: E402
 from .viz import validate  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -262,12 +261,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         log.info(f"Warming up normalizers ({cfg.norm_warmup_images} images)...")
         warmup_normalizer(scene_norm, cls_norm, train_loader, compute_raw_targets, cfg.norm_warmup_images, scene_size, cfg.device)
 
-    # Build viewpoint type lists for branching
-    t0_types = [ViewpointType.RANDOM, ViewpointType.FULL]
-    t1_types = [ViewpointType.RANDOM, ViewpointType.FULL]
-    if cfg.enable_policy:
-        t1_types.append(ViewpointType.POLICY)
-    log.info(f"Training branches: t0={[t.name for t in t0_types]} × t1={[t.name for t in t1_types]}")
+    log.info(f"Training: {cfg.n_branches} branches × {cfg.n_glimpses} glimpses (balanced RANDOM/FULL at t0, RANDOM/POLICY at t>=1)")
 
     # EMA tracking for all metrics
     ema = EMATracker(alpha=cfg.ema_alpha)
@@ -362,20 +356,15 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 cls_target=batch.cls_target,
                 glimpse_size_px=glimpse_size_px,
                 canvas_grid_size=G,
-                t0_types=t0_types,
-                t1_types=t1_types,
+                n_branches=cfg.n_branches,
+                n_glimpses=cfg.n_glimpses,
                 min_viewpoint_scale=cfg.min_viewpoint_scale,
-                compute_gram=cfg.gram_loss_weight > 0,
-                gram_loss_weight=cfg.gram_loss_weight,
                 amp_ctx=amp_ctx,
             )
 
             # Clip policy grads first (if present), then whole model
-            policy_grad_norm_t = None
             if model.policy is not None:
-                policy_grad_norm_t = torch.nn.utils.clip_grad_norm_(
-                    model.policy.parameters(), cfg.policy_grad_clip
-                )
+                torch.nn.utils.clip_grad_norm_(model.policy.parameters(), cfg.policy_grad_clip)
             grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
             optimizer.step()
             scheduler.step()
@@ -387,8 +376,6 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 ema.update(f"{prefix}/loss", m.loss)
                 ema.update(f"{prefix}/scene_loss", m.scene_loss)
                 ema.update(f"{prefix}/cls_loss", m.cls_loss)
-                if m.gram_loss is not None:
-                    ema.update(f"{prefix}/gram_loss", m.gram_loss)
                 ema.update(f"{prefix}/scene_cos", m.scene_cos)
                 ema.update(f"{prefix}/cls_cos", m.cls_cos)
 

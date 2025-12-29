@@ -23,8 +23,9 @@ class Config:
         default_factory=lambda: ActiveCanViTConfig(teacher_dim=768)
     )
     # Glimpse/canvas sizes (runtime, not in model config)
-    gram_loss_weight: float = 0
     glimpse_grid_size: int = 8  # tokens per glimpse side
+    n_branches: int = 2  # must be >= 2 and even; K/2 RANDOM/FULL at t0, K/2 RANDOM/POLICY at t>=1
+    n_glimpses: int = 2  # glimpses per trajectory; t=0 stored, t>=1 checkpointed
     grid_size: int = 32  # canvas grid size
     # Training
     batch_size: int = 64
