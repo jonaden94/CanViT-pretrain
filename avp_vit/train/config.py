@@ -20,7 +20,7 @@ class Config:
     # Model config (PretrainingConfig via alias)
     # teacher_dim placeholder - overridden by create_model based on actual teacher
     model: ActiveCanViTConfig = field(
-        default_factory=lambda: ActiveCanViTConfig(teacher_dim=768)
+        default_factory=lambda: ActiveCanViTConfig(teacher_dim=768, canvas_num_heads=8)
     )
     # Glimpse/canvas sizes (runtime, not in model config)
     glimpse_grid_size: int = 8  # tokens per glimpse side

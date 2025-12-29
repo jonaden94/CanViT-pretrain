@@ -197,6 +197,19 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             state_dict = {k: v for k, v in state_dict.items() if not k.startswith("policy.")}
             n_removed = n_before - len(state_dict)
             log.info(f"Reset policy: removed {n_removed} policy keys, will use fresh init")
+
+        # Filter out shape-incompatible weights (e.g., when changing canvas_num_heads)
+        model_state = model.state_dict()
+        mismatched_params = 0
+        for k, v in list(state_dict.items()):
+            if k in model_state and v.shape != model_state[k].shape:
+                mismatched_params += model_state[k].numel()
+                del state_dict[k]
+        if mismatched_params > 0:
+            total_params = sum(p.numel() for p in model.parameters())
+            pct = 100 * mismatched_params / total_params
+            log.warning(f"Shape mismatch: {mismatched_params:,} params ({pct:.1f}%) freshly initialized")
+
         incompat = model.load_state_dict(state_dict, strict=False)
         if incompat.missing_keys:
             log.warning(f"Checkpoint missing keys (freshly initialized): {incompat.missing_keys}")
