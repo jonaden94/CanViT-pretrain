@@ -121,16 +121,16 @@ def implicit_upsample_focal(logits: Tensor, masks: Tensor, scale: int) -> Tensor
 
 # === Probe head ===
 class ProbeHead(nn.Module):
-    """BN + 1x1 conv."""
+    """LN + linear."""
 
     def __init__(self, embed_dim: int) -> None:
         super().__init__()
-        self.bn = nn.BatchNorm2d(embed_dim)
-        self.conv = nn.Conv2d(embed_dim, NUM_CLASSES, kernel_size=1)
+        self.ln = nn.LayerNorm(embed_dim)
+        self.linear = nn.Linear(embed_dim, NUM_CLASSES)
 
     def forward(self, x: Tensor) -> Tensor:
         # x: (B, H, W, D) -> (B, C, H, W)
-        return self.conv(self.bn(x.permute(0, 3, 1, 2)))
+        return self.linear(self.ln(x)).permute(0, 3, 1, 2)
 
 
 # === Dataset ===
