@@ -172,7 +172,7 @@ class FeatureExtractor:
     def extract(self, images: Tensor, features: set[FeatureType], with_grad: bool) -> dict[FeatureType, Tensor]:
         B = images.shape[0]
         result: dict[FeatureType, Tensor] = {}
-        ctx = torch.enable_grad() if with_grad else torch.inference_mode()
+        ctx = torch.enable_grad() if with_grad else torch.no_grad()
 
         avp_features = {"hidden", "predicted_norm", "predicted_denorm"}
         if features & avp_features:
