@@ -64,8 +64,8 @@ class Config:
     eval_batch_size: int = 32
     num_workers: int = 4
 
-    ref_lr: float = 2.5e-5  # peak_lr = ref_lr * batch_size
-    ft_ref_lr: float = 1e-6  # backbone LR for finetune
+    peak_lr: float = 1e-5
+    ft_backbone_lr: float = 1e-6  # backbone LR for finetune
     weight_decay: float = 1e-4
     warmup_ratio: float = 0.5
     max_steps: int = 20_000
@@ -445,13 +445,13 @@ def main(cfg: Config) -> None:
     ft_ext = FeatureExtractor(ft_model, scene_norm, None, canvas_grid, glimpse_grid, glimpse_px, teacher_patch_size, device) if ft_model else None
 
     # Create probes
-    peak_lr = cfg.ref_lr * cfg.batch_size
+    peak_lr = cfg.peak_lr
     warmup_steps = int(cfg.warmup_ratio * cfg.max_steps)
 
     def make_probe(name: str, feature: FeatureType, finetune: bool) -> Probe:
         head = ProbeHead(get_dim(feature)).to(device)
         if finetune and ft_model is not None:
-            params = [{"params": list(ft_model.parameters()), "lr": cfg.ft_ref_lr * cfg.batch_size},
+            params = [{"params": list(ft_model.parameters()), "lr": cfg.ft_backbone_lr},
                       {"params": list(head.parameters()), "lr": peak_lr}]
         else:
             params = [{"params": list(head.parameters()), "lr": peak_lr}]
