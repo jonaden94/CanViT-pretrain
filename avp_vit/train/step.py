@@ -73,7 +73,7 @@ def training_step(
     Memory is constant due to chunking - no max needed.
     """
     assert n_branches >= 2 and n_branches % 2 == 0
-    assert min_glimpses >= 2
+    assert min_glimpses >= 2 and min_glimpses % 2 == 0
     assert 0.0 <= continue_prob <= 1.0
     device = images.device
     B = images.shape[0]
@@ -81,10 +81,10 @@ def training_step(
     canvas_init = model.init_canvas(batch_size=B, canvas_grid_size=canvas_grid_size)
     cls_init = model.init_cls(batch_size=B)
 
-    # Sample trajectory length (shared across branches)
+    # Sample trajectory length in chunks of 2 (shared across branches)
     n_glimpses = min_glimpses
     while random.random() < continue_prob:
-        n_glimpses += 1
+        n_glimpses += 2
 
     vp_types = _assign_viewpoint_types(
         n_glimpses=n_glimpses,
@@ -199,12 +199,7 @@ def training_step(
             else:
                 state.canvas, state.cls_tok, state.vpe = out.canvas, out.cls, out.vpe
 
-        # Trailing step (if n_glimpses is odd)
-        if (n_glimpses - 1) % 2 == 0:
-            chunk_loss = (state.chunk_scene + state.chunk_cls) / n_glimpses / n_branches
-            chunk_loss.backward()
-
-        # Record metrics
+        # Record metrics (no trailing step needed - n_glimpses always even)
         traj_losses[branch_idx] = (state.total_scene + state.total_cls) / state.n_steps
         scene_losses[branch_idx] = state.total_scene / state.n_steps
         cls_losses[branch_idx] = state.total_cls / state.n_steps
