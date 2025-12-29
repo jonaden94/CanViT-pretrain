@@ -151,7 +151,6 @@ class ADE20kDataset(Dataset):
         self, root: Path, split: str, size: int, augment: bool = False
     ) -> None:
         self.size = size
-        self.augment = augment
         # Load at 2x for training (random crop = zoom in only), 1x for val
         self.load_size = size * 2 if augment else size
         self.transform = make_train_transform(size) if augment else None
@@ -338,7 +337,7 @@ class ProbeTrainer:
         grad_norms: dict[str, Tensor] = {}
 
         # Frozen probes
-        frozen_features = {p.feature for p in self.frozen_probes}
+        frozen_features: set[FeatureType] = {p.feature for p in self.frozen_probes}
         if frozen_features:
             with self.amp_ctx:
                 feats = self.frozen_ext.extract(images, frozen_features, with_grad=False)
@@ -396,7 +395,7 @@ class ProbeTrainer:
         teacher_full_probe = next(
             (p for p in self.probes if p.name == "teacher_full"), None
         )
-        cross_features = (
+        cross_features: list[FeatureType] = (
             ["predicted_norm", "predicted_denorm"] if teacher_full_probe else []
         )
         cross_ious = {
@@ -408,10 +407,11 @@ class ProbeTrainer:
         cross_losses = {f: 0.0 for f in cross_features}
 
         # Precompute feature sets (avoid recomputing per batch)
-        frozen_feature_set = {p.feature for p in self.frozen_probes} | set(
-            cross_features
-        )
-        ft_feature_set = {p.feature for p in self.ft_probes}
+        frozen_feature_set: set[FeatureType] = {
+            *(p.feature for p in self.frozen_probes),
+            *cross_features,
+        }
+        ft_feature_set: set[FeatureType] = {p.feature for p in self.ft_probes}
 
         n = 0
         for images, masks in loader:
