@@ -144,7 +144,9 @@ class ADE20kDataset(Dataset):
         img_t = (img_t - IMAGENET_MEAN.view(3, 1, 1)) / IMAGENET_STD.view(3, 1, 1)
 
         mask_t = torch.from_numpy(mask.astype(np.int64))
-        mask_t = torch.where(mask_t == 0, IGNORE_LABEL, mask_t - 1)  # remap
+        # Remap: 0 (background) and 255 (padding) → IGNORE_LABEL, classes 1-150 → 0-149
+        valid_class = (mask_t >= 1) & (mask_t <= 150)
+        mask_t = torch.where(valid_class, mask_t - 1, IGNORE_LABEL)
         return img_t, mask_t
 
 
