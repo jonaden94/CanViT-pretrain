@@ -355,6 +355,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
             optimizer.zero_grad()
 
+            # Warmup continue_prob: 0 → peak over warmup steps
+            if cfg.continue_prob_warmup_steps > 0:
+                continue_prob = cfg.continue_prob * min(step / cfg.continue_prob_warmup_steps, 1.0)
+            else:
+                continue_prob = cfg.continue_prob
+
             step_metrics = training_step(
                 model=model,
                 images=batch.images,
@@ -364,7 +370,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 canvas_grid_size=G,
                 n_branches=cfg.n_branches,
                 min_glimpses=cfg.min_glimpses,
-                continue_prob=cfg.continue_prob,
+                continue_prob=continue_prob,
                 min_viewpoint_scale=cfg.min_viewpoint_scale,
                 amp_ctx=amp_ctx,
                 use_checkpointing=cfg.use_checkpointing,
@@ -396,6 +402,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 metrics = {f"train/{k}": v.item() for k, v in ema.items()}
                 metrics["train/lr"] = lr
                 metrics["train/grad_norm"] = grad_norm
+                metrics["train/continue_prob"] = continue_prob
                 exp.log_metrics(metrics, step=step)
 
                 ema_loss = ema.get("total_loss")
