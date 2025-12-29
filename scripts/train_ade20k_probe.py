@@ -98,18 +98,25 @@ class Config:
 
 
 # === Loss ===
-def implicit_upsample_ce(logits: Tensor, masks: Tensor, scale: int) -> Tensor:
-    """CE with implicit nearest-neighbor upsampling. ~95x memory reduction."""
+FOCAL_GAMMA = 2.0
+
+
+def implicit_upsample_focal(logits: Tensor, masks: Tensor, scale: int) -> Tensor:
+    """Focal loss with implicit nearest-neighbor upsampling. ~95x memory reduction."""
     B, C, h, w = logits.shape
     log_probs = F.log_softmax(logits, dim=1).permute(0, 2, 3, 1).reshape(-1, C)
+    probs = log_probs.exp()
     mask_patches = (
         masks.reshape(B, h, scale, w, scale)
         .permute(0, 1, 3, 2, 4)
         .reshape(-1, scale * scale)
     )
     valid = mask_patches != IGNORE_LABEL
-    gathered = log_probs.gather(1, mask_patches.clamp(0, C - 1).long())
-    return -(gathered * valid).sum() / valid.sum().clamp(min=1)
+    targets = mask_patches.clamp(0, C - 1).long()
+    log_p = log_probs.gather(1, targets)
+    p = probs.gather(1, targets)
+    focal_weight = (1 - p) ** FOCAL_GAMMA
+    return -(focal_weight * log_p * valid).sum() / valid.sum().clamp(min=1)
 
 
 # === Probe head ===
@@ -337,7 +344,7 @@ class ProbeTrainer:
                 scale = H_mask // feat.shape[1]
                 p.head.train()
                 p.optimizer.zero_grad()
-                loss = implicit_upsample_ce(p.head(feat.detach()), masks, scale)
+                loss = implicit_upsample_focal(p.head(feat.detach()), masks, scale)
                 loss.backward()
                 grad_norms[p.name] = nn.utils.clip_grad_norm_(
                     p.head.parameters(), self.grad_clip
@@ -355,7 +362,7 @@ class ProbeTrainer:
                 scale = H_mask // feat.shape[1]
                 p.head.train()
                 p.optimizer.zero_grad()
-                loss = implicit_upsample_ce(p.head(feat), masks, scale)
+                loss = implicit_upsample_focal(p.head(feat), masks, scale)
                 loss.backward()
                 params = list(self.ft_model.parameters()) + list(p.head.parameters())
                 grad_norms[p.name] = nn.utils.clip_grad_norm_(
@@ -426,7 +433,7 @@ class ProbeTrainer:
                     continue
                 scale = H_mask // feat.shape[1]
                 logits = p.head(feat)
-                losses[p.name] += implicit_upsample_ce(logits, masks, scale).item() * B
+                losses[p.name] += implicit_upsample_focal(logits, masks, scale).item() * B
                 preds = (
                     logits.argmax(1)
                     .repeat_interleave(scale, 1)
@@ -443,7 +450,7 @@ class ProbeTrainer:
                     scale = H_mask // feat.shape[1]
                     logits = teacher_full_probe.head(feat)
                     cross_losses[f] += (
-                        implicit_upsample_ce(logits, masks, scale).item() * B
+                        implicit_upsample_focal(logits, masks, scale).item() * B
                     )
                     preds = (
                         logits.argmax(1)
