@@ -81,7 +81,7 @@ def training_step(
     images: Tensor,
     scene_target: Tensor,
     cls_target: Tensor,
-    compute_glimpse_targets: Callable[[Tensor], NormalizedTargets],
+    compute_glimpse_targets: Callable[[Tensor], NormalizedTargets] | None,
     glimpse_size_px: int,
     canvas_grid_size: int,
     n_branches: int,
@@ -166,11 +166,15 @@ def training_step(
         scene_cls_loss = F.mse_loss(cls_pred, cls_target)
 
         # Glimpse losses (targets = glimpse features from teacher)
-        glimpse_targets = compute_glimpse_targets(out.glimpse)
-        glimpse_patches_pred = model.predict_glimpse_teacher_patches(out.local_patches)
-        glimpse_cls_pred = model.predict_glimpse_teacher_cls(out.local_cls)
-        glimpse_patches_loss = F.mse_loss(glimpse_patches_pred, glimpse_targets.patches)
-        glimpse_cls_loss = F.mse_loss(glimpse_cls_pred, glimpse_targets.cls)
+        if compute_glimpse_targets is not None:
+            glimpse_targets = compute_glimpse_targets(out.glimpse)
+            glimpse_patches_pred = model.predict_glimpse_teacher_patches(out.local_patches)
+            glimpse_cls_pred = model.predict_glimpse_teacher_cls(out.local_cls)
+            glimpse_patches_loss = F.mse_loss(glimpse_patches_pred, glimpse_targets.patches)
+            glimpse_cls_loss = F.mse_loss(glimpse_cls_pred, glimpse_targets.cls)
+        else:
+            glimpse_patches_loss = torch.zeros((), device=device)
+            glimpse_cls_loss = torch.zeros((), device=device)
 
         return LossOutput(
             scene_loss=scene_loss,

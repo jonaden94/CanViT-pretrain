@@ -32,6 +32,8 @@ class CheckpointData(TypedDict):
     # Normalizer stats (required for correct inference)
     scene_norm_state: dict[str, Tensor] | None
     cls_norm_state: dict[str, Tensor] | None
+    glimpse_patches_norm_state: dict[str, Tensor] | None
+    glimpse_cls_norm_state: dict[str, Tensor] | None
     # Policy config (None if no policy, or legacy checkpoint before policy support)
     policy_config: dict | None
     # Optimizer/scheduler state for resuming training
@@ -74,6 +76,8 @@ def save(
     comet_id: str | None = None,
     scene_norm_state: dict[str, Tensor] | None = None,
     cls_norm_state: dict[str, Tensor] | None = None,
+    glimpse_patches_norm_state: dict[str, Tensor] | None = None,
+    glimpse_cls_norm_state: dict[str, Tensor] | None = None,
     optimizer_state: dict | None = None,
     scheduler_state: dict | None = None,
 ) -> None:
@@ -102,6 +106,8 @@ def save(
         "comet_id": comet_id,
         "scene_norm_state": scene_norm_state,
         "cls_norm_state": cls_norm_state,
+        "glimpse_patches_norm_state": glimpse_patches_norm_state,
+        "glimpse_cls_norm_state": glimpse_cls_norm_state,
         "policy_config": policy_config,
         "optimizer_state": optimizer_state,
         "scheduler_state": scheduler_state,
@@ -137,6 +143,8 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
         "comet_id": raw.get("comet_id"),
         "scene_norm_state": raw.get("scene_norm_state"),
         "cls_norm_state": raw.get("cls_norm_state"),
+        "glimpse_patches_norm_state": raw.get("glimpse_patches_norm_state"),
+        "glimpse_cls_norm_state": raw.get("glimpse_cls_norm_state"),
         "policy_config": raw.get("policy_config"),
         "optimizer_state": raw.get("optimizer_state"),
         "scheduler_state": raw.get("scheduler_state"),

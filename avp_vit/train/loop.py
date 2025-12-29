@@ -86,8 +86,8 @@ def grad_norms_by_module(model: nn.Module, depth: int = 1) -> dict[str, float]:
 def warmup_normalizer(
     scene_norm: PositionAwareNorm,
     cls_norm: PositionAwareNorm,
-    glimpse_patches_norm: PositionAwareNorm,
-    glimpse_cls_norm: PositionAwareNorm,
+    glimpse_patches_norm: PositionAwareNorm | None,
+    glimpse_cls_norm: PositionAwareNorm | None,
     train_loader: InfiniteLoader,
     compute_raw_targets: Callable[[Tensor, int], NormFeatures],
     warmup_images: int,
@@ -95,11 +95,13 @@ def warmup_normalizer(
     glimpse_size: int,
     device: torch.device,
 ) -> None:
-    """Warm up normalizer running stats (scene and glimpse)."""
+    """Warm up normalizer running stats (scene, and optionally glimpse)."""
     scene_norm.train()
     cls_norm.train()
-    glimpse_patches_norm.train()
-    glimpse_cls_norm.train()
+    if glimpse_patches_norm is not None:
+        glimpse_patches_norm.train()
+    if glimpse_cls_norm is not None:
+        glimpse_cls_norm.train()
     images_seen = 0
     pbar = tqdm(total=warmup_images, desc="Warmup normalizers", unit="img", leave=False)
     while images_seen < warmup_images:
@@ -110,9 +112,10 @@ def warmup_normalizer(
             scene_norm(feats.patches)
             cls_norm(feats.cls.unsqueeze(1))
             # Glimpse normalizers (same images at glimpse size)
-            glimpse_feats = compute_raw_targets(batch, glimpse_size)
-            glimpse_patches_norm(glimpse_feats.patches)
-            glimpse_cls_norm(glimpse_feats.cls.unsqueeze(1))
+            if glimpse_patches_norm is not None and glimpse_cls_norm is not None:
+                glimpse_feats = compute_raw_targets(batch, glimpse_size)
+                glimpse_patches_norm(glimpse_feats.patches)
+                glimpse_cls_norm(glimpse_feats.cls.unsqueeze(1))
         images_seen += batch.shape[0]
         pbar.update(batch.shape[0])
     pbar.close()
@@ -270,32 +273,40 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         n_tokens=1, embed_dim=teacher.embed_dim, grid_size=1, momentum=cfg.norm_momentum,
     ).to(cfg.device)
 
-    # Glimpse normalizers
-    glimpse_G = glimpse_size_px // patch_size
-    glimpse_patches_norm = PositionAwareNorm(
-        n_tokens=glimpse_G * glimpse_G, embed_dim=teacher.embed_dim, grid_size=glimpse_G, momentum=cfg.norm_momentum,
-    ).to(cfg.device)
-    glimpse_cls_norm = PositionAwareNorm(
-        n_tokens=1, embed_dim=teacher.embed_dim, grid_size=1, momentum=cfg.norm_momentum,
-    ).to(cfg.device)
+    # Glimpse normalizers (only if glimpse losses enabled)
+    glimpse_patches_norm: PositionAwareNorm | None = None
+    glimpse_cls_norm: PositionAwareNorm | None = None
+    if cfg.enable_glimpse_losses:
+        glimpse_G = glimpse_size_px // patch_size
+        glimpse_patches_norm = PositionAwareNorm(
+            n_tokens=glimpse_G * glimpse_G, embed_dim=teacher.embed_dim, grid_size=glimpse_G, momentum=cfg.norm_momentum,
+        ).to(cfg.device)
+        glimpse_cls_norm = PositionAwareNorm(
+            n_tokens=1, embed_dim=teacher.embed_dim, grid_size=1, momentum=cfg.norm_momentum,
+        ).to(cfg.device)
 
     norm_loaded = False
     if ckpt_data is not None and not cfg.reset_normalizer:
         scene_norm_state = ckpt_data.get("scene_norm_state")
         cls_norm_state = ckpt_data.get("cls_norm_state")
-        glimpse_patches_norm_state = ckpt_data.get("glimpse_patches_norm_state")
-        glimpse_cls_norm_state = ckpt_data.get("glimpse_cls_norm_state")
-        # Scene/cls are required, glimpse are optional (new feature)
         if scene_norm_state is not None and cls_norm_state is not None:
             scene_norm.load_state_dict(scene_norm_state)
             cls_norm.load_state_dict(cls_norm_state)
-            if glimpse_patches_norm_state is not None and glimpse_cls_norm_state is not None:
-                glimpse_patches_norm.load_state_dict(glimpse_patches_norm_state)
-                glimpse_cls_norm.load_state_dict(glimpse_cls_norm_state)
-                log.info("Loaded all normalizer states from checkpoint")
-                norm_loaded = True
+            norm_loaded = True
+            # Load glimpse normalizers if available and enabled
+            if cfg.enable_glimpse_losses:
+                assert glimpse_patches_norm is not None and glimpse_cls_norm is not None
+                glimpse_patches_norm_state = ckpt_data.get("glimpse_patches_norm_state")
+                glimpse_cls_norm_state = ckpt_data.get("glimpse_cls_norm_state")
+                if glimpse_patches_norm_state is not None and glimpse_cls_norm_state is not None:
+                    glimpse_patches_norm.load_state_dict(glimpse_patches_norm_state)
+                    glimpse_cls_norm.load_state_dict(glimpse_cls_norm_state)
+                    log.info("Loaded all normalizer states from checkpoint")
+                else:
+                    log.info("Loaded scene/cls normalizers, glimpse normalizers will warm up")
+                    norm_loaded = False  # Need to warm up glimpse normalizers
             else:
-                log.info("Loaded scene/cls normalizers, glimpse normalizers will warm up")
+                log.info("Loaded scene/cls normalizer states from checkpoint")
         else:
             log.warning("Checkpoint has no normalizer states")
     elif cfg.reset_normalizer:
@@ -332,9 +343,15 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         targets = compute_normalized_targets(images, scene_size, scene_norm, cls_norm)
         return TrainBatch(images=images, labels=labels, scene_target=targets.patches, cls_target=targets.cls)
 
-    def compute_glimpse_targets(glimpse: Tensor) -> NormalizedTargets:
-        """Compute normalized teacher targets for a glimpse crop."""
-        return compute_normalized_targets(glimpse, glimpse_size_px, glimpse_patches_norm, glimpse_cls_norm)
+    # Glimpse targets callable (only if glimpse losses enabled)
+    if cfg.enable_glimpse_losses:
+        assert glimpse_patches_norm is not None and glimpse_cls_norm is not None
+        _gpn, _gcn = glimpse_patches_norm, glimpse_cls_norm
+        def _compute_glimpse_targets(glimpse: Tensor) -> NormalizedTargets:
+            return compute_normalized_targets(glimpse, glimpse_size_px, _gpn, _gcn)
+        compute_glimpse_targets_fn: Callable[[Tensor], NormalizedTargets] | None = _compute_glimpse_targets
+    else:
+        compute_glimpse_targets_fn = None
 
     # Step semantics: step S = model state after S gradient updates
     # step=0: before any gradient (initial model)
@@ -394,15 +411,17 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 comet_id=exp.get_key(),
                 scene_norm_state=scene_norm.state_dict(),
                 cls_norm_state=cls_norm.state_dict(),
-                glimpse_patches_norm_state=glimpse_patches_norm.state_dict(),
-                glimpse_cls_norm_state=glimpse_cls_norm.state_dict(),
+                glimpse_patches_norm_state=glimpse_patches_norm.state_dict() if glimpse_patches_norm else None,
+                glimpse_cls_norm_state=glimpse_cls_norm.state_dict() if glimpse_cls_norm else None,
                 optimizer_state=optimizer.state_dict(),
                 scheduler_state=scheduler.state_dict(),
             )
             exp.log_metric("norm/scene_mean_norm", scene_norm.mean.norm().item(), step=step)
             exp.log_metric("norm/cls_mean_norm", cls_norm.mean.norm().item(), step=step)
-            exp.log_metric("norm/glimpse_patches_mean_norm", glimpse_patches_norm.mean.norm().item(), step=step)
-            exp.log_metric("norm/glimpse_cls_mean_norm", glimpse_cls_norm.mean.norm().item(), step=step)
+            if glimpse_patches_norm is not None:
+                exp.log_metric("norm/glimpse_patches_mean_norm", glimpse_patches_norm.mean.norm().item(), step=step)
+            if glimpse_cls_norm is not None:
+                exp.log_metric("norm/glimpse_cls_mean_norm", glimpse_cls_norm.mean.norm().item(), step=step)
 
         # === TRAINING PHASE (only for step < n_steps) ===
         if step < cfg.n_steps:
@@ -422,7 +441,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 images=batch.images,
                 scene_target=batch.scene_target,
                 cls_target=batch.cls_target,
-                compute_glimpse_targets=compute_glimpse_targets,
+                compute_glimpse_targets=compute_glimpse_targets_fn,
                 glimpse_size_px=glimpse_size_px,
                 canvas_grid_size=G,
                 n_branches=cfg.n_branches,
@@ -491,8 +510,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             comet_id=exp.get_key(),
             scene_norm_state=scene_norm.state_dict(),
             cls_norm_state=cls_norm.state_dict(),
-            glimpse_patches_norm_state=glimpse_patches_norm.state_dict(),
-            glimpse_cls_norm_state=glimpse_cls_norm.state_dict(),
+            glimpse_patches_norm_state=glimpse_patches_norm.state_dict() if glimpse_patches_norm else None,
+            glimpse_cls_norm_state=glimpse_cls_norm.state_dict() if glimpse_cls_norm else None,
             optimizer_state=optimizer.state_dict(),
             scheduler_state=scheduler.state_dict(),
         )

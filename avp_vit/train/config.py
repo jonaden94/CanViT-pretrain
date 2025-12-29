@@ -45,6 +45,7 @@ class Config:
     weight_decay: float = 1e-4
     min_viewpoint_scale: float = 0.05  # Minimum scale for random viewpoints
     enable_policy: bool = True  # Enable policy branch (t=1 POLICY viewpoint type)
+    enable_glimpse_losses: bool = True  # Enable glimpse losses (direct backbone gradient)
     ema_alpha: float = 0.1  # EMA smoothing for metrics
     warmup_steps: int = 2_000
     grad_clip: float = 1.0
