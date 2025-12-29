@@ -98,6 +98,7 @@ class Config:
     device: str | None = None
     amp: bool = True
     resume_ckpt: Path | None = None  # resume from combined checkpoint
+    resume_exp_id: str | None = None  # resume from old per-probe checkpoints by exp ID
 
 
 # === Loss ===
@@ -757,7 +758,21 @@ def main(cfg: Config) -> None:
 
     # Resume from checkpoint
     start_step = 0
-    if cfg.resume_ckpt is not None:
+    if cfg.resume_exp_id is not None:
+        # Load from old per-probe checkpoints: probe_{name}_best_{exp_id}.pt
+        exp_id = cfg.resume_exp_id
+        for p in probes:
+            ckpt_path = Path(f"probe_{p.name}_best_{exp_id}.pt")
+            if ckpt_path.exists():
+                state = torch.load(ckpt_path, map_location=device, weights_only=False)
+                p.head.load_state_dict(state["head"])
+                log.info(f"Loaded {p.name} from {ckpt_path}")
+                if p.finetune and ft_model is not None and "backbone" in state:
+                    ft_model.load_state_dict(state["backbone"])
+                    log.info(f"Loaded ft_model backbone from {ckpt_path}")
+            else:
+                log.warning(f"Checkpoint not found: {ckpt_path}")
+    elif cfg.resume_ckpt is not None:
         resume = torch.load(cfg.resume_ckpt, map_location=device, weights_only=False)
         if "probes" in resume:
             # New combined format
