@@ -8,6 +8,7 @@ All probes enabled by default. Single-pass validation for efficiency.
 """
 
 import logging
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -95,6 +96,7 @@ class Config:
     comet_project: str = "avp-ade20k-probe"
     comet_workspace: str = "m2b3-ava"
     device: str | None = None
+    amp: bool = True
 
 
 # === Loss ===
@@ -321,6 +323,7 @@ class ProbeTrainer:
         ft_model: ActiveCanViT | None,
         device: torch.device,
         grad_clip: float,
+        amp_ctx: torch.autocast | nullcontext,
     ):
         self.probes = probes
         self.frozen_ext = frozen_ext
@@ -328,6 +331,7 @@ class ProbeTrainer:
         self.ft_model = ft_model
         self.device = device
         self.grad_clip = grad_clip
+        self.amp_ctx = amp_ctx
         self.frozen_probes = [p for p in probes if not p.finetune]
         self.ft_probes = [p for p in probes if p.finetune]
 
@@ -338,13 +342,15 @@ class ProbeTrainer:
         # Frozen probes
         frozen_features = {p.feature for p in self.frozen_probes}
         if frozen_features:
-            feats = self.frozen_ext.extract(images, frozen_features, with_grad=False)
+            with self.amp_ctx:
+                feats = self.frozen_ext.extract(images, frozen_features, with_grad=False)
             for p in self.frozen_probes:
                 feat = feats[p.feature]
                 scale = H_mask // feat.shape[1]
                 p.head.train()
                 p.optimizer.zero_grad()
-                loss = implicit_upsample_focal(p.head(feat.detach()), masks, scale)
+                with self.amp_ctx:
+                    loss = implicit_upsample_focal(p.head(feat.detach()), masks, scale)
                 loss.backward()
                 grad_norms[p.name] = nn.utils.clip_grad_norm_(
                     p.head.parameters(), self.grad_clip
@@ -356,13 +362,15 @@ class ProbeTrainer:
         # Finetune probes
         if self.ft_ext is not None and self.ft_model is not None:
             for p in self.ft_probes:
-                feat = self.ft_ext.extract(images, {p.feature}, with_grad=True)[
-                    p.feature
-                ]
+                with self.amp_ctx:
+                    feat = self.ft_ext.extract(images, {p.feature}, with_grad=True)[
+                        p.feature
+                    ]
                 scale = H_mask // feat.shape[1]
                 p.head.train()
                 p.optimizer.zero_grad()
-                loss = implicit_upsample_focal(p.head(feat), masks, scale)
+                with self.amp_ctx:
+                    loss = implicit_upsample_focal(p.head(feat), masks, scale)
                 loss.backward()
                 params = list(self.ft_model.parameters()) + list(p.head.parameters())
                 grad_norms[p.name] = nn.utils.clip_grad_norm_(
@@ -413,51 +421,52 @@ class ProbeTrainer:
             images, masks = images.to(self.device), masks.to(self.device)
             B, H_mask = images.shape[0], masks.shape[1]
 
-            frozen_feats = (
-                self.frozen_ext.extract(images, frozen_feature_set, with_grad=False)
-                if frozen_feature_set
-                else {}
-            )
-
-            ft_feats: dict[FeatureType, Tensor] = {}
-            if self.ft_ext is not None and ft_feature_set:
-                ft_feats = self.ft_ext.extract(images, ft_feature_set, with_grad=False)
-
-            for p in self.probes:
-                feat = (
-                    ft_feats.get(p.feature)
-                    if p.finetune
-                    else frozen_feats.get(p.feature)
+            with self.amp_ctx:
+                frozen_feats = (
+                    self.frozen_ext.extract(images, frozen_feature_set, with_grad=False)
+                    if frozen_feature_set
+                    else {}
                 )
-                if feat is None:
-                    continue
-                scale = H_mask // feat.shape[1]
-                logits = p.head(feat)
-                losses[p.name] += implicit_upsample_focal(logits, masks, scale).item() * B
-                preds = (
-                    logits.argmax(1)
-                    .repeat_interleave(scale, 1)
-                    .repeat_interleave(scale, 2)
-                )
-                ious[p.name].update(preds, masks)
 
-            # Cross-eval: apply teacher_full probe to predicted features
-            if teacher_full_probe:
-                for f in cross_features:
-                    feat = frozen_feats.get(f)
+                ft_feats: dict[FeatureType, Tensor] = {}
+                if self.ft_ext is not None and ft_feature_set:
+                    ft_feats = self.ft_ext.extract(images, ft_feature_set, with_grad=False)
+
+                for p in self.probes:
+                    feat = (
+                        ft_feats.get(p.feature)
+                        if p.finetune
+                        else frozen_feats.get(p.feature)
+                    )
                     if feat is None:
                         continue
                     scale = H_mask // feat.shape[1]
-                    logits = teacher_full_probe.head(feat)
-                    cross_losses[f] += (
-                        implicit_upsample_focal(logits, masks, scale).item() * B
-                    )
+                    logits = p.head(feat)
+                    losses[p.name] += implicit_upsample_focal(logits, masks, scale).item() * B
                     preds = (
                         logits.argmax(1)
                         .repeat_interleave(scale, 1)
                         .repeat_interleave(scale, 2)
                     )
-                    cross_ious[f].update(preds, masks)
+                    ious[p.name].update(preds, masks)
+
+                # Cross-eval: apply teacher_full probe to predicted features
+                if teacher_full_probe:
+                    for f in cross_features:
+                        feat = frozen_feats.get(f)
+                        if feat is None:
+                            continue
+                        scale = H_mask // feat.shape[1]
+                        logits = teacher_full_probe.head(feat)
+                        cross_losses[f] += (
+                            implicit_upsample_focal(logits, masks, scale).item() * B
+                        )
+                        preds = (
+                            logits.argmax(1)
+                            .repeat_interleave(scale, 1)
+                            .repeat_interleave(scale, 2)
+                        )
+                        cross_ious[f].update(preds, masks)
 
             n += B
 
@@ -560,6 +569,12 @@ def main(cfg: Config) -> None:
         cfg.device or ("cuda" if torch.cuda.is_available() else "cpu")
     )
     log.info(f"Device: {device}")
+
+    amp_ctx = (
+        torch.autocast(device_type=device.type, dtype=torch.bfloat16)
+        if cfg.amp else nullcontext()
+    )
+    log.info(f"AMP: {'bfloat16' if cfg.amp else 'disabled'}")
 
     # Load checkpoint
     ckpt = load_ckpt(cfg.avp_ckpt, device)
@@ -670,7 +685,7 @@ def main(cfg: Config) -> None:
     probes = [make_probe(f, f, False) for f in cfg.frozen_features]
     probes += [make_probe(f"ft_{f}", f, True) for f in cfg.finetune_features]
 
-    trainer = ProbeTrainer(probes, frozen_ext, ft_ext, ft_model, device, cfg.grad_clip)
+    trainer = ProbeTrainer(probes, frozen_ext, ft_ext, ft_model, device, cfg.grad_clip, amp_ctx)
 
     log.info(f"Probes: {[p.name for p in probes]}")
 
