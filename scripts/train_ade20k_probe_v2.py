@@ -160,13 +160,14 @@ class Probe:
 class FeatureExtractor:
     def __init__(self, model: ActiveCanViT, scene_norm: PositionAwareNorm | None,
                  teacher: DINOv3Backbone | None, canvas_grid: int, glimpse_grid: int,
-                 glimpse_px: int, device: torch.device):
+                 glimpse_px: int, teacher_patch_size: int, device: torch.device):
         self.model = model
         self.scene_norm = scene_norm
         self.teacher = teacher
         self.canvas_grid = canvas_grid
         self.glimpse_grid = glimpse_grid
         self.glimpse_px = glimpse_px
+        self.teacher_patch_size = teacher_patch_size
         self.device = device
 
     def extract(self, images: Tensor, features: set[FeatureType], with_grad: bool) -> dict[FeatureType, Tensor]:
@@ -198,7 +199,8 @@ class FeatureExtractor:
                     feats = self.teacher.forward_norm_features(images)
                     result["teacher_full"] = feats.patches.view(B, self.canvas_grid, self.canvas_grid, -1)
                 if "teacher_glimpse" in features:
-                    small = F.interpolate(images, (self.glimpse_grid * 16, self.glimpse_grid * 16), mode="bilinear", align_corners=False)  # 16 = DINOv3 patch size
+                    sz = self.glimpse_grid * self.teacher_patch_size
+                    small = F.interpolate(images, (sz, sz), mode="bilinear", align_corners=False)
                     feats = self.teacher.forward_norm_features(small)
                     result["teacher_glimpse"] = feats.patches.view(B, self.glimpse_grid, self.glimpse_grid, -1)
 
@@ -401,6 +403,7 @@ def main(cfg: Config) -> None:
 
     # Dimensions
     patch_size = frozen_model.backbone.patch_size_px
+    teacher_patch_size = teacher.patch_size_px if teacher else patch_size
     canvas_grid = cfg.image_size // patch_size
     glimpse_grid = ckpt["model_config"].get("glimpse_grid_size", 8)
     glimpse_px = glimpse_grid * patch_size
@@ -415,8 +418,8 @@ def main(cfg: Config) -> None:
         return teacher.embed_dim if teacher else teacher_dim
 
     # Extractors
-    frozen_ext = FeatureExtractor(frozen_model, scene_norm, teacher, canvas_grid, glimpse_grid, glimpse_px, device)
-    ft_ext = FeatureExtractor(ft_model, scene_norm, None, canvas_grid, glimpse_grid, glimpse_px, device) if ft_model else None
+    frozen_ext = FeatureExtractor(frozen_model, scene_norm, teacher, canvas_grid, glimpse_grid, glimpse_px, teacher_patch_size, device)
+    ft_ext = FeatureExtractor(ft_model, scene_norm, None, canvas_grid, glimpse_grid, glimpse_px, teacher_patch_size, device) if ft_model else None
 
     # Create probes
     peak_lr = cfg.ref_lr * cfg.batch_size
