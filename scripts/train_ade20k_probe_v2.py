@@ -67,7 +67,7 @@ class Config:
     ref_lr: float = 2.5e-5  # peak_lr = ref_lr * batch_size
     ft_ref_lr: float = 1e-6  # backbone LR for finetune
     weight_decay: float = 1e-4
-    warmup_ratio: float = 0.1
+    warmup_ratio: float = 0.5
     max_steps: int = 20_000
     grad_clip: float = 1.0
 
