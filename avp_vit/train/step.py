@@ -133,7 +133,7 @@ def training_step(
 
     def compute_loss(out: GlimpseOutput) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         scene_pred = model.predict_teacher_scene(out.canvas)
-        cls_pred = model.predict_teacher_cls(out.global_cls, out.canvas)
+        cls_pred = model.predict_scene_teacher_cls(out.global_cls, out.canvas)
         return (
             F.mse_loss(scene_pred, scene_target),
             F.mse_loss(cls_pred, cls_target),

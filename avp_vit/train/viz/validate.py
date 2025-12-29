@@ -233,7 +233,7 @@ def _validate_policy_rollout(
         canvas, cls = out.canvas, out.global_cls
 
         # Compute IN1K accuracy
-        predicted_cls = model.predict_teacher_cls(cls, canvas)
+        predicted_cls = model.predict_scene_teacher_cls(cls, canvas)
         cls_raw = cls_normalizer.denormalize(predicted_cls)
         logits = probe(cls_raw)
         accs.append(compute_in1k_top1(logits, labels))
@@ -387,7 +387,7 @@ def validate(
             ) -> ValAccumulator:
                 predicted_scene = model.predict_teacher_scene(out.canvas)
                 predicted_cls = (
-                    model.predict_teacher_cls(out.global_cls, out.canvas) if has_cls else None
+                    model.predict_scene_teacher_cls(out.global_cls, out.canvas) if has_cls else None
                 )
 
                 scene_cos = F.cosine_similarity(predicted_scene, target, dim=-1).mean().item()
