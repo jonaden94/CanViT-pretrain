@@ -133,7 +133,7 @@ def training_step(
 
     def compute_loss(out: GlimpseOutput) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         scene_pred = model.predict_teacher_scene(out.canvas)
-        cls_pred = model.predict_teacher_cls(out.cls, out.canvas)
+        cls_pred = model.predict_teacher_cls(out.global_cls, out.canvas)
         return (
             F.mse_loss(scene_pred, scene_target),
             F.mse_loss(cls_pred, cls_target),
@@ -153,7 +153,7 @@ def training_step(
 
         state = ChunkState(
             canvas=out_t0.canvas,
-            cls_tok=out_t0.cls,
+            cls_tok=out_t0.global_cls,
             vpe=out_t0.vpe,
             chunk_scene=scene_t0.float(),
             chunk_cls=cls_t0.float(),
@@ -190,14 +190,14 @@ def training_step(
                 # Detach for next chunk
                 if not is_last:
                     state.canvas = out.canvas.detach()
-                    state.cls_tok = out.cls.detach()
+                    state.cls_tok = out.global_cls.detach()
                     state.vpe = out.vpe.detach() if out.vpe is not None else None
                     state.chunk_scene = torch.zeros((), device=device)
                     state.chunk_cls = torch.zeros((), device=device)
                 else:
-                    state.canvas, state.cls_tok, state.vpe = out.canvas, out.cls, out.vpe
+                    state.canvas, state.cls_tok, state.vpe = out.canvas, out.global_cls, out.vpe
             else:
-                state.canvas, state.cls_tok, state.vpe = out.canvas, out.cls, out.vpe
+                state.canvas, state.cls_tok, state.vpe = out.canvas, out.global_cls, out.vpe
 
         # Record metrics (no trailing step needed - n_glimpses always even)
         traj_losses[branch_idx] = (state.total_scene + state.total_cls) / state.n_steps

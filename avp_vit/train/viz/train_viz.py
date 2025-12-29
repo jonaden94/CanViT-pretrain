@@ -70,7 +70,7 @@ def viz_and_log(
             )
             if has_cls:
                 assert cls_target is not None
-                predicted_cls = model.predict_teacher_cls(out.cls, out.canvas)
+                predicted_cls = model.predict_teacher_cls(out.global_cls, out.canvas)
                 acc.cls_cos_sims.append(
                     F.cosine_similarity(predicted_cls, cls_target, dim=-1).mean().item()
                 )
