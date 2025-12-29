@@ -23,7 +23,6 @@ import torch.nn.functional as F
 import tyro
 from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit.hub import create_backbone
-from canvit.policy import PolicyConfig, PolicyHead
 from canvit.viewpoint import Viewpoint
 from PIL import Image
 from torch import Tensor
@@ -92,6 +91,7 @@ class Config:
 
     log_every: int = 10
     val_every: int = 200
+    boundary_width: int = 3  # pixels from class boundary for boundary mIoU
 
     comet_project: str = "avp-ade20k-probe"
     comet_workspace: str = "m2b3-ava"
@@ -101,6 +101,35 @@ class Config:
 
 # === Loss ===
 FOCAL_GAMMA = 2.0
+
+
+def get_boundary_mask(masks: Tensor, width: int, ignore_label: int = IGNORE_LABEL) -> Tensor:
+    """Bool tensor: True for pixels within `width` of class boundary. Fully vectorized."""
+    B, H, W = masks.shape
+    valid = (masks != ignore_label).unsqueeze(1).float()  # (B, 1, H, W)
+    m = masks.unsqueeze(1).float()  # (B, 1, H, W)
+
+    # Pad and unfold to get 3x3 neighborhoods
+    m_padded = F.pad(m, (1, 1, 1, 1), mode='replicate')
+    valid_padded = F.pad(valid, (1, 1, 1, 1), mode='constant', value=0)
+
+    # (B, 9, H, W) - 3x3 patches centered at each pixel
+    patches = F.unfold(m_padded, 3).view(B, 9, H, W)
+    valid_patches = F.unfold(valid_padded, 3).view(B, 9, H, W)
+
+    center = patches[:, 4:5]  # center of 3x3
+    center_valid = valid_patches[:, 4:5]
+
+    # Edge: any valid neighbor differs from valid center
+    differs = (patches != center) & (valid_patches > 0) & (center_valid > 0)
+    edges = differs.any(dim=1, keepdim=True).float()  # (B, 1, H, W)
+
+    # Dilate by `width`
+    if width > 0:
+        kernel = 2 * width + 1
+        edges = F.max_pool2d(edges, kernel, stride=1, padding=width)
+
+    return (edges.squeeze(1) > 0) & (valid.squeeze(1) > 0)
 
 
 def implicit_upsample_focal(logits: Tensor, masks: Tensor, scale: int) -> Tensor:
@@ -321,6 +350,7 @@ class ProbeTrainer:
         device: torch.device,
         grad_clip: float,
         amp_ctx: torch.autocast | nullcontext,
+        boundary_width: int = 3,
     ):
         self.probes = probes
         self.frozen_ext = frozen_ext
@@ -329,6 +359,7 @@ class ProbeTrainer:
         self.device = device
         self.grad_clip = grad_clip
         self.amp_ctx = amp_ctx
+        self.boundary_width = boundary_width
         self.frozen_probes = [p for p in probes if not p.finetune]
         self.ft_probes = [p for p in probes if p.finetune]
 
@@ -389,6 +420,12 @@ class ProbeTrainer:
             ).to(self.device)
             for p in self.probes
         }
+        boundary_ious = {
+            p.name: MulticlassJaccardIndex(
+                NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro"
+            ).to(self.device)
+            for p in self.probes
+        }
         losses = {p.name: 0.0 for p in self.probes}
 
         # Cross-eval: teacher_full probe on predicted features
@@ -399,6 +436,12 @@ class ProbeTrainer:
             ["predicted_norm", "predicted_denorm"] if teacher_full_probe else []
         )
         cross_ious = {
+            f: MulticlassJaccardIndex(
+                NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro"
+            ).to(self.device)
+            for f in cross_features
+        }
+        cross_boundary_ious = {
             f: MulticlassJaccardIndex(
                 NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro"
             ).to(self.device)
@@ -417,6 +460,10 @@ class ProbeTrainer:
         for images, masks in loader:
             images, masks = images.to(self.device), masks.to(self.device)
             B, H_mask = images.shape[0], masks.shape[1]
+
+            # Boundary mask for this batch (torch.where avoids clone + indexed assign)
+            boundary = get_boundary_mask(masks, self.boundary_width)
+            masks_boundary = torch.where(boundary, masks, IGNORE_LABEL)
 
             with self.amp_ctx:
                 frozen_feats = (
@@ -446,6 +493,7 @@ class ProbeTrainer:
                         .repeat_interleave(scale, 2)
                     )
                     ious[p.name].update(preds, masks)
+                    boundary_ious[p.name].update(preds, masks_boundary)
 
                 # Cross-eval: apply teacher_full probe to predicted features
                 if teacher_full_probe:
@@ -464,15 +512,20 @@ class ProbeTrainer:
                             .repeat_interleave(scale, 2)
                         )
                         cross_ious[f].update(preds, masks)
+                        cross_boundary_ious[f].update(preds, masks_boundary)
 
             n += B
 
         result = {f"{name}/val_loss": losses[name] / n for name in losses}
         result |= {f"{name}/val_miou": ious[name].compute().item() for name in ious}
+        result |= {f"{name}/val_boundary_miou": boundary_ious[name].compute().item() for name in boundary_ious}
         for f in cross_features:
             result[f"cross/tch_full_on_{ABBREV[f]}/val_loss"] = cross_losses[f] / n
             result[f"cross/tch_full_on_{ABBREV[f]}/val_miou"] = (
                 cross_ious[f].compute().item()
+            )
+            result[f"cross/tch_full_on_{ABBREV[f]}/val_boundary_miou"] = (
+                cross_boundary_ious[f].compute().item()
             )
         return result
 
@@ -582,12 +635,8 @@ def main(cfg: Config) -> None:
 
     def make_model(trainable: bool = False) -> ActiveCanViT:
         bb = create_backbone(backbone_name, pretrained=False)
-        policy = None
-        if (pc := ckpt.get("policy_config")) is not None:
-            policy = PolicyHead(
-                embed_dim=bb.embed_dim, cfg=dacite.from_dict(PolicyConfig, pc)
-            )
-        m = ActiveCanViT(backbone=bb, cfg=model_cfg, policy=policy)
+        # No policy needed for t=0 full-view probing
+        m = ActiveCanViT(backbone=bb, cfg=model_cfg, policy=None)
         m.load_state_dict(ckpt["state_dict"], strict=False)
         m = m.to(device)
         if trainable:
@@ -682,7 +731,7 @@ def main(cfg: Config) -> None:
     probes = [make_probe(f, f, False) for f in cfg.frozen_features]
     probes += [make_probe(f"ft_{f}", f, True) for f in cfg.finetune_features]
 
-    trainer = ProbeTrainer(probes, frozen_ext, ft_ext, ft_model, device, cfg.grad_clip, amp_ctx)
+    trainer = ProbeTrainer(probes, frozen_ext, ft_ext, ft_model, device, cfg.grad_clip, amp_ctx, cfg.boundary_width)
 
     log.info(f"Probes: {[p.name for p in probes]}")
 
