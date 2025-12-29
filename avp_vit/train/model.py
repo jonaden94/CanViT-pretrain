@@ -53,11 +53,9 @@ def create_model(
 
     policy = None
     if cfg.enable_policy:
-        policy_cfg = PolicyConfig(min_scale=cfg.min_viewpoint_scale)
+        policy_cfg = PolicyConfig()
         policy = PolicyHead(embed_dim=student_backbone.embed_dim, cfg=policy_cfg)
-        log.info(
-            f"Policy head created: embed_dim={student_backbone.embed_dim}, min_scale={cfg.min_viewpoint_scale}"
-        )
+        log.info(f"Policy head created: embed_dim={student_backbone.embed_dim}")
 
     model = ActiveCanViT(backbone=student_backbone, cfg=cfg.model, policy=policy).to(
         cfg.device

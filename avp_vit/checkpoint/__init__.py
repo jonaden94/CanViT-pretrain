@@ -200,15 +200,14 @@ def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = Fa
         # New checkpoint with explicit policy config
         policy_cfg = dacite.from_dict(PolicyConfig, policy_config)
         policy = PolicyHead(embed_dim=backbone.embed_dim, cfg=policy_cfg)
-        log.info(f"Policy created from checkpoint config: min_scale={policy_cfg.min_scale}")
+        log.info("Policy created from checkpoint config")
     elif has_policy_weights:
         # Legacy checkpoint: has policy weights but no config (use defaults)
         policy_cfg = PolicyConfig()
         policy = PolicyHead(embed_dim=backbone.embed_dim, cfg=policy_cfg)
         log.warning(
-            f"Checkpoint has policy weights but no policy_config (legacy). "
-            f"Using default PolicyConfig: min_scale={policy_cfg.min_scale}. "
-            f"Re-save checkpoint to fix."
+            "Checkpoint has policy weights but no policy_config (legacy). "
+            "Using default PolicyConfig. Re-save checkpoint to fix."
         )
 
     model = ActiveCanViT(backbone=backbone, cfg=cfg, policy=policy)
