@@ -246,7 +246,7 @@ class GPUWorker:
 
             # Update state
             self._canvas = out.canvas
-            self._cls = out.cls
+            self._cls = out.global_cls
 
             # Extract features
             spatial = self._model.get_spatial(out.canvas)[0]
@@ -261,7 +261,7 @@ class GPUWorker:
             # In practice, caller should pass teacher features or we cache them
 
             # Classification
-            cls_pred = self._model.predict_teacher_cls(out.cls, out.canvas)
+            cls_pred = self._model.predict_scene_teacher_cls(out.global_cls, out.canvas)
             top5 = self._top5(self._cls_norm.denormalize(cls_pred)) if self._probe and self._cls_norm else []
 
             # Policy
