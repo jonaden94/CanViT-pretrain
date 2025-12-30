@@ -18,11 +18,11 @@ from tqdm import tqdm
 
 from canvit import GlimpseOutput
 from canvit.backbone.dinov3 import DINOv3Backbone
+from canvit.hub import create_backbone
 from canvit.viewpoint import Viewpoint as CanvitViewpoint
-from dinov3.models.vision_transformer import DinoVisionTransformer
 
 from avp_vit import ActiveCanViT
-from avp_vit.checkpoint import _get_backbone_factory, load as load_ckpt, load_model
+from avp_vit.checkpoint import load as load_ckpt, load_model
 from avp_vit.train.data import val_transform
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.probe import load_probe
@@ -41,15 +41,15 @@ class Config:
     device: str = "mps"
     canvas_grid: int = 32
     glimpse_grid: int = 8
+    n_viewpoints: int = 5
 
 
 def load_teacher(ckpt_path: Path, device: torch.device) -> DINOv3Backbone:
     """Load teacher backbone from checkpoint."""
     ckpt = load_ckpt(ckpt_path, "cpu")
-    factory = _get_backbone_factory(ckpt["backbone"])
-    raw_teacher = factory(pretrained=True)
-    assert isinstance(raw_teacher, DinoVisionTransformer)
-    return DINOv3Backbone(raw_teacher.to(device).eval())
+    teacher = create_backbone(ckpt["backbone"], pretrained=True)
+    assert isinstance(teacher, DINOv3Backbone)
+    return teacher.to(device).eval()
 
 
 def load_cls_normalizer(ckpt_path: Path, device: torch.device) -> PositionAwareNorm:
@@ -69,16 +69,17 @@ def run_trajectory(
     images: Tensor,
     canvas_grid: int,
     glimpse_size_px: int,
+    n_viewpoints: int,
 ) -> list[Tensor]:
     """Run coarse-to-fine trajectory and return CLS prediction at each timestep."""
     B = images.shape[0]
-    viewpoints = make_eval_viewpoints(B, images.device)
+    viewpoints = make_eval_viewpoints(B, images.device, n_viewpoints=n_viewpoints)
 
     def init_fn(_canvas: Tensor, _cls: Tensor) -> list[Tensor]:
         return []
 
     def step_fn(acc: list[Tensor], out: GlimpseOutput, _vp: CanvitViewpoint) -> list[Tensor]:
-        cls_pred = model.predict_teacher_cls(out.cls, out.canvas)
+        cls_pred = model.predict_scene_teacher_cls(out.global_cls, out.canvas)
         acc.append(cls_pred)
         return acc
 
@@ -124,10 +125,10 @@ def validate(cfg: Config) -> dict[str, float]:
         pin_memory=True,
     )
     log.info(f"Dataset: {len(dataset)} images, {len(loader)} batches")
+    log.info(f"Viewpoints: {cfg.n_viewpoints}")
 
-    n_timesteps = 5  # full + 4 quadrants
-    correct_top1 = [0] * n_timesteps
-    correct_top5 = [0] * n_timesteps
+    correct_top1 = [0] * cfg.n_viewpoints
+    correct_top5 = [0] * cfg.n_viewpoints
     teacher_correct_top1 = 0
     teacher_correct_top5 = 0
     total = 0
@@ -138,7 +139,7 @@ def validate(cfg: Config) -> dict[str, float]:
         labels = labels.to(device)
 
         # Model predictions at each timestep
-        cls_preds = run_trajectory(model, images, cfg.canvas_grid, glimpse_size_px)
+        cls_preds = run_trajectory(model, images, cfg.canvas_grid, glimpse_size_px, cfg.n_viewpoints)
         for t, cls_pred in enumerate(cls_preds):
             cls_raw = cls_norm.denormalize(cls_pred)
             logits = probe(cls_raw)
@@ -157,12 +158,12 @@ def validate(cfg: Config) -> dict[str, float]:
 
         total += labels.shape[0]
         teacher_acc1 = 100 * teacher_correct_top1 / total
-        ts = " ".join(f"t{t}={100*correct_top1[t]/total:.1f}" for t in range(n_timesteps))
+        ts = " ".join(f"t{t}={100*correct_top1[t]/total:.1f}" for t in range(cfg.n_viewpoints))
         pbar.set_postfix_str(f"{ts} teacher={teacher_acc1:.1f}")
 
-    log.info("Results by timestep (t0=full, t1-4=quadrants):")
+    log.info(f"Results by timestep ({cfg.n_viewpoints} viewpoints):")
     metrics: dict[str, float] = {"total_samples": float(total)}
-    for t in range(n_timesteps):
+    for t in range(cfg.n_viewpoints):
         acc1 = 100 * correct_top1[t] / total
         acc5 = 100 * correct_top5[t] / total
         log.info(f"  t{t}: top1={acc1:.2f}%, top5={acc5:.2f}%")
