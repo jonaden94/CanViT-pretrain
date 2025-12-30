@@ -1,6 +1,7 @@
 """Main training loop."""
 
 import logging
+import signal
 import traceback
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -40,11 +41,19 @@ from .model import compile_model, compile_teacher, create_model, load_student_ba
 from .norm import PositionAwareNorm  # noqa: E402
 from .probe import load_probe  # noqa: E402
 from .scheduler import warmup_cosine_scheduler  # noqa: E402
-from .step import training_step  # noqa: E402
-from .viewpoint import ViewpointType  # noqa: E402
+from .step import NormalizedTargets, training_step  # noqa: E402
 from .viz import validate  # noqa: E402
 
 log = logging.getLogger(__name__)
+
+# Signal-triggered checkpoint
+_checkpoint_requested = False
+
+
+def _handle_sigusr1(signum: int, frame: object) -> None:
+    global _checkpoint_requested
+    _checkpoint_requested = True
+    log.info("SIGUSR1 received - will save checkpoint after current step")
 
 
 def log_spaced_steps(n: int, max_step: int, K: float | None = None) -> frozenset[int]:
@@ -77,23 +86,36 @@ def grad_norms_by_module(model: nn.Module, depth: int = 1) -> dict[str, float]:
 def warmup_normalizer(
     scene_norm: PositionAwareNorm,
     cls_norm: PositionAwareNorm,
+    glimpse_patches_norm: PositionAwareNorm | None,
+    glimpse_cls_norm: PositionAwareNorm | None,
     train_loader: InfiniteLoader,
     compute_raw_targets: Callable[[Tensor, int], NormFeatures],
     warmup_images: int,
     scene_size: int,
+    glimpse_size: int,
     device: torch.device,
 ) -> None:
-    """Warm up normalizer running stats."""
+    """Warm up normalizer running stats (scene, and optionally glimpse)."""
     scene_norm.train()
     cls_norm.train()
+    if glimpse_patches_norm is not None:
+        glimpse_patches_norm.train()
+    if glimpse_cls_norm is not None:
+        glimpse_cls_norm.train()
     images_seen = 0
     pbar = tqdm(total=warmup_images, desc="Warmup normalizers", unit="img", leave=False)
     while images_seen < warmup_images:
         batch = train_loader.next_batch().to(device)
         with torch.no_grad():
+            # Scene normalizers (full image at scene size)
             feats = compute_raw_targets(batch, scene_size)
             scene_norm(feats.patches)
             cls_norm(feats.cls.unsqueeze(1))
+            # Glimpse normalizers (same images at glimpse size)
+            if glimpse_patches_norm is not None and glimpse_cls_norm is not None:
+                glimpse_feats = compute_raw_targets(batch, glimpse_size)
+                glimpse_patches_norm(glimpse_feats.patches)
+                glimpse_cls_norm(glimpse_feats.cls.unsqueeze(1))
         images_seen += batch.shape[0]
         pbar.update(batch.shape[0])
     pbar.close()
@@ -102,6 +124,7 @@ def warmup_normalizer(
 
 def train(cfg: Config, trial: optuna.Trial) -> float:
     """Train with stochastic reset. Returns best val_loss."""
+    signal.signal(signal.SIGUSR1, _handle_sigusr1)
     log.info(f"Starting trial {trial.number}")
     log.info(f"Device: {cfg.device}")
 
@@ -198,33 +221,39 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             state_dict = {k: v for k, v in state_dict.items() if not k.startswith("policy.")}
             n_removed = n_before - len(state_dict)
             log.info(f"Reset policy: removed {n_removed} policy keys, will use fresh init")
+
+        # Filter out shape-incompatible weights (e.g., when changing canvas_num_heads)
+        model_state = model.state_dict()
+        mismatched_params = 0
+        for k, v in list(state_dict.items()):
+            if k in model_state and v.shape != model_state[k].shape:
+                mismatched_params += model_state[k].numel()
+                del state_dict[k]
+        if mismatched_params > 0:
+            total_params = sum(p.numel() for p in model.parameters())
+            pct = 100 * mismatched_params / total_params
+            log.warning(f"Shape mismatch: {mismatched_params:,} params ({pct:.1f}%) freshly initialized")
+
         incompat = model.load_state_dict(state_dict, strict=False)
         if incompat.missing_keys:
             log.warning(f"Checkpoint missing keys (freshly initialized): {incompat.missing_keys}")
         if incompat.unexpected_keys:
             log.warning(f"Checkpoint has unexpected keys (ignored): {incompat.unexpected_keys}")
 
-        # Load optimizer state (unless reset requested)
-        if cfg.reset_optimizer:
-            log.info("Reset optimizer: using fresh optimizer state")
+        # Load optimizer + scheduler state (tied together)
+        if cfg.reset_opt_and_sched:
+            log.info("Reset optimizer+scheduler: using fresh state")
         else:
             opt_state = ckpt_data.get("optimizer_state")
-            if opt_state is not None:
-                optimizer.load_state_dict(opt_state)
-                log.info("Loaded optimizer state from checkpoint")
-            else:
-                log.warning("Checkpoint has no optimizer state, using fresh init")
-
-        # Load scheduler state (unless reset requested)
-        if cfg.reset_scheduler:
-            log.info("Reset scheduler: using fresh LR schedule")
-        else:
             sched_state = ckpt_data.get("scheduler_state")
-            if sched_state is not None:
+            if opt_state is not None and sched_state is not None:
+                optimizer.load_state_dict(opt_state)
                 scheduler.load_state_dict(sched_state)
-                log.info(f"Loaded scheduler state from checkpoint (step={sched_state.get('last_epoch', '?')})")
+                log.info(f"Loaded optimizer+scheduler from checkpoint (step={sched_state.get('last_epoch', '?')})")
+            elif opt_state is not None or sched_state is not None:
+                log.warning("Checkpoint has only one of optimizer/scheduler - using fresh init for both")
             else:
-                log.warning("Checkpoint has no scheduler state, using fresh init")
+                log.warning("Checkpoint has no optimizer/scheduler state, using fresh init")
 
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}.pt"
 
@@ -244,6 +273,18 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         n_tokens=1, embed_dim=teacher.embed_dim, grid_size=1, momentum=cfg.norm_momentum,
     ).to(cfg.device)
 
+    # Glimpse normalizers (only if glimpse losses enabled)
+    glimpse_patches_norm: PositionAwareNorm | None = None
+    glimpse_cls_norm: PositionAwareNorm | None = None
+    if cfg.enable_glimpse_losses:
+        glimpse_G = glimpse_size_px // patch_size
+        glimpse_patches_norm = PositionAwareNorm(
+            n_tokens=glimpse_G * glimpse_G, embed_dim=teacher.embed_dim, grid_size=glimpse_G, momentum=cfg.norm_momentum,
+        ).to(cfg.device)
+        glimpse_cls_norm = PositionAwareNorm(
+            n_tokens=1, embed_dim=teacher.embed_dim, grid_size=1, momentum=cfg.norm_momentum,
+        ).to(cfg.device)
+
     norm_loaded = False
     if ckpt_data is not None and not cfg.reset_normalizer:
         scene_norm_state = ckpt_data.get("scene_norm_state")
@@ -251,8 +292,21 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         if scene_norm_state is not None and cls_norm_state is not None:
             scene_norm.load_state_dict(scene_norm_state)
             cls_norm.load_state_dict(cls_norm_state)
-            log.info("Loaded normalizer states from checkpoint")
             norm_loaded = True
+            # Load glimpse normalizers if available and enabled
+            if cfg.enable_glimpse_losses:
+                assert glimpse_patches_norm is not None and glimpse_cls_norm is not None
+                glimpse_patches_norm_state = ckpt_data.get("glimpse_patches_norm_state")
+                glimpse_cls_norm_state = ckpt_data.get("glimpse_cls_norm_state")
+                if glimpse_patches_norm_state is not None and glimpse_cls_norm_state is not None:
+                    glimpse_patches_norm.load_state_dict(glimpse_patches_norm_state)
+                    glimpse_cls_norm.load_state_dict(glimpse_cls_norm_state)
+                    log.info("Loaded all normalizer states from checkpoint")
+                else:
+                    log.info("Loaded scene/cls normalizers, glimpse normalizers will warm up")
+                    norm_loaded = False  # Need to warm up glimpse normalizers
+            else:
+                log.info("Loaded scene/cls normalizer states from checkpoint")
         else:
             log.warning("Checkpoint has no normalizer states")
     elif cfg.reset_normalizer:
@@ -260,33 +314,44 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     if not norm_loaded:
         log.info(f"Warming up normalizers ({cfg.norm_warmup_images} images)...")
-        warmup_normalizer(scene_norm, cls_norm, train_loader, compute_raw_targets, cfg.norm_warmup_images, scene_size, cfg.device)
+        warmup_normalizer(
+            scene_norm, cls_norm, glimpse_patches_norm, glimpse_cls_norm,
+            train_loader, compute_raw_targets, cfg.norm_warmup_images,
+            scene_size, glimpse_size_px, cfg.device,
+        )
 
-    # Build viewpoint type lists for branching
-    t0_types = [ViewpointType.RANDOM, ViewpointType.FULL]
-    t1_types = [ViewpointType.RANDOM, ViewpointType.FULL]
-    if cfg.enable_policy:
-        t1_types.append(ViewpointType.POLICY)
-    log.info(f"Training branches: t0={[t.name for t in t0_types]} × t1={[t.name for t in t1_types]}")
+    log.info(f"Training: {cfg.n_branches} branches, min_glimpses={cfg.min_glimpses}, continue_prob={cfg.continue_prob}")
 
     # EMA tracking for all metrics
     ema = EMATracker(alpha=cfg.ema_alpha)
 
+    def compute_normalized_targets(
+        images: Tensor, size: int, patches_norm: PositionAwareNorm, cls_norm_: PositionAwareNorm
+    ) -> NormalizedTargets:
+        """Compute normalized teacher targets."""
+        with torch.no_grad():
+            feats = compute_raw_targets(images, size)
+            patches = patches_norm(feats.patches)
+            cls = cls_norm_(feats.cls.unsqueeze(1)).squeeze(1)
+        return NormalizedTargets(patches=patches, cls=cls)
+
     def load_train_batch() -> TrainBatch:
-        """Load training batch and compute normalized teacher targets."""
+        """Load training batch and compute normalized scene targets."""
         images, labels = train_loader.next_batch_with_labels()
         images = images.to(cfg.device)
         labels = labels.to(cfg.device)
-        with torch.no_grad():
-            feats = compute_raw_targets(images, scene_size)
-            scene_target = scene_norm(feats.patches)
-            cls_target = cls_norm(feats.cls.unsqueeze(1)).squeeze(1)
-        return TrainBatch(
-            images=images,
-            labels=labels,
-            scene_target=scene_target,
-            cls_target=cls_target,
-        )
+        targets = compute_normalized_targets(images, scene_size, scene_norm, cls_norm)
+        return TrainBatch(images=images, labels=labels, scene_target=targets.patches, cls_target=targets.cls)
+
+    # Glimpse targets callable (only if glimpse losses enabled)
+    if cfg.enable_glimpse_losses:
+        assert glimpse_patches_norm is not None and glimpse_cls_norm is not None
+        _gpn, _gcn = glimpse_patches_norm, glimpse_cls_norm
+        def _compute_glimpse_targets(glimpse: Tensor) -> NormalizedTargets:
+            return compute_normalized_targets(glimpse, glimpse_size_px, _gpn, _gcn)
+        compute_glimpse_targets_fn: Callable[[Tensor], NormalizedTargets] | None = _compute_glimpse_targets
+    else:
+        compute_glimpse_targets_fn = None
 
     # Step semantics: step S = model state after S gradient updates
     # step=0: before any gradient (initial model)
@@ -334,7 +399,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 log.error(f"!!! VALIDATION FAILED at step {step} !!!\n{traceback.format_exc()}")
 
         # === CHECKPOINT PHASE ===
-        if step % cfg.ckpt_every == 0:
+        global _checkpoint_requested
+        if step % cfg.ckpt_every == 0 or _checkpoint_requested:
+            if _checkpoint_requested:
+                log.info(f"Saving signal-triggered checkpoint at step {step}")
+                _checkpoint_requested = False
             ema_loss = ema.get("total_loss")
             save_checkpoint(
                 ckpt_path, model, cfg.student_model,
@@ -342,11 +411,17 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 comet_id=exp.get_key(),
                 scene_norm_state=scene_norm.state_dict(),
                 cls_norm_state=cls_norm.state_dict(),
+                glimpse_patches_norm_state=glimpse_patches_norm.state_dict() if glimpse_patches_norm else None,
+                glimpse_cls_norm_state=glimpse_cls_norm.state_dict() if glimpse_cls_norm else None,
                 optimizer_state=optimizer.state_dict(),
                 scheduler_state=scheduler.state_dict(),
             )
             exp.log_metric("norm/scene_mean_norm", scene_norm.mean.norm().item(), step=step)
             exp.log_metric("norm/cls_mean_norm", cls_norm.mean.norm().item(), step=step)
+            if glimpse_patches_norm is not None:
+                exp.log_metric("norm/glimpse_patches_mean_norm", glimpse_patches_norm.mean.norm().item(), step=step)
+            if glimpse_cls_norm is not None:
+                exp.log_metric("norm/glimpse_cls_mean_norm", glimpse_cls_norm.mean.norm().item(), step=step)
 
         # === TRAINING PHASE (only for step < n_steps) ===
         if step < cfg.n_steps:
@@ -355,40 +430,45 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
             optimizer.zero_grad()
 
+            # Warmup continue_prob: 0 → peak over warmup steps
+            if cfg.continue_prob_warmup_steps > 0:
+                continue_prob = cfg.continue_prob * min(step / cfg.continue_prob_warmup_steps, 1.0)
+            else:
+                continue_prob = cfg.continue_prob
+
             step_metrics = training_step(
                 model=model,
                 images=batch.images,
                 scene_target=batch.scene_target,
                 cls_target=batch.cls_target,
+                compute_glimpse_targets=compute_glimpse_targets_fn,
                 glimpse_size_px=glimpse_size_px,
                 canvas_grid_size=G,
-                t0_types=t0_types,
-                t1_types=t1_types,
+                n_branches=cfg.n_branches,
+                min_glimpses=cfg.min_glimpses,
+                continue_prob=continue_prob,
                 min_viewpoint_scale=cfg.min_viewpoint_scale,
-                compute_gram=cfg.gram_loss_weight > 0,
-                gram_loss_weight=cfg.gram_loss_weight,
                 amp_ctx=amp_ctx,
+                use_checkpointing=cfg.use_checkpointing,
             )
 
             # Clip policy grads first (if present), then whole model
-            policy_grad_norm_t = None
             if model.policy is not None:
-                policy_grad_norm_t = torch.nn.utils.clip_grad_norm_(
-                    model.policy.parameters(), cfg.policy_grad_clip
-                )
+                torch.nn.utils.clip_grad_norm_(model.policy.parameters(), cfg.policy_grad_clip)
             grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
             optimizer.step()
             scheduler.step()
 
             # Update EMA for all metrics
             ema.update("total_loss", step_metrics.total_loss)
+            ema.update("n_glimpses", torch.tensor(step_metrics.n_glimpses, dtype=torch.float32))
             for (t0, t1), m in step_metrics.branches.items():
                 prefix = f"{t0.name.lower()}_{t1.name.lower()}"
                 ema.update(f"{prefix}/loss", m.loss)
                 ema.update(f"{prefix}/scene_loss", m.scene_loss)
-                ema.update(f"{prefix}/cls_loss", m.cls_loss)
-                if m.gram_loss is not None:
-                    ema.update(f"{prefix}/gram_loss", m.gram_loss)
+                ema.update(f"{prefix}/scene_cls_loss", m.scene_cls_loss)
+                ema.update(f"{prefix}/glimpse_patches_loss", m.glimpse_patches_loss)
+                ema.update(f"{prefix}/glimpse_cls_loss", m.glimpse_cls_loss)
                 ema.update(f"{prefix}/scene_cos", m.scene_cos)
                 ema.update(f"{prefix}/cls_cos", m.cls_cos)
 
@@ -400,6 +480,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 metrics = {f"train/{k}": v.item() for k, v in ema.items()}
                 metrics["train/lr"] = lr
                 metrics["train/grad_norm"] = grad_norm
+                metrics["train/continue_prob"] = continue_prob
                 exp.log_metrics(metrics, step=step)
 
                 ema_loss = ema.get("total_loss")
@@ -429,6 +510,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             comet_id=exp.get_key(),
             scene_norm_state=scene_norm.state_dict(),
             cls_norm_state=cls_norm.state_dict(),
+            glimpse_patches_norm_state=glimpse_patches_norm.state_dict() if glimpse_patches_norm else None,
+            glimpse_cls_norm_state=glimpse_cls_norm.state_dict() if glimpse_cls_norm else None,
             optimizer_state=optimizer.state_dict(),
             scheduler_state=scheduler.state_dict(),
         )

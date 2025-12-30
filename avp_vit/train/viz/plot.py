@@ -153,12 +153,16 @@ def plot_multistep_pca(
     assert len(names) == n_views
     if show_locals:
         assert locals_avp is not None and len(locals_avp) == n_views
-        assert locals_teacher is not None and len(locals_teacher) == n_views
+        # locals_teacher is optional - if None, only show locals_avp
 
     show_hidden = hidden_spatials is not None
     if show_hidden:
         assert len(hidden_spatials) == n_views
         assert initial_hidden_spatial is not None
+
+    show_teacher_locals = show_locals and locals_teacher is not None
+    if show_teacher_locals:
+        assert locals_teacher is not None and len(locals_teacher) == n_views
 
     show_cropped = show_locals and locals_teacher_cropped is not None
     if show_cropped:
@@ -222,9 +226,11 @@ def plot_multistep_pca(
     if show_hidden:
         c += 1
     C_LOCAL_AVP = c if show_locals else None
-    C_LOCAL_TEACHER = (c + 1) if show_locals else None
     if show_locals:
-        c += 2
+        c += 1
+    C_LOCAL_TEACHER = c if show_teacher_locals else None
+    if show_teacher_locals:
+        c += 1
     C_CROPPED_TEACHER = c if show_cropped else None
     if show_cropped:
         c += 1
@@ -268,8 +274,10 @@ def plot_multistep_pca(
         axes[row, C_HIDDEN].axis("off")
 
     if show_locals:
-        assert C_LOCAL_AVP is not None and C_LOCAL_TEACHER is not None
+        assert C_LOCAL_AVP is not None
         axes[row, C_LOCAL_AVP].axis("off")
+    if show_teacher_locals:
+        assert C_LOCAL_TEACHER is not None
         axes[row, C_LOCAL_TEACHER].axis("off")
 
     if show_cropped:
@@ -309,11 +317,13 @@ def plot_multistep_pca(
         local_teacher_rgb = None
         pca_cropped: PCA | None = None
         if show_locals:
-            assert locals_avp is not None and locals_teacher is not None
-            pca_local_teacher = fit_pca(locals_teacher[t])
-            local_teacher_rgb = pca_rgb(pca_local_teacher, locals_teacher[t], G, G)
+            assert locals_avp is not None
             pca_local_avp = fit_pca(locals_avp[t])
             local_avp_rgb = pca_rgb(pca_local_avp, locals_avp[t], G, G)
+        if show_teacher_locals:
+            assert locals_teacher is not None
+            pca_local_teacher = fit_pca(locals_teacher[t])
+            local_teacher_rgb = pca_rgb(pca_local_teacher, locals_teacher[t], G, G)
             if show_cropped:
                 assert locals_teacher_cropped is not None
                 pca_cropped = fit_pca(locals_teacher_cropped[t])
@@ -379,13 +389,14 @@ def plot_multistep_pca(
             axes[row, C_HIDDEN].axis("off")
 
         if show_locals:
-            assert C_LOCAL_AVP is not None and C_LOCAL_TEACHER is not None
-            assert local_avp_rgb is not None and local_teacher_rgb is not None
+            assert C_LOCAL_AVP is not None and local_avp_rgb is not None
             axes[row, C_LOCAL_AVP].imshow(local_avp_rgb)
             if t == 0:
-                axes[row, C_LOCAL_AVP].set_title("Local AVP")
+                axes[row, C_LOCAL_AVP].set_title("Local Stream")
             axes[row, C_LOCAL_AVP].axis("off")
 
+        if show_teacher_locals:
+            assert C_LOCAL_TEACHER is not None and local_teacher_rgb is not None
             axes[row, C_LOCAL_TEACHER].imshow(local_teacher_rgb)
             axes[row, C_LOCAL_TEACHER].set_title("Local Teacher" if t == 0 else "")
             axes[row, C_LOCAL_TEACHER].axis("off")

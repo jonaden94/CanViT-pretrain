@@ -85,6 +85,13 @@ def _log_pca(
     glimpses = [vs.glimpse for vs in acc.viz_samples]
     canvas_spatials = [vs.canvas_spatial for vs in acc.viz_samples]
 
+    # Extract local stream patches if available (for show_locals)
+    locals_avp_raw = [vs.local_patches for vs in acc.viz_samples]
+    has_locals = all(lp is not None for lp in locals_avp_raw)
+    locals_avp: list[np.ndarray] | None = None
+    if has_locals:
+        locals_avp = [lp for lp in locals_avp_raw if lp is not None]
+
     fig_pca = plot_multistep_pca(
         full_img=full_img,
         teacher=teacher_np,
@@ -95,8 +102,10 @@ def _log_pca(
         scene_grid_size=canvas_grid_size,
         glimpse_grid_size=glimpse_grid_size,
         initial_scene=acc.initial_scene,
+        locals_avp=locals_avp,
         hidden_spatials=canvas_spatials if canvas_spatials[0] is not None else None,
         initial_hidden_spatial=acc.initial_canvas_spatial,
+        show_locals=has_locals,
         timestep_predictions=acc.pca_predictions if acc.pca_predictions else None,
     )
     log_figure(exp, fig_pca, f"{prefix}/pca", step)
@@ -230,10 +239,10 @@ def _validate_policy_rollout(
             glimpse_size_px=glimpse_size_px,
             cls=cls,
         )
-        canvas, cls = out.canvas, out.cls
+        canvas, cls = out.canvas, out.global_cls
 
         # Compute IN1K accuracy
-        predicted_cls = model.predict_teacher_cls(cls, canvas)
+        predicted_cls = model.predict_scene_teacher_cls(cls, canvas)
         cls_raw = cls_normalizer.denormalize(predicted_cls)
         logits = probe(cls_raw)
         accs.append(compute_in1k_top1(logits, labels))
@@ -338,7 +347,7 @@ def validate(
 
     B = images.shape[0]
     viewpoints = make_eval_viewpoints(B, images.device, n_viewpoints=n_eval_viewpoints)
-    has_cls = model.cls_proj is not None
+    has_cls = model.scene_cls_proj is not None
     has_probe = probe is not None and labels is not None and labels_are_in1k(labels)
 
     scene_was_training = scene_normalizer.training
@@ -387,7 +396,7 @@ def validate(
             ) -> ValAccumulator:
                 predicted_scene = model.predict_teacher_scene(out.canvas)
                 predicted_cls = (
-                    model.predict_teacher_cls(out.cls, out.canvas) if has_cls else None
+                    model.predict_scene_teacher_cls(out.global_cls, out.canvas) if has_cls else None
                 )
 
                 scene_cos = F.cosine_similarity(predicted_scene, target, dim=-1).mean().item()
