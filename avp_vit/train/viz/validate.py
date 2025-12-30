@@ -350,8 +350,10 @@ def validate(
     has_cls = model.scene_cls_proj is not None
     has_probe = probe is not None and labels is not None and labels_are_in1k(labels)
 
+    model_was_training = model.training
     scene_was_training = scene_normalizer.training
     cls_was_training = cls_normalizer.training
+    model.eval()
     scene_normalizer.eval()
     cls_normalizer.eval()
 
@@ -535,6 +537,8 @@ def validate(
 
             return final_cos_sim
     finally:
+        if model_was_training:
+            model.train()
         if scene_was_training:
             scene_normalizer.train()
         if cls_was_training:

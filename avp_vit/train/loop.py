@@ -357,6 +357,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     # step=0: before any gradient (initial model)
     # step=n_steps: after all n_steps gradient updates (final model)
     log.info("Starting training loop...")
+    model.train()  # Explicit: validate() restores, but be clear about initial state
     pbar = tqdm(range(cfg.n_steps + 1), desc="Training", unit="step")
 
     for step in pbar:
