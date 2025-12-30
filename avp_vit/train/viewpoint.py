@@ -142,45 +142,57 @@ def random_viewpoint(
 def make_eval_viewpoints(
     B: int, device: torch.device, n_viewpoints: int = 10
 ) -> list[Viewpoint]:
-    """Generate quadtree viewpoints with random ordering per batch item.
+    """Generate quadtree viewpoints with random ordering WITHIN each level, per batch item.
 
-    Quadtree structure (deterministic):
-    - Level 0: Full scene (1 viewpoint, scale=1)
-    - Level 1: 4 quadrants (scale=0.5)
-    - Level 2: 16 sub-quadrants (scale=0.25)
+    Quadtree structure:
+    - Level 0: Full scene (1 viewpoint, scale=1) - always first
+    - Level 1: 4 quadrants (scale=0.5) - shuffled per batch item
+    - Level 2: 16 sub-quadrants (scale=0.25) - shuffled per batch item
     - Level L: 4^L viewpoints (scale=0.5^L)
 
-    Each batch item gets a different random permutation of viewpoints.
+    Each batch item gets the same level ordering but different shuffle within levels.
     """
     assert n_viewpoints >= 1
 
-    # Build quadtree nodes (deterministic structure)
-    all_nodes: list[tuple[float, float, float]] = [(0.0, 0.0, 1.0)]
-    while len(all_nodes) < n_viewpoints:
-        # Expand from last complete level
-        parent_scale = all_nodes[-1][2]
-        child_scale = parent_scale / 2
-        new_nodes: list[tuple[float, float, float]] = []
-        for cy, cx, s in all_nodes:
-            if s == parent_scale:
-                for qy, qx in [(0, 0), (0, 1), (1, 0), (1, 1)]:
-                    new_cy = cy + (qy - 0.5) * s
-                    new_cx = cx + (qx - 0.5) * s
-                    new_nodes.append((new_cy, new_cx, child_scale))
-        all_nodes.extend(new_nodes)
+    # Build levels of quadtree nodes
+    levels: list[list[tuple[float, float, float]]] = [[(0.0, 0.0, 1.0)]]
+    while sum(len(lvl) for lvl in levels) < n_viewpoints:
+        parent_level = levels[-1]
+        child_level: list[tuple[float, float, float]] = []
+        for parent_cy, parent_cx, parent_scale in parent_level:
+            child_scale = parent_scale / 2
+            for qy, qx in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+                child_cy = parent_cy + (qy - 0.5) * parent_scale
+                child_cx = parent_cx + (qx - 0.5) * parent_scale
+                child_level.append((child_cy, child_cx, child_scale))
+        levels.append(child_level)
 
-    # Tensor of all nodes: (N, 3) for (cy, cx, scale)
-    nodes = torch.tensor(all_nodes[:n_viewpoints], device=device, dtype=torch.float32)
-
-    # Random permutation per batch item: (B, n_viewpoints)
-    perms = torch.stack([torch.randperm(n_viewpoints, device=device) for _ in range(B)])
-
-    # Build viewpoints: at timestep t, each batch item sees a different node
+    # Build viewpoints with per-batch-item shuffling within each level
     result: list[Viewpoint] = []
-    for t in range(n_viewpoints):
-        indices = perms[:, t]  # (B,) - which node each batch item sees at time t
-        centers = nodes[indices, :2]  # (B, 2)
-        scales = nodes[indices, 2]  # (B,)
-        result.append(Viewpoint(name=f"t{t}", centers=centers, scales=scales))
+    for level_idx, level in enumerate(levels):
+        level_tensor = torch.tensor(level, device=device, dtype=torch.float32)  # (L, 3)
+        L = len(level)
 
-    return result
+        # Random permutation per batch item for this level
+        if L == 1:
+            # Only one node in level (e.g., full scene) - no shuffle needed
+            perms = torch.zeros(B, 1, dtype=torch.long, device=device)
+        else:
+            perms = torch.stack([torch.randperm(L, device=device) for _ in range(B)])  # (B, L)
+
+        for i in range(L):
+            if len(result) >= n_viewpoints:
+                break
+            indices = perms[:, i]  # (B,) - which node in this level each batch item sees
+            centers = level_tensor[indices, :2]  # (B, 2)
+            scales = level_tensor[indices, 2]  # (B,)
+            if level_idx == 0:
+                name = "full"
+            else:
+                name = f"L{level_idx}_{i}"
+            result.append(Viewpoint(name=name, centers=centers, scales=scales))
+
+        if len(result) >= n_viewpoints:
+            break
+
+    return result[:n_viewpoints]

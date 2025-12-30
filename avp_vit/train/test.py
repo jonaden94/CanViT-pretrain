@@ -165,14 +165,20 @@ class TestMakeEvalViewpoints:
 
     def test_different_ordering_per_batch_item(self) -> None:
         vps = make_eval_viewpoints(4, torch.device("cpu"), n_viewpoints=5)
-        # Different batch items should see different viewpoints at same timestep
-        # (with high probability - not all same)
+        # t0 is always full view (same for all batch items)
+        assert vps[0].name == "full"
+        assert (vps[0].scales == 1.0).all()
+        assert (vps[0].centers == 0.0).all()
+        # t1-t4 are quadrants (scale=0.5) but different order per batch item
+        for t in range(1, 5):
+            assert (vps[t].scales == 0.5).all()
+        # Different batch items should see different quadrant ordering
         all_same = all(
             torch.allclose(vps[t].centers[0], vps[t].centers[i])
-            for t in range(5)
+            for t in range(1, 5)
             for i in range(1, 4)
         )
-        assert not all_same, "All batch items have same viewpoints (should be random)"
+        assert not all_same, "All batch items have same quadrant order (should be random)"
 
 
 class TestPixelBox:
