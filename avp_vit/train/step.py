@@ -13,7 +13,7 @@ from torch.utils.checkpoint import checkpoint
 from avp_vit import ActiveCanViT, GlimpseOutput
 from canvit import Viewpoint
 
-from .viewpoint import Viewpoint as TrainViewpoint, ViewpointType
+from .viewpoint import Viewpoint as NamedViewpoint, ViewpointType
 
 
 class NormalizedTargets(NamedTuple):
@@ -131,10 +131,10 @@ def training_step(
 
     def make_vp(vp_type: ViewpointType, vpe: Tensor | None) -> Viewpoint:
         if vp_type == ViewpointType.RANDOM:
-            v = TrainViewpoint.random(batch_size=B, device=device, min_scale=min_viewpoint_scale)
+            v = NamedViewpoint.random(batch_size=B, device=device, min_scale=min_viewpoint_scale)
             return Viewpoint(centers=v.centers, scales=v.scales)
         if vp_type == ViewpointType.FULL:
-            v = TrainViewpoint.full_scene(batch_size=B, device=device)
+            v = NamedViewpoint.full_scene(batch_size=B, device=device)
             return Viewpoint(centers=v.centers, scales=v.scales)
         assert model.policy is not None and vpe is not None
         p = model.policy(vpe)

@@ -21,7 +21,7 @@ from avp_vit.checkpoint import load as load_ckpt, load_model
 from avp_vit.train.data import imagenet_normalize
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.probe import load_probe
-from avp_vit.train.viewpoint import Viewpoint as TorchViewpoint
+from avp_vit.train.viewpoint import Viewpoint as NamedViewpoint
 from avp_vit.train.viz import fit_pca, imagenet_denormalize
 from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit.hub import create_backbone
@@ -226,7 +226,7 @@ class GPUWorker:
             assert self._model is not None and self._canvas is not None and self._image is not None
 
             # Convert to torch viewpoint
-            torch_vp = TorchViewpoint(
+            named_vp = NamedViewpoint(
                 name=vp.name,
                 centers=torch.tensor([[vp.cy, vp.cx]], device=self._device),
                 scales=torch.tensor([vp.scale], device=self._device),
@@ -238,7 +238,7 @@ class GPUWorker:
             with torch.no_grad():
                 out = self._model.forward_step(
                     image=self._image, canvas=self._canvas, cls=self._cls,
-                    viewpoint=torch_vp, glimpse_size_px=glimpse_px,
+                    viewpoint=named_vp, glimpse_size_px=glimpse_px,
                 )
             self._sync()
             t_forward = time.perf_counter()
