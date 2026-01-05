@@ -1,14 +1,35 @@
 """Cross-attention FLOPs comparison: Canvas Attention vs Regular Cross-Attention."""
 
+import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import tyro
 from canvit import flops
+from canvit.hub import create_backbone
 from rich.console import Console
 from rich.table import Table
 
 if TYPE_CHECKING:
     from canvit import CanViT
     from canvit.backbone.dinov3 import DINOv3Backbone
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Config:
+    """FLOPs analysis configuration."""
+
+    student: str = "dinov3_vitb16"
+    """Student backbone (e.g. dinov3_vits16, dinov3_vitb16, dinov3_vitl16)."""
+    teacher: str = "dinov3_vitb16"
+    """Teacher backbone for scene head output dim."""
+    glimpse_grids: tuple[int, ...] = (8,)
+    """Glimpse grid sizes to analyze."""
+    canvas_grids: tuple[int, ...] = (16, 32, 64, 128, 256, 512)
+    """Canvas grid sizes to analyze."""
 
 
 # =============================================================================
@@ -106,25 +127,27 @@ def fmt(flops: int) -> str:
 # =============================================================================
 
 
-def main() -> None:
+def main(cfg: Config) -> None:
     from canvit import CanViT, CanViTConfig
-    from canvit.backbone.dinov3 import DINOv3Backbone
-    from dinov3.hub.backbones import (
-        dinov3_vitb16,  # pyright: ignore[reportAttributeAccessIssue]
-    )
+
+    backbone = create_backbone(cfg.student, pretrained=False)
+    teacher_backbone = create_backbone(cfg.teacher, pretrained=False)
+    teacher_dim = teacher_backbone.embed_dim
+
+    log.info("=== FLOPs Analysis Configuration ===")
+    log.info(f"  Student: {cfg.student} (dim={backbone.embed_dim})")
+    log.info(f"  Teacher: {cfg.teacher} (dim={teacher_dim})")
+    log.info("")
 
     console = Console()
+    model = CanViT(backbone=backbone, cfg=CanViTConfig())
 
-    backbones = [("ViT-B", DINOv3Backbone(dinov3_vitb16(pretrained=False)))]
-
-    for name, backbone in backbones:
-        model = CanViT(backbone=backbone, cfg=CanViTConfig())
-        _print_tables(console, name, backbone, model)
-        console.print()
+    _print_tables(console, cfg, backbone, model, teacher_dim)
+    console.print()
 
 
 def _print_tables(
-    console: Console, name: str, backbone: "DINOv3Backbone", model: "CanViT"
+    console: Console, cfg: Config, backbone: "DINOv3Backbone", model: "CanViT", teacher_dim: int
 ) -> None:
     local_dim = model.local_dim
     canvas_dim = model.canvas_dim
@@ -135,10 +158,7 @@ def _print_tables(
     n_adapters = len(model.read_after_blocks)
     ffn_ratio = backbone.ffn_ratio
 
-    glimpse_grids = [8]
-    canvas_grids = [16, 32, 64, 128, 256, 512]
-
-    console.rule(f"[bold]{name}[/bold] (local={local_dim}, canvas={canvas_dim})")
+    console.rule(f"[bold]{cfg.student}[/bold] (local={local_dim}, canvas={canvas_dim})")
 
     # Table 1: Cross-Attention FLOPs per Adapter
     table = Table(title="Cross-Attention FLOPs per Adapter (read + write)")
@@ -149,8 +169,8 @@ def _print_tables(
     table.add_column("Attention", style="bold")
     table.add_column("Total", justify="right")
 
-    for g in glimpse_grids:
-        for c in canvas_grids:
+    for g in cfg.glimpse_grids:
+        for c in cfg.canvas_grids:
             n_local = n_backbone_prefix + g * g
             n_canvas = n_canvas_registers + c * c
             canvas_px = c * patch_size
@@ -196,7 +216,6 @@ def _print_tables(
     console.print()
 
     # Table 2: Full Model FLOPs per Glimpse
-    teacher_dim = 768  # ViT-B teacher
     policy_flops = _policy_head_flops(local_dim)
 
     table2 = Table(
@@ -211,7 +230,7 @@ def _print_tables(
     table2.add_column("ViT@Canvas", justify="right", style="dim")
     table2.add_column("Savings", justify="right", style="green")
 
-    for g in glimpse_grids:
+    for g in cfg.glimpse_grids:
         n_local = n_backbone_prefix + g * g
         n_patches = g * g
 
@@ -220,7 +239,7 @@ def _print_tables(
         blocks = n_blocks * flops.vit_block(n_local, local_dim, ffn_ratio)
         backbone_flops = patch_emb + blocks
 
-        for c in canvas_grids:
+        for c in cfg.canvas_grids:
             n_canvas = n_canvas_registers + c * c
             n_canvas_patches = c * c
 
@@ -268,4 +287,4 @@ def _print_tables(
 
 
 if __name__ == "__main__":
-    main()
+    main(tyro.cli(Config))
