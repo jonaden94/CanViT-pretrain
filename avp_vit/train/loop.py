@@ -320,7 +320,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             scene_size, glimpse_size_px, cfg.device,
         )
 
-    log.info(f"Training: {cfg.n_branches} branches, chunk_size={cfg.chunk_size}, continue_prob={cfg.continue_prob}")
+    log.info(f"Training: {cfg.n_full_start_branches} full + {cfg.n_random_start_branches} random branches, chunk_size={cfg.chunk_size}, continue_prob={cfg.continue_prob}")
 
     # EMA tracking for all metrics
     ema = EMATracker(alpha=cfg.ema_alpha)
@@ -445,7 +445,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 compute_glimpse_targets=compute_glimpse_targets_fn,
                 glimpse_size_px=glimpse_size_px,
                 canvas_grid_size=G,
-                n_branches=cfg.n_branches,
+                n_full_start_branches=cfg.n_full_start_branches,
+                n_random_start_branches=cfg.n_random_start_branches,
                 chunk_size=cfg.chunk_size,
                 continue_prob=continue_prob,
                 min_viewpoint_scale=cfg.min_viewpoint_scale,
@@ -463,8 +464,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             # Update EMA for all metrics
             ema.update("total_loss", step_metrics.total_loss)
             ema.update("n_glimpses", torch.tensor(step_metrics.n_glimpses, dtype=torch.float32))
-            for (t0, t1), m in step_metrics.branches.items():
-                prefix = f"{t0.name.lower()}_{t1.name.lower()}"
+            for prefix, m in [("full", step_metrics.full_start), ("random", step_metrics.random_start)]:
+                if m is None:
+                    continue
                 ema.update(f"{prefix}/loss", m.loss)
                 ema.update(f"{prefix}/scene_loss", m.scene_loss)
                 ema.update(f"{prefix}/scene_cls_loss", m.scene_cls_loss)

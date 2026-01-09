@@ -1,4 +1,4 @@
-"""Training step with truncated BPTT and balanced branches."""
+"""Training step with truncated BPTT and independent branches."""
 
 import random
 from contextlib import AbstractContextManager
@@ -35,7 +35,7 @@ class LossOutput(NamedTuple):
 
 
 class BranchMetrics(NamedTuple):
-    """Metrics for a (t0_type, t1_type) combination."""
+    """Metrics for a branch type."""
 
     loss: Tensor
     scene_loss: Tensor
@@ -50,7 +50,8 @@ class StepMetrics(NamedTuple):
     """Output from training_step."""
 
     total_loss: Tensor
-    branches: dict[tuple[ViewpointType, ViewpointType], BranchMetrics]
+    full_start: BranchMetrics | None  # None if n_full_start_branches=0
+    random_start: BranchMetrics | None  # None if n_random_start_branches=0
     n_glimpses: int  # trajectory length this step
 
 
@@ -58,12 +59,10 @@ class StepMetrics(NamedTuple):
 class ChunkState:
     """State for TBPTT chunk processing."""
 
-    state: RecurrentState  # recurrent model state (canvas, cls, local_registers)
-    vpe: Tensor | None  # VPE token (ephemeral, per-glimpse)
-    # Combined loss (mean of active components) - for backprop and metrics
+    state: RecurrentState
+    vpe: Tensor | None
     chunk_combined_loss: Tensor  # with grad
     total_combined_loss: Tensor  # detached
-    # Individual losses (for per-component metrics)
     total_scene_loss: Tensor
     total_scene_cls_loss: Tensor
     total_glimpse_patches_loss: Tensor
@@ -82,20 +81,21 @@ def training_step(
     compute_glimpse_targets: Callable[[Tensor], NormalizedTargets] | None,
     glimpse_size_px: int,
     canvas_grid_size: int,
-    n_branches: int,
+    n_full_start_branches: int,
+    n_random_start_branches: int,
     chunk_size: int,
     continue_prob: float,
     min_viewpoint_scale: float,
     amp_ctx: AbstractContextManager,
     use_checkpointing: bool,
 ) -> StepMetrics:
-    """Training with truncated BPTT.
+    """Training with truncated BPTT and independent branches.
 
-    Chunks of `chunk_size` steps: backward after each chunk, gradient flows within.
-    Trajectory length is stochastic: chunk_size * (1 + geometric(continue_prob)).
-    Memory is O(chunk_size) due to chunking.
+    Each branch is fully independent: own t0, own trajectory, own backward.
+    No retain_graph needed. Memory is O(chunk_size), not O(n_branches).
     """
-    assert n_branches >= 2 and n_branches % 2 == 0
+    n_branches = n_full_start_branches + n_random_start_branches
+    assert n_branches >= 1
     assert chunk_size >= 2
     assert 0.0 <= continue_prob <= 1.0
     device = images.device
@@ -103,28 +103,26 @@ def training_step(
 
     state_init = model.init_state(batch_size=B, canvas_grid_size=canvas_grid_size)
 
-    # Sample trajectory length in chunks (shared across branches)
+    # Sample trajectory length (shared across branches for this step)
     n_glimpses = chunk_size
     while random.random() < continue_prob:
         n_glimpses += chunk_size
 
-    vp_types = _assign_viewpoint_types(
-        n_glimpses=n_glimpses,
-        n_branches=n_branches,
-        has_policy=model.policy is not None,
-    )
+    has_policy = model.policy is not None
 
-    full_indices = [i for i in range(n_branches) if vp_types[0][i] == ViewpointType.FULL]
-    random_indices = [i for i in range(n_branches) if vp_types[0][i] == ViewpointType.RANDOM]
+    # t1_schedule[t-1][branch_idx] = viewpoint type for timestep t, branch branch_idx
+    t1_schedule: list[list[ViewpointType]] = []
+    for _ in range(1, n_glimpses):
+        if has_policy:
+            types = [ViewpointType.RANDOM] * (n_branches // 2) + [ViewpointType.POLICY] * (n_branches - n_branches // 2)
+        else:
+            types = [ViewpointType.RANDOM] * n_branches
+        random.shuffle(types)
+        t1_schedule.append(types)
 
-    # Metrics accumulators (per-branch)
-    traj_losses = torch.zeros(n_branches, device=device)
-    scene_losses = torch.zeros(n_branches, device=device)
-    scene_cls_losses = torch.zeros(n_branches, device=device)
-    glimpse_patches_losses = torch.zeros(n_branches, device=device)
-    glimpse_cls_losses = torch.zeros(n_branches, device=device)
-    scene_cos = torch.zeros(n_branches, device=device)
-    cls_cos = torch.zeros(n_branches, device=device)
+    # Metrics accumulators
+    full_metrics: list[tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]] = []
+    random_metrics: list[tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]] = []
 
     def make_vp(vp_type: ViewpointType, vpe: Tensor | None) -> Viewpoint:
         if vp_type == ViewpointType.RANDOM:
@@ -157,13 +155,11 @@ def training_step(
         )
 
     def compute_loss(out: GlimpseOutput) -> LossOutput:
-        # Scene losses (targets = full image features)
         scene_pred = model.predict_teacher_scene(out.state.canvas)
         cls_pred = model.predict_scene_teacher_cls(out.state.cls, out.state.canvas)
         scene_loss = F.mse_loss(scene_pred, scene_target)
         scene_cls_loss = F.mse_loss(cls_pred, cls_target)
 
-        # Glimpse losses (targets = glimpse features from teacher)
         if compute_glimpse_targets is not None:
             glimpse_targets = compute_glimpse_targets(out.glimpse)
             glimpse_patches_pred = model.predict_glimpse_teacher_patches(out.local_patches)
@@ -174,7 +170,6 @@ def training_step(
             glimpse_patches_loss = torch.zeros((), device=device)
             glimpse_cls_loss = torch.zeros((), device=device)
 
-        # Combined = mean of active losses (automatic normalization)
         active = [scene_loss, scene_cls_loss]
         if compute_glimpse_targets is not None:
             active.extend([glimpse_patches_loss, glimpse_cls_loss])
@@ -190,19 +185,17 @@ def training_step(
             cls_pred=cls_pred,
         )
 
-    def run_tbptt(
-        *,
-        branch_idx: int,
-        out_t0: GlimpseOutput,
-        loss_t0: LossOutput,
-        retain_first_chunk: bool,
-    ) -> None:
-        """TBPTT with 1-step lookahead: backward every 2 steps, gradient flows through both."""
-        L = loss_t0
+    def run_branch(t0_type: ViewpointType, branch_idx: int) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Run one independent branch. Returns metrics tuple."""
+        # t0 forward
+        with amp_ctx:
+            vp0 = make_vp(t0_type, None)
+            out = forward_glimpse(state=state_init, vp=vp0, use_ckpt=False)
+            L = compute_loss(out)
 
         chunk = ChunkState(
-            state=out_t0.state,
-            vpe=out_t0.vpe,
+            state=out.state,
+            vpe=out.vpe,
             chunk_combined_loss=L.combined.float(),
             total_combined_loss=L.combined.detach().float(),
             total_scene_loss=L.scene_loss.detach().float(),
@@ -215,17 +208,17 @@ def training_step(
         )
 
         for t in range(1, n_glimpses):
-            vp = make_vp(vp_types[t][branch_idx], chunk.vpe)
+            # t>=1: use pre-computed schedule (half RANDOM, half POLICY, shuffled)
+            vp_type = t1_schedule[t - 1][branch_idx]
+            vp = make_vp(vp_type, chunk.vpe)
 
             with amp_ctx:
                 use_ckpt = use_checkpointing and (t % 2 == 1)
                 out = forward_glimpse(state=chunk.state, vp=vp, use_ckpt=use_ckpt)
                 L = compute_loss(out)
 
-            # Accumulate combined (with grad for backprop)
             chunk.chunk_combined_loss = chunk.chunk_combined_loss + L.combined.float()
             chunk.total_combined_loss = chunk.total_combined_loss + L.combined.detach().float()
-            # Accumulate individual losses (detached, for per-component metrics)
             chunk.total_scene_loss = chunk.total_scene_loss + L.scene_loss.detach().float()
             chunk.total_scene_cls_loss = chunk.total_scene_cls_loss + L.scene_cls_loss.detach().float()
             chunk.total_glimpse_patches_loss = chunk.total_glimpse_patches_loss + L.glimpse_patches_loss.detach().float()
@@ -237,12 +230,9 @@ def training_step(
             is_last = (t == n_glimpses - 1)
 
             if is_chunk_end:
-                # Backward chunk: combined already averaged over active losses
                 loss_for_backward = chunk.chunk_combined_loss / n_glimpses / n_branches
-                retain = retain_first_chunk if t == 1 else False
-                loss_for_backward.backward(retain_graph=retain)
+                loss_for_backward.backward()  # no retain_graph
 
-                # Detach for next chunk
                 if not is_last:
                     chunk.state = RecurrentState(
                         canvas=out.state.canvas.detach(),
@@ -258,102 +248,45 @@ def training_step(
                 chunk.state = out.state
                 chunk.vpe = out.vpe
 
-        # Record metrics (no trailing step - n_glimpses is always a multiple of chunk_size)
-        traj_losses[branch_idx] = chunk.total_combined_loss / chunk.n_steps
-        scene_losses[branch_idx] = chunk.total_scene_loss / chunk.n_steps
-        scene_cls_losses[branch_idx] = chunk.total_scene_cls_loss / chunk.n_steps
-        glimpse_patches_losses[branch_idx] = chunk.total_glimpse_patches_loss / chunk.n_steps
-        glimpse_cls_losses[branch_idx] = chunk.total_glimpse_cls_loss / chunk.n_steps
-        scene_cos[branch_idx] = F.cosine_similarity(chunk.scene_pred, scene_target, dim=-1).mean()
-        cls_cos[branch_idx] = F.cosine_similarity(chunk.cls_pred, cls_target, dim=-1).mean()
+        # Return metrics
+        n = chunk.n_steps
+        return (
+            chunk.total_combined_loss / n,
+            chunk.total_scene_loss / n,
+            chunk.total_scene_cls_loss / n,
+            chunk.total_glimpse_patches_loss / n,
+            chunk.total_glimpse_cls_loss / n,
+            F.cosine_similarity(chunk.scene_pred, scene_target, dim=-1).mean(),
+            F.cosine_similarity(chunk.cls_pred, cls_target, dim=-1).mean(),
+        )
 
-    # === FULL branches: share t=0 ===
-    if full_indices:
-        with amp_ctx:
-            vp_full = make_vp(ViewpointType.FULL, None)
-            out_full = forward_glimpse(state=state_init, vp=vp_full, use_ckpt=False)
-            loss_full = compute_loss(out_full)
+    # Run all branches (full-start first, then random-start)
+    branch_idx = 0
+    for _ in range(n_full_start_branches):
+        full_metrics.append(run_branch(ViewpointType.FULL, branch_idx))
+        branch_idx += 1
 
-        for idx, i in enumerate(full_indices):
-            run_tbptt(
-                branch_idx=i,
-                out_t0=out_full,
-                loss_t0=loss_full,
-                retain_first_chunk=(idx < len(full_indices) - 1),
-            )
-
-    # === RANDOM branches: unique t=0 each ===
-    for i in random_indices:
-        with amp_ctx:
-            vp_rand = make_vp(ViewpointType.RANDOM, None)
-            out = forward_glimpse(state=state_init, vp=vp_rand, use_ckpt=False)
-            loss = compute_loss(out)
-
-        run_tbptt(branch_idx=i, out_t0=out, loss_t0=loss, retain_first_chunk=False)
+    for _ in range(n_random_start_branches):
+        random_metrics.append(run_branch(ViewpointType.RANDOM, branch_idx))
+        branch_idx += 1
 
     # Aggregate metrics
-    branches = _aggregate_branch_metrics(
-        vp_types=vp_types,
-        n_branches=n_branches,
-        has_policy=model.policy is not None,
-        traj_losses=traj_losses,
-        scene_losses=scene_losses,
-        scene_cls_losses=scene_cls_losses,
-        glimpse_patches_losses=glimpse_patches_losses,
-        glimpse_cls_losses=glimpse_cls_losses,
-        scene_cos=scene_cos,
-        cls_cos=cls_cos,
+    def aggregate(metrics: list[tuple[Tensor, ...]]) -> BranchMetrics | None:
+        if not metrics:
+            return None
+        stacked = [torch.stack([m[i] for m in metrics]).mean() for i in range(7)]
+        return BranchMetrics(*stacked)
+
+    full_start = aggregate(full_metrics)
+    random_start = aggregate(random_metrics)
+
+    # Total loss
+    all_losses = [m[0] for m in full_metrics] + [m[0] for m in random_metrics]
+    total_loss = torch.stack(all_losses).mean()
+
+    return StepMetrics(
+        total_loss=total_loss,
+        full_start=full_start,
+        random_start=random_start,
+        n_glimpses=n_glimpses,
     )
-
-    return StepMetrics(total_loss=traj_losses.mean(), branches=branches, n_glimpses=n_glimpses)
-
-
-def _assign_viewpoint_types(
-    *, n_glimpses: int, n_branches: int, has_policy: bool
-) -> list[list[ViewpointType]]:
-    """Assign viewpoint types: random permutation of half/half at each timestep."""
-    vp_types: list[list[ViewpointType]] = []
-    for t in range(n_glimpses):
-        if t == 0:
-            base = [ViewpointType.RANDOM] * (n_branches // 2) + [ViewpointType.FULL] * (n_branches // 2)
-        elif has_policy:
-            base = [ViewpointType.RANDOM] * (n_branches // 2) + [ViewpointType.POLICY] * (n_branches // 2)
-        else:
-            base = [ViewpointType.RANDOM] * n_branches
-        random.shuffle(base)
-        vp_types.append(base)
-    return vp_types
-
-
-def _aggregate_branch_metrics(
-    *,
-    vp_types: list[list[ViewpointType]],
-    n_branches: int,
-    has_policy: bool,
-    traj_losses: Tensor,
-    scene_losses: Tensor,
-    scene_cls_losses: Tensor,
-    glimpse_patches_losses: Tensor,
-    glimpse_cls_losses: Tensor,
-    scene_cos: Tensor,
-    cls_cos: Tensor,
-) -> dict[tuple[ViewpointType, ViewpointType], BranchMetrics]:
-    """Aggregate metrics by (t0_type, t1_type)."""
-    branches: dict[tuple[ViewpointType, ViewpointType], BranchMetrics] = {}
-    t1_options = [ViewpointType.RANDOM, ViewpointType.POLICY] if has_policy else [ViewpointType.RANDOM]
-
-    for t0 in [ViewpointType.RANDOM, ViewpointType.FULL]:
-        for t1 in t1_options:
-            indices = [i for i in range(n_branches) if vp_types[0][i] == t0 and vp_types[1][i] == t1]
-            if indices:
-                branches[(t0, t1)] = BranchMetrics(
-                    loss=traj_losses[indices].mean(),
-                    scene_loss=scene_losses[indices].mean(),
-                    scene_cls_loss=scene_cls_losses[indices].mean(),
-                    glimpse_patches_loss=glimpse_patches_losses[indices].mean(),
-                    glimpse_cls_loss=glimpse_cls_losses[indices].mean(),
-                    scene_cos=scene_cos[indices].mean(),
-                    cls_cos=cls_cos[indices].mean(),
-                )
-
-    return branches
