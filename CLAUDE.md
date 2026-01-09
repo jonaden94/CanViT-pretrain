@@ -21,6 +21,7 @@ Check canvit source in venv - model architecture lives there, not here. Read `in
 
 - Measure twice, cut once
 - Verify, don't assume
+  - NEVER GUESS APIs.
 - State hypotheses before investigating
 - If you change code that would make README.md misleading, update it
 
