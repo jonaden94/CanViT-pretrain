@@ -468,8 +468,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 ema.update(f"{prefix}/loss", m.loss)
                 ema.update(f"{prefix}/scene_loss", m.scene_loss)
                 ema.update(f"{prefix}/scene_cls_loss", m.scene_cls_loss)
-                ema.update(f"{prefix}/glimpse_patches_loss", m.glimpse_patches_loss)
-                ema.update(f"{prefix}/glimpse_cls_loss", m.glimpse_cls_loss)
+                if cfg.enable_glimpse_losses:
+                    ema.update(f"{prefix}/glimpse_patches_loss", m.glimpse_patches_loss)
+                    ema.update(f"{prefix}/glimpse_cls_loss", m.glimpse_cls_loss)
                 ema.update(f"{prefix}/scene_cos", m.scene_cos)
                 ema.update(f"{prefix}/cls_cos", m.cls_cos)
 
