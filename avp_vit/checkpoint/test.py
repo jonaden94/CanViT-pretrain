@@ -62,7 +62,11 @@ def test_strips_orig_mod() -> None:
             "comet_id": None,
             "scene_norm_state": None,
             "cls_norm_state": None,
+            "glimpse_patches_norm_state": None,
+            "glimpse_cls_norm_state": None,
             "policy_config": None,
+            "optimizer_state": None,
+            "scheduler_state": None,
         }
         torch.save(raw, path)
 

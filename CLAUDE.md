@@ -13,7 +13,7 @@ git log --oneline -10
 uv run pypatree
 ```
 
-Check canvit source in venv - model architecture lives there, not here. Read `scripts/inference_app.py` for how pieces connect.
+Check canvit source in venv - model architecture lives there, not here. Read `inference_app/` for how pieces connect.
 
 **If anything is unclear or doesn't match expectations, STOP and ask the user.** Do not proceed with confusion.
 
@@ -29,7 +29,7 @@ Check canvit source in venv - model architecture lives there, not here. Read `sc
 ```bash
 uv run pypatree                              # structure
 uv run -m avp_vit.train                      # training
-uv run streamlit run scripts/inference_app.py # demo
+uv run streamlit run inference_app/__main__.py # demo
 COMET_API_KEY=$(cat ~/comet_api_key.txt) uv run ...
 uv run ipython -c "..."                      # quick experiments
 ```

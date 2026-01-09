@@ -48,7 +48,7 @@ Everything can change. Be ready.
 
 **How to evaluate policy**: full→policy should beat full→random and full→full. "You've seen everything once, now where should you look to do even better?" If it can't beat random second look, policy isn't helping yet.
 
-**Current state (Dec 2025)**: Policy learning is experimental. Might take long pretraining to start mattering. The branching structure may evolve.
+**Current state (Jan 2026)**: Policy learning is experimental. Might take long pretraining to start mattering. The branching structure may evolve.
 
 ## Architecture Split
 
@@ -68,7 +68,7 @@ ls .venv/.../site-packages/canvit/  # model architecture
 ## Entry Points
 
 - Training: `avp_vit/train/__main__.py`
-- Inference demo: `scripts/inference_app.py` (Streamlit, good reference)
+- Inference demo: `inference_app/` (Streamlit, run with `uv run streamlit run inference_app/__main__.py`)
 - Config: `avp_vit/train/config.py`
 - FLOP analysis: `scripts/flops.py`
 
@@ -78,6 +78,6 @@ ls .venv/.../site-packages/canvit/  # model architecture
 - **Never hardcode, never assume** - model names, dimensions, conventions. Read the actual code.
 - **Training-inference mismatch is subtle** - deep learning is brittle. Sometimes we aim for zero-shot generalization, sometimes we accept it's not possible. Be explicit about assumptions.
 - **Coordinate conventions vary** - internal vs external APIs vs PyTorch grid_sample. Check canvit source in venv (or https://github.com/m2b3/CanViT/ - private for now): `viewpoint/` and `coords/`.
-- **Normalizer states required for inference** - checkpoints include `scene_norm_state`, `cls_norm_state`. See `avp_vit/train/norm.py`.
+- **Normalizer states required for inference** - checkpoints include `scene_norm_state`, `cls_norm_state`, `glimpse_patches_norm_state`, `glimpse_cls_norm_state`. See `avp_vit/train/norm.py`.
 - **GPU syncs kill performance** - `.item()`, `.cpu()`, logging inside hot loops. Keep logging outside.
 - **Logging is essential** - but outside hot loops. We want visibility, not sync stalls.
