@@ -211,7 +211,7 @@ wheels = [
 [[package]]
 name = "canvit"
 version = "0.1.0"
-source = { git = "ssh://git@github.com/m2b3/CanViT.git?branch=main#eff3ff8df68fd7babf2034d651ee7c2a4fa5e812" }
+source = { git = "ssh://git@github.com/m2b3/CanViT.git?branch=main#924182d494a9c76b5cbea498d0f28e8ca2a71f98" }
 dependencies = [
     { name = "dinov3" },
     { name = "matplotlib" },
