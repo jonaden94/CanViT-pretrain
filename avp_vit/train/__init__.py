@@ -47,7 +47,6 @@ from avp_vit.train.viz import (
     plot_trajectory,
     timestep_colors,
     validate,
-    viz_and_log,
 )
 
 __all__ = [
@@ -93,5 +92,4 @@ __all__ = [
     "plot_trajectory",
     "timestep_colors",
     "validate",
-    "viz_and_log",
 ]

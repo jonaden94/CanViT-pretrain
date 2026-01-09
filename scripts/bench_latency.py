@@ -203,21 +203,20 @@ def main() -> None:
 
     glimpse_img = torch.randn(B, 3, glimpse_px, glimpse_px, device=device)
     full_img = torch.randn(B, 3, full_img_px, full_img_px, device=device)
-    canvas = model.init_canvas(batch_size=B, canvas_grid_size=cfg.canvas_grid)
-    cls = model.init_cls(batch_size=B)
+    state = model.init_state(batch_size=B, canvas_grid_size=cfg.canvas_grid)
     vp = make_viewpoint(B, device, scale=cfg.glimpse_grid / cfg.canvas_grid)
 
     log.info(f"Glimpse image: {tuple(glimpse_img.shape)}")
     log.info(f"Full image: {tuple(full_img.shape)}")
-    log.info(f"Canvas: {tuple(canvas.shape)}")
-    log.info(f"CLS: {tuple(cls.shape)}")
+    log.info(f"Canvas: {tuple(state.canvas.shape)}")
+    log.info(f"CLS: {tuple(state.cls.shape)}")
     log.info(f"Viewpoint scale: {vp.scales.item():.3f}")
 
     # Verify shapes
     assert glimpse_img.shape == (B, 3, glimpse_px, glimpse_px)
     assert full_img.shape == (B, 3, full_img_px, full_img_px)
-    assert canvas.shape[0] == B
-    assert canvas.shape[1] == model.n_canvas_registers + canvas_tokens
+    assert state.canvas.shape[0] == B
+    assert state.canvas.shape[1] == model.n_canvas_registers + canvas_tokens
 
     def run(name: str, fn: Callable[[], object]) -> BenchResult:
         return bench(name, fn, device, cfg.warmup, cfg.iters)
@@ -264,7 +263,7 @@ def main() -> None:
     with torch.no_grad(), amp_ctx:
         results["model_forward"] = run(
             f"model.forward (glimpse={glimpse_tokens}, canvas={canvas_tokens})",
-            lambda: model.forward(glimpse=glimpse_img, canvas=canvas, viewpoint=vp, cls=cls),
+            lambda: model.forward(glimpse=glimpse_img, state=state, viewpoint=vp),
         )
 
     # =========================================================================
@@ -279,8 +278,7 @@ def main() -> None:
             "model.forward_step (sample + forward)",
             lambda: model.forward_step(
                 image=full_img,
-                canvas=canvas,
-                cls=cls,
+                state=state,
                 viewpoint=named_vp,
                 glimpse_size_px=glimpse_px,
             ),
@@ -294,8 +292,7 @@ def main() -> None:
     with torch.no_grad(), amp_ctx:
         sample_out = model.forward_step(
             image=full_img,
-            canvas=canvas,
-            cls=cls,
+            state=state,
             viewpoint=named_vp,
             glimpse_size_px=glimpse_px,
         )
@@ -305,11 +302,11 @@ def main() -> None:
     with torch.no_grad(), amp_ctx:
         results["predict_scene"] = run(
             "predict_teacher_scene",
-            lambda: model.predict_teacher_scene(sample_out.canvas),
+            lambda: model.predict_teacher_scene(sample_out.state.canvas),
         )
         results["predict_cls"] = run(
             "predict_scene_teacher_cls",
-            lambda: model.predict_scene_teacher_cls(sample_out.global_cls, sample_out.canvas),
+            lambda: model.predict_scene_teacher_cls(sample_out.state.cls, sample_out.state.canvas),
         )
 
         if model.policy is not None and sample_out.vpe is not None:
@@ -329,13 +326,12 @@ def main() -> None:
     def full_inference_step() -> None:
         out = model.forward_step(
             image=full_img,
-            canvas=canvas,
-            cls=cls,
+            state=state,
             viewpoint=named_vp,
             glimpse_size_px=glimpse_px,
         )
-        _ = model.predict_teacher_scene(out.canvas)
-        _ = model.predict_scene_teacher_cls(out.global_cls, out.canvas)
+        _ = model.predict_teacher_scene(out.state.canvas)
+        _ = model.predict_scene_teacher_cls(out.state.cls, out.state.canvas)
         if model.policy is not None and out.vpe is not None:
             _ = model.policy(out.vpe)
 
@@ -347,21 +343,18 @@ def main() -> None:
     # =========================================================================
     section(f"MULTI-STEP TRAJECTORY ({cfg.n_steps} steps, state persists)")
 
-    traj_canvas = model.init_canvas(batch_size=B, canvas_grid_size=cfg.canvas_grid)
-    traj_cls = model.init_cls(batch_size=B)
+    traj_state = model.init_state(batch_size=B, canvas_grid_size=cfg.canvas_grid)
 
     def run_trajectory() -> None:
-        nonlocal traj_canvas, traj_cls
+        nonlocal traj_state
         for _ in range(cfg.n_steps):
             out = model.forward_step(
                 image=full_img,
-                canvas=traj_canvas,
-                cls=traj_cls,
+                state=traj_state,
                 viewpoint=named_vp,
                 glimpse_size_px=glimpse_px,
             )
-            traj_canvas = out.canvas
-            traj_cls = out.global_cls
+            traj_state = out.state
 
     with torch.no_grad(), amp_ctx:
         results["trajectory"] = run(
@@ -382,16 +375,15 @@ def main() -> None:
         with torch.no_grad(), amp_ctx:
             results["compiled_forward"] = run(
                 "torch.compile(model.forward)",
-                lambda: compiled_forward(glimpse=glimpse_img, canvas=canvas, viewpoint=vp, cls=cls),
+                lambda: compiled_forward(glimpse=glimpse_img, state=state, viewpoint=vp),
             )
             results["compiled_step"] = run(
                 "torch.compile(model.forward_step)",
                 lambda: compiled_step(
                     image=full_img,
-                    canvas=canvas,
+                    state=state,
                     viewpoint=named_vp,
                     glimpse_size_px=glimpse_px,
-                    cls=cls,
                 ),
             )
 

@@ -16,7 +16,9 @@ from torch import Tensor
 
 from dinov3_probes import DINOv3LinearClassificationHead
 
-from avp_vit import ActiveCanViT
+from ytch.correctness import assert_shape
+
+from avp_vit import ActiveCanViT, RecurrentState
 from ..norm import PositionAwareNorm
 from ..probe import (
     compute_in1k_top1,
@@ -156,17 +158,15 @@ def _log_policy_viz(
     assert isinstance(model.policy, PolicyHead)
 
     B = images.shape[0]
-    canvas_init = model.init_canvas(batch_size=B, canvas_grid_size=canvas_grid_size)
-    cls_init = model.init_cls(batch_size=B)
+    state_init = model.init_state(batch_size=B, canvas_grid_size=canvas_grid_size)
 
     # Full scene context
     vp_full = Viewpoint.full_scene(batch_size=B, device=images.device)
     out_full = model.forward_step(
         image=images,
-        canvas=canvas_init,
+        state=state_init,
         viewpoint=vp_full,
         glimpse_size_px=glimpse_size_px,
-        cls=cls_init,
     )
     assert out_full.vpe is not None
     preds_full = model.policy(out_full.vpe)
@@ -177,10 +177,9 @@ def _log_policy_viz(
     )
     out_rand = model.forward_step(
         image=images,
-        canvas=canvas_init,
+        state=state_init,
         viewpoint=vp_rand,
         glimpse_size_px=glimpse_size_px,
-        cls=cls_init,
     )
     assert out_rand.vpe is not None
     preds_rand = model.policy(out_rand.vpe)
@@ -214,15 +213,16 @@ def _validate_policy_rollout(
     assert isinstance(model.policy, PolicyHead)
 
     B = images.shape[0]
-    canvas = model.init_canvas(batch_size=B, canvas_grid_size=canvas_grid_size)
-    cls = model.init_cls(batch_size=B)
+    state = model.init_state(batch_size=B, canvas_grid_size=canvas_grid_size)
 
     # Collect initial state for viz
     initial_scene = None
     initial_canvas_spatial = None
     if collect_viz:
-        initial_scene = model.predict_teacher_scene(canvas)[0].cpu().float().numpy()
-        initial_canvas_spatial = model.get_spatial(canvas[0:1])[0].cpu().float().numpy()
+        n_canvas_tokens = model.n_canvas_registers + canvas_grid_size ** 2
+        assert_shape(state.canvas, (B, n_canvas_tokens, model.canvas_dim))
+        initial_scene = model.predict_teacher_scene(state.canvas)[0].cpu().float().numpy()
+        initial_canvas_spatial = model.get_spatial(state.canvas[0:1])[0].cpu().float().numpy()
 
     vp = Viewpoint.full_scene(batch_size=B, device=images.device)
     accs: list[float] = []
@@ -234,22 +234,21 @@ def _validate_policy_rollout(
 
         out = model.forward_step(
             image=images,
-            canvas=canvas,
+            state=state,
             viewpoint=vp,
             glimpse_size_px=glimpse_size_px,
-            cls=cls,
         )
-        canvas, cls = out.canvas, out.global_cls
+        state = out.state
 
         # Compute IN1K accuracy
-        predicted_cls = model.predict_scene_teacher_cls(cls, canvas)
+        predicted_cls = model.predict_scene_teacher_cls(state.cls, state.canvas)
         cls_raw = cls_normalizer.denormalize(predicted_cls)
         logits = probe(cls_raw)
         accs.append(compute_in1k_top1(logits, labels))
 
         # Collect viz sample
         if collect_viz:
-            predicted_scene = model.predict_teacher_scene(canvas)
+            predicted_scene = model.predict_teacher_scene(state.canvas)
             viz_samples.append(extract_sample0_viz(out, predicted_scene, model))
 
         # Policy predicts next viewpoint (except at last step)
@@ -382,23 +381,25 @@ def validate(
                 teacher_acc = compute_in1k_top1(teacher_logits, labels)
                 exp.log_metric(f"{prefix}/in1k_teacher_top1", teacher_acc, step=step)
 
-            def init_fn(canvas: Tensor, cls: Tensor) -> ValAccumulator:
+            def init_fn(state: RecurrentState) -> ValAccumulator:
                 acc = ValAccumulator()
                 if log_pca:
+                    n_canvas_tokens = model.n_canvas_registers + canvas_grid_size ** 2
+                    assert_shape(state.canvas, (B, n_canvas_tokens, model.canvas_dim))
                     acc.initial_scene = (
-                        model.predict_teacher_scene(canvas)[0].cpu().float().numpy()
+                        model.predict_teacher_scene(state.canvas)[0].cpu().float().numpy()
                     )
                     acc.initial_canvas_spatial = (
-                        model.get_spatial(canvas[0:1])[0].cpu().float().numpy()
+                        model.get_spatial(state.canvas[0:1])[0].cpu().float().numpy()
                     )
                 return acc
 
             def step_fn(
                 acc: ValAccumulator, out: GlimpseOutput, _vp: CanvitViewpoint
             ) -> ValAccumulator:
-                predicted_scene = model.predict_teacher_scene(out.canvas)
+                predicted_scene = model.predict_teacher_scene(out.state.canvas)
                 predicted_cls = (
-                    model.predict_scene_teacher_cls(out.global_cls, out.canvas) if has_cls else None
+                    model.predict_scene_teacher_cls(out.state.cls, out.state.canvas) if has_cls else None
                 )
 
                 scene_cos = F.cosine_similarity(predicted_scene, target, dim=-1).mean().item()
@@ -427,7 +428,7 @@ def validate(
 
                 return acc
 
-            acc, _final_canvas, _final_cls = model.forward_reduce(
+            acc, _final_state = model.forward_reduce(
                 image=images,
                 viewpoints=viewpoints,  # pyright: ignore[reportArgumentType]
                 glimpse_size_px=glimpse_size_px,

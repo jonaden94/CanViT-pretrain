@@ -17,6 +17,7 @@ from torch import Tensor
 from torchvision import transforms
 from torchvision.models.resnet import ResNet50_Weights
 
+from avp_vit import RecurrentState
 from avp_vit.checkpoint import load as load_ckpt, load_model
 from avp_vit.train.data import imagenet_normalize
 from avp_vit.train.norm import PositionAwareNorm
@@ -62,8 +63,7 @@ class GPUWorker:
         self._step_count: int = -1
 
         # Current state
-        self._canvas: Tensor | None = None
-        self._cls: Tensor | None = None
+        self._state: RecurrentState | None = None
         self._image: Tensor | None = None  # current image tensor
 
         # Config tracking
@@ -103,8 +103,7 @@ class GPUWorker:
             self._device_str = device_str
 
             # Reset state
-            self._canvas = None
-            self._cls = None
+            self._state = None
             self._image = None
 
             self._sync()
@@ -144,9 +143,8 @@ class GPUWorker:
             assert isinstance(img_t, Tensor)
             self._image = img_t.unsqueeze(0).to(self._device)
 
-            # Reset canvas
-            self._canvas = self._model.init_canvas(batch_size=1, canvas_grid_size=canvas_grid)
-            self._cls = self._model.init_cls(batch_size=1)
+            # Reset state
+            self._state = self._model.init_state(batch_size=1, canvas_grid_size=canvas_grid)
 
             # Get display image
             img_np = imagenet_denormalize(self._image[0].detach().cpu()).numpy()
@@ -223,7 +221,7 @@ class GPUWorker:
     def step(self, vp: Viewpoint, glimpse_grid: int, canvas_grid: int, l2_norm: bool) -> StepResult:
         """Run one model step. Returns StepResult with numpy arrays."""
         with self._lock:
-            assert self._model is not None and self._canvas is not None and self._image is not None
+            assert self._model is not None and self._state is not None and self._image is not None
 
             # Convert to torch viewpoint
             named_vp = NamedViewpoint(
@@ -237,27 +235,26 @@ class GPUWorker:
             t_start = time.perf_counter()
             with torch.no_grad():
                 out = self._model.forward_step(
-                    image=self._image, canvas=self._canvas, cls=self._cls,
+                    image=self._image, state=self._state,
                     viewpoint=named_vp, glimpse_size_px=glimpse_px,
                 )
             self._sync()
             t_forward = time.perf_counter()
 
             # Update state
-            self._canvas = out.canvas
-            self._cls = out.global_cls
+            self._state = out.state
 
             # Extract features
-            spatial = self._model.get_spatial(out.canvas)[0]
+            spatial = self._model.get_spatial(out.state.canvas)[0]
             if l2_norm:
                 spatial = F.normalize(spatial, p=2, dim=-1)
-            scene = self._model.predict_teacher_scene(out.canvas)
+            scene = self._model.predict_teacher_scene(out.state.canvas)
 
             # Cosine similarities
             scene_cos = cls_cos = None
 
             # Classification
-            cls_pred = self._model.predict_scene_teacher_cls(out.global_cls, out.canvas)
+            cls_pred = self._model.predict_scene_teacher_cls(out.state.cls, out.state.canvas)
             top5 = self._top5(self._cls_norm.denormalize(cls_pred)) if self._probe and self._cls_norm else []
 
             # Policy
@@ -294,11 +291,10 @@ class GPUWorker:
             )
 
     def reset_canvas(self, canvas_grid: int) -> None:
-        """Reset canvas and cls state."""
+        """Reset recurrent state."""
         with self._lock:
             if self._model is not None:
-                self._canvas = self._model.init_canvas(batch_size=1, canvas_grid_size=canvas_grid)
-                self._cls = self._model.init_cls(batch_size=1)
+                self._state = self._model.init_state(batch_size=1, canvas_grid_size=canvas_grid)
                 self._sync()
 
     def get_info(self) -> dict:

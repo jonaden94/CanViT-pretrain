@@ -3,7 +3,7 @@
 Re-exports from canvit for backward compatibility.
 """
 
-from canvit import CanViT, CanViTConfig, GlimpseOutput, gram_mse, spatial_gram
+from canvit import CanViT, CanViTConfig, GlimpseOutput, RecurrentState, gram_mse, spatial_gram
 from canvit.attention import CanvasAttentionConfig
 from canvit.model.active.pretraining import (
     ActiveCanViTForReconstructivePretraining as ActiveCanViT,
@@ -17,6 +17,7 @@ __all__ = [
     "CanViTConfig",
     "CanvasAttentionConfig",
     "GlimpseOutput",
+    "RecurrentState",
     "gram_mse",
     "spatial_gram",
 ]

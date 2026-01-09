@@ -39,7 +39,7 @@ def extract_sample0_viz(
     scene_cpu = predicted_scene[0].cpu().float()
     scene_np = scene_cpu.numpy()
 
-    canvas_single = out.canvas[0:1]
+    canvas_single = out.state.canvas[0:1]
     spatial = model.get_spatial(canvas_single)[0]
     spatial_np = spatial.cpu().float().numpy()
 

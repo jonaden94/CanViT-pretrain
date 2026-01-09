@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 from tqdm import tqdm
 
-from canvit import GlimpseOutput
+from canvit import GlimpseOutput, RecurrentState
 from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit.hub import create_backbone
 from canvit.viewpoint import Viewpoint as CanvitViewpoint
@@ -76,15 +76,15 @@ def run_trajectory(
     B = images.shape[0]
     viewpoints = make_eval_viewpoints(B, images.device, n_viewpoints=n_viewpoints)
 
-    def init_fn(_canvas: Tensor, _cls: Tensor) -> list[Tensor]:
+    def init_fn(_state: RecurrentState) -> list[Tensor]:
         return []
 
     def step_fn(acc: list[Tensor], out: GlimpseOutput, _vp: CanvitViewpoint) -> list[Tensor]:
-        cls_pred = model.predict_scene_teacher_cls(out.global_cls, out.canvas)
+        cls_pred = model.predict_scene_teacher_cls(out.state.cls, out.state.canvas)
         acc.append(cls_pred)
         return acc
 
-    cls_preds, _, _ = model.forward_reduce(
+    cls_preds, _ = model.forward_reduce(
         image=images,
         viewpoints=viewpoints,  # pyright: ignore[reportArgumentType]
         canvas_grid_size=canvas_grid,

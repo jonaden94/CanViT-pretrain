@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
-from avp_vit import ActiveCanViT, GlimpseOutput
+from avp_vit import ActiveCanViT, GlimpseOutput, RecurrentState
 from canvit import Viewpoint
 
 from .viewpoint import Viewpoint as NamedViewpoint, ViewpointType
@@ -58,9 +58,8 @@ class StepMetrics(NamedTuple):
 class ChunkState:
     """State for TBPTT chunk processing."""
 
-    canvas: Tensor
-    cls_tok: Tensor
-    vpe: Tensor | None
+    state: RecurrentState  # recurrent model state (canvas, cls, local_registers)
+    vpe: Tensor | None  # VPE token (ephemeral, per-glimpse)
     # Combined loss (mean of active components) - for backprop and metrics
     chunk_combined_loss: Tensor  # with grad
     total_combined_loss: Tensor  # detached
@@ -102,8 +101,7 @@ def training_step(
     device = images.device
     B = images.shape[0]
 
-    canvas_init = model.init_canvas(batch_size=B, canvas_grid_size=canvas_grid_size)
-    cls_init = model.init_cls(batch_size=B)
+    state_init = model.init_state(batch_size=B, canvas_grid_size=canvas_grid_size)
 
     # Sample trajectory length in chunks (shared across branches)
     n_glimpses = chunk_size
@@ -139,28 +137,29 @@ def training_step(
         p = model.policy(vpe)
         return Viewpoint(centers=p.position, scales=p.scale)
 
-    def forward_glimpse(*, canvas: Tensor, cls: Tensor, vp: Viewpoint, use_ckpt: bool) -> GlimpseOutput:
+    def forward_glimpse(*, state: RecurrentState, vp: Viewpoint, use_ckpt: bool) -> GlimpseOutput:
         if use_ckpt:
             out = checkpoint(
-                lambda c, cl, ctr, sc: model.forward_step(
-                    image=images, canvas=c, cls=cl,
+                lambda cv, cl, lr, ctr, sc: model.forward_step(
+                    image=images,
+                    state=RecurrentState(canvas=cv, cls=cl, local_registers=lr),
                     viewpoint=Viewpoint(centers=ctr, scales=sc),
                     glimpse_size_px=glimpse_size_px,
                 ),
-                canvas, cls, vp.centers, vp.scales,
+                state.canvas, state.cls, state.local_registers, vp.centers, vp.scales,
                 use_reentrant=False,
             )
             assert isinstance(out, GlimpseOutput)
             return out
         return model.forward_step(
-            image=images, canvas=canvas, cls=cls,
+            image=images, state=state,
             viewpoint=vp, glimpse_size_px=glimpse_size_px,
         )
 
     def compute_loss(out: GlimpseOutput) -> LossOutput:
         # Scene losses (targets = full image features)
-        scene_pred = model.predict_teacher_scene(out.canvas)
-        cls_pred = model.predict_scene_teacher_cls(out.global_cls, out.canvas)
+        scene_pred = model.predict_teacher_scene(out.state.canvas)
+        cls_pred = model.predict_scene_teacher_cls(out.state.cls, out.state.canvas)
         scene_loss = F.mse_loss(scene_pred, scene_target)
         scene_cls_loss = F.mse_loss(cls_pred, cls_target)
 
@@ -201,9 +200,8 @@ def training_step(
         """TBPTT with 1-step lookahead: backward every 2 steps, gradient flows through both."""
         L = loss_t0
 
-        state = ChunkState(
-            canvas=out_t0.canvas,
-            cls_tok=out_t0.global_cls,
+        chunk = ChunkState(
+            state=out_t0.state,
             vpe=out_t0.vpe,
             chunk_combined_loss=L.combined.float(),
             total_combined_loss=L.combined.detach().float(),
@@ -217,58 +215,63 @@ def training_step(
         )
 
         for t in range(1, n_glimpses):
-            vp = make_vp(vp_types[t][branch_idx], state.vpe)
+            vp = make_vp(vp_types[t][branch_idx], chunk.vpe)
 
             with amp_ctx:
                 use_ckpt = use_checkpointing and (t % 2 == 1)
-                out = forward_glimpse(canvas=state.canvas, cls=state.cls_tok, vp=vp, use_ckpt=use_ckpt)
+                out = forward_glimpse(state=chunk.state, vp=vp, use_ckpt=use_ckpt)
                 L = compute_loss(out)
 
             # Accumulate combined (with grad for backprop)
-            state.chunk_combined_loss = state.chunk_combined_loss + L.combined.float()
-            state.total_combined_loss = state.total_combined_loss + L.combined.detach().float()
+            chunk.chunk_combined_loss = chunk.chunk_combined_loss + L.combined.float()
+            chunk.total_combined_loss = chunk.total_combined_loss + L.combined.detach().float()
             # Accumulate individual losses (detached, for per-component metrics)
-            state.total_scene_loss = state.total_scene_loss + L.scene_loss.detach().float()
-            state.total_scene_cls_loss = state.total_scene_cls_loss + L.scene_cls_loss.detach().float()
-            state.total_glimpse_patches_loss = state.total_glimpse_patches_loss + L.glimpse_patches_loss.detach().float()
-            state.total_glimpse_cls_loss = state.total_glimpse_cls_loss + L.glimpse_cls_loss.detach().float()
-            state.scene_pred, state.cls_pred = L.scene_pred, L.cls_pred
-            state.n_steps += 1
+            chunk.total_scene_loss = chunk.total_scene_loss + L.scene_loss.detach().float()
+            chunk.total_scene_cls_loss = chunk.total_scene_cls_loss + L.scene_cls_loss.detach().float()
+            chunk.total_glimpse_patches_loss = chunk.total_glimpse_patches_loss + L.glimpse_patches_loss.detach().float()
+            chunk.total_glimpse_cls_loss = chunk.total_glimpse_cls_loss + L.glimpse_cls_loss.detach().float()
+            chunk.scene_pred, chunk.cls_pred = L.scene_pred, L.cls_pred
+            chunk.n_steps += 1
 
             is_chunk_end = ((t + 1) % chunk_size == 0)
             is_last = (t == n_glimpses - 1)
 
             if is_chunk_end:
                 # Backward chunk: combined already averaged over active losses
-                chunk_loss = state.chunk_combined_loss / n_glimpses / n_branches
+                loss_for_backward = chunk.chunk_combined_loss / n_glimpses / n_branches
                 retain = retain_first_chunk if t == 1 else False
-                chunk_loss.backward(retain_graph=retain)
+                loss_for_backward.backward(retain_graph=retain)
 
                 # Detach for next chunk
                 if not is_last:
-                    state.canvas = out.canvas.detach()
-                    state.cls_tok = out.global_cls.detach()
-                    state.vpe = out.vpe.detach() if out.vpe is not None else None
-                    state.chunk_combined_loss = torch.zeros((), device=device)
+                    chunk.state = RecurrentState(
+                        canvas=out.state.canvas.detach(),
+                        cls=out.state.cls.detach(),
+                        local_registers=out.state.local_registers.detach(),
+                    )
+                    chunk.vpe = out.vpe.detach() if out.vpe is not None else None
+                    chunk.chunk_combined_loss = torch.zeros((), device=device)
                 else:
-                    state.canvas, state.cls_tok, state.vpe = out.canvas, out.global_cls, out.vpe
+                    chunk.state = out.state
+                    chunk.vpe = out.vpe
             else:
-                state.canvas, state.cls_tok, state.vpe = out.canvas, out.global_cls, out.vpe
+                chunk.state = out.state
+                chunk.vpe = out.vpe
 
         # Record metrics (no trailing step - n_glimpses is always a multiple of chunk_size)
-        traj_losses[branch_idx] = state.total_combined_loss / state.n_steps
-        scene_losses[branch_idx] = state.total_scene_loss / state.n_steps
-        scene_cls_losses[branch_idx] = state.total_scene_cls_loss / state.n_steps
-        glimpse_patches_losses[branch_idx] = state.total_glimpse_patches_loss / state.n_steps
-        glimpse_cls_losses[branch_idx] = state.total_glimpse_cls_loss / state.n_steps
-        scene_cos[branch_idx] = F.cosine_similarity(state.scene_pred, scene_target, dim=-1).mean()
-        cls_cos[branch_idx] = F.cosine_similarity(state.cls_pred, cls_target, dim=-1).mean()
+        traj_losses[branch_idx] = chunk.total_combined_loss / chunk.n_steps
+        scene_losses[branch_idx] = chunk.total_scene_loss / chunk.n_steps
+        scene_cls_losses[branch_idx] = chunk.total_scene_cls_loss / chunk.n_steps
+        glimpse_patches_losses[branch_idx] = chunk.total_glimpse_patches_loss / chunk.n_steps
+        glimpse_cls_losses[branch_idx] = chunk.total_glimpse_cls_loss / chunk.n_steps
+        scene_cos[branch_idx] = F.cosine_similarity(chunk.scene_pred, scene_target, dim=-1).mean()
+        cls_cos[branch_idx] = F.cosine_similarity(chunk.cls_pred, cls_target, dim=-1).mean()
 
     # === FULL branches: share t=0 ===
     if full_indices:
         with amp_ctx:
             vp_full = make_vp(ViewpointType.FULL, None)
-            out_full = forward_glimpse(canvas=canvas_init, cls=cls_init, vp=vp_full, use_ckpt=False)
+            out_full = forward_glimpse(state=state_init, vp=vp_full, use_ckpt=False)
             loss_full = compute_loss(out_full)
 
         for idx, i in enumerate(full_indices):
@@ -283,7 +286,7 @@ def training_step(
     for i in random_indices:
         with amp_ctx:
             vp_rand = make_vp(ViewpointType.RANDOM, None)
-            out = forward_glimpse(canvas=canvas_init, cls=cls_init, vp=vp_rand, use_ckpt=False)
+            out = forward_glimpse(state=state_init, vp=vp_rand, use_ckpt=False)
             loss = compute_loss(out)
 
         run_tbptt(branch_idx=i, out_t0=out, loss_t0=loss, retain_first_chunk=False)

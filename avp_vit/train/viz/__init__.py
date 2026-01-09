@@ -13,7 +13,6 @@ from .plot import (
     timestep_colors,
 )
 from .sample import VizSampleData, extract_sample0_viz
-from .train_viz import viz_and_log
 from .validate import ValAccumulator, validate
 
 __all__ = [
@@ -38,8 +37,6 @@ __all__ = [
     # sample
     "VizSampleData",
     "extract_sample0_viz",
-    # train_viz
-    "viz_and_log",
     # validate
     "ValAccumulator",
     "validate",

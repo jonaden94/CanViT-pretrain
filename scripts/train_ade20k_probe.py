@@ -305,28 +305,26 @@ class FeatureExtractor:
         avp_features = {"hidden", "predicted_norm", "predicted_denorm"}
         if features & avp_features:
             with ctx:
-                canvas = self.model.init_canvas(
+                state = self.model.init_state(
                     batch_size=B, canvas_grid_size=self.canvas_grid
                 )
-                cls = self.model.init_cls(batch_size=B)
                 vp = Viewpoint(
                     torch.zeros(B, 2, device=self.device),
                     torch.ones(B, device=self.device),
                 )
                 out = self.model.forward_step(
                     image=images,
-                    canvas=canvas,
-                    cls=cls,
+                    state=state,
                     viewpoint=vp,
                     glimpse_size_px=self.glimpse_px,
                 )
 
                 if "hidden" in features:
-                    result["hidden"] = self.model.get_spatial(out.canvas).view(
+                    result["hidden"] = self.model.get_spatial(out.state.canvas).view(
                         B, self.canvas_grid, self.canvas_grid, -1
                     )
                 if "predicted_norm" in features or "predicted_denorm" in features:
-                    pred = self.model.predict_teacher_scene(out.canvas)
+                    pred = self.model.predict_teacher_scene(out.state.canvas)
                     if "predicted_norm" in features:
                         result["predicted_norm"] = pred.view(
                             B, self.canvas_grid, self.canvas_grid, -1
