@@ -144,11 +144,11 @@ def training_step(
             out = checkpoint(
                 lambda cv, cl, ctr, sc: model.forward_step(
                     image=images,
-                    state=RecurrentState(canvas=cv, cls=cl),
+                    state=RecurrentState(canvas=cv, recurrent_cls=cl),
                     viewpoint=Viewpoint(centers=ctr, scales=sc),
                     glimpse_size_px=glimpse_size_px,
                 ),
-                state.canvas, state.cls, vp.centers, vp.scales,
+                state.canvas, state.recurrent_cls, vp.centers, vp.scales,
                 use_reentrant=False,
             )
             assert isinstance(out, GlimpseOutput)
@@ -160,7 +160,7 @@ def training_step(
 
     def compute_loss(out: GlimpseOutput) -> LossOutput:
         scene_pred = model.predict_teacher_scene(out.state.canvas)
-        cls_pred = model.predict_scene_teacher_cls(out.state.cls, out.state.canvas)
+        cls_pred = model.predict_scene_teacher_cls(out.state.recurrent_cls, out.state.canvas)
 
         scene_patches_loss = torch.zeros((), device=device)
         scene_cls_loss = torch.zeros((), device=device)
@@ -178,8 +178,7 @@ def training_step(
                 glimpse_patches_pred = model.predict_glimpse_teacher_patches(out.local_patches)
                 glimpse_patches_loss = F.mse_loss(glimpse_patches_pred, glimpse_targets.patches)
             if enable_glimpse_cls_loss:
-                assert out.local_cls is not None, "local_cls required for glimpse_cls_loss"
-                glimpse_cls_pred = model.predict_glimpse_teacher_cls(out.local_cls)
+                glimpse_cls_pred = model.predict_glimpse_teacher_cls(out.ephemeral_cls)
                 glimpse_cls_loss = F.mse_loss(glimpse_cls_pred, glimpse_targets.cls)
 
         active: list[Tensor] = []
@@ -255,7 +254,7 @@ def training_step(
                 if not is_last:
                     chunk.state = RecurrentState(
                         canvas=out.state.canvas.detach(),
-                        cls=out.state.cls.detach(),
+                        recurrent_cls=out.state.recurrent_cls.detach(),
                     )
                     chunk.vpe = out.vpe.detach() if out.vpe is not None else None
                     chunk.chunk_combined_loss = torch.zeros((), device=device)

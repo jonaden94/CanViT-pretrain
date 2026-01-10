@@ -209,7 +209,7 @@ def main() -> None:
     log.info(f"Glimpse image: {tuple(glimpse_img.shape)}")
     log.info(f"Full image: {tuple(full_img.shape)}")
     log.info(f"Canvas: {tuple(state.canvas.shape)}")
-    log.info(f"CLS: {tuple(state.cls.shape)}")
+    log.info(f"CLS: {tuple(state.recurrent_cls.shape)}")
     log.info(f"Viewpoint scale: {vp.scales.item():.3f}")
 
     # Verify shapes
@@ -306,7 +306,7 @@ def main() -> None:
         )
         results["predict_cls"] = run(
             "predict_scene_teacher_cls",
-            lambda: model.predict_scene_teacher_cls(sample_out.state.cls, sample_out.state.canvas),
+            lambda: model.predict_scene_teacher_cls(sample_out.state.recurrent_cls, sample_out.state.canvas),
         )
 
         if model.policy is not None and sample_out.vpe is not None:
@@ -331,7 +331,7 @@ def main() -> None:
             glimpse_size_px=glimpse_px,
         )
         _ = model.predict_teacher_scene(out.state.canvas)
-        _ = model.predict_scene_teacher_cls(out.state.cls, out.state.canvas)
+        _ = model.predict_scene_teacher_cls(out.state.recurrent_cls, out.state.canvas)
         if model.policy is not None and out.vpe is not None:
             _ = model.policy(out.vpe)
 
