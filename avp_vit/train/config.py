@@ -30,7 +30,7 @@ class Config:
     batch_size: int = 64
     warmup_steps: int = 100_000
     start_lr: float | None = 1e-7  # None = peak_lr / warmup_steps (old behavior)
-    peak_lr: float = 1e-3
+    peak_lr: float = 5e-4
     end_lr: float | None = 1e-6  # None = 0 (old behavior)
     # weight_decay: float = 0.05  # standard in ViTs
     # we can use a much lower weight decay due to the richness of our training signal
@@ -47,9 +47,8 @@ class Config:
         100_000  # ramp 0 → continue_prob over this many steps
     )
     enable_policy: bool = False  # Enable policy branch (t=1 POLICY viewpoint type)
-    enable_glimpse_losses: bool = (
-        False  # Enable glimpse losses (direct backbone gradient)
-    )
+    enable_glimpse_patches_loss: bool = True  # Glimpse patch reconstruction loss
+    enable_glimpse_cls_loss: bool = True  # Glimpse CLS reconstruction loss
     ema_alpha: float = 0.1  # EMA smoothing for metrics
     grad_clip: float = 1.0
     policy_grad_clip: float = 1.0  # Separate clip for policy (applied first)

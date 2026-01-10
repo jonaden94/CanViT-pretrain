@@ -79,6 +79,8 @@ def training_step(
     scene_target: Tensor,
     cls_target: Tensor,
     compute_glimpse_targets: Callable[[Tensor], NormalizedTargets] | None,
+    enable_glimpse_patches_loss: bool,
+    enable_glimpse_cls_loss: bool,
     glimpse_size_px: int,
     canvas_grid_size: int,
     n_full_start_branches: int,
@@ -160,20 +162,23 @@ def training_step(
         scene_loss = F.mse_loss(scene_pred, scene_target)
         scene_cls_loss = F.mse_loss(cls_pred, cls_target)
 
+        glimpse_patches_loss = torch.zeros((), device=device)
+        glimpse_cls_loss = torch.zeros((), device=device)
         if compute_glimpse_targets is not None:
             glimpse_targets = compute_glimpse_targets(out.glimpse)
-            glimpse_patches_pred = model.predict_glimpse_teacher_patches(out.local_patches)
-            assert out.local_cls is not None, "local_cls required for glimpse losses"
-            glimpse_cls_pred = model.predict_glimpse_teacher_cls(out.local_cls)
-            glimpse_patches_loss = F.mse_loss(glimpse_patches_pred, glimpse_targets.patches)
-            glimpse_cls_loss = F.mse_loss(glimpse_cls_pred, glimpse_targets.cls)
-        else:
-            glimpse_patches_loss = torch.zeros((), device=device)
-            glimpse_cls_loss = torch.zeros((), device=device)
+            if enable_glimpse_patches_loss:
+                glimpse_patches_pred = model.predict_glimpse_teacher_patches(out.local_patches)
+                glimpse_patches_loss = F.mse_loss(glimpse_patches_pred, glimpse_targets.patches)
+            if enable_glimpse_cls_loss:
+                assert out.local_cls is not None, "local_cls required for glimpse_cls_loss"
+                glimpse_cls_pred = model.predict_glimpse_teacher_cls(out.local_cls)
+                glimpse_cls_loss = F.mse_loss(glimpse_cls_pred, glimpse_targets.cls)
 
         active = [scene_loss, scene_cls_loss]
-        if compute_glimpse_targets is not None:
-            active.extend([glimpse_patches_loss, glimpse_cls_loss])
+        if enable_glimpse_patches_loss:
+            active.append(glimpse_patches_loss)
+        if enable_glimpse_cls_loss:
+            active.append(glimpse_cls_loss)
         combined = torch.stack(active).sum()
 
         return LossOutput(

@@ -273,10 +273,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         n_tokens=1, embed_dim=teacher.embed_dim, grid_size=1, momentum=cfg.norm_momentum,
     ).to(cfg.device)
 
-    # Glimpse normalizers (only if glimpse losses enabled)
+    # Glimpse normalizers (only if any glimpse loss enabled)
+    any_glimpse_loss = cfg.enable_glimpse_patches_loss or cfg.enable_glimpse_cls_loss
     glimpse_patches_norm: PositionAwareNorm | None = None
     glimpse_cls_norm: PositionAwareNorm | None = None
-    if cfg.enable_glimpse_losses:
+    if any_glimpse_loss:
         glimpse_G = glimpse_size_px // patch_size
         glimpse_patches_norm = PositionAwareNorm(
             n_tokens=glimpse_G * glimpse_G, embed_dim=teacher.embed_dim, grid_size=glimpse_G, momentum=cfg.norm_momentum,
@@ -294,7 +295,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             cls_norm.load_state_dict(cls_norm_state)
             norm_loaded = True
             # Load glimpse normalizers if available and enabled
-            if cfg.enable_glimpse_losses:
+            if any_glimpse_loss:
                 assert glimpse_patches_norm is not None and glimpse_cls_norm is not None
                 glimpse_patches_norm_state = ckpt_data.get("glimpse_patches_norm_state")
                 glimpse_cls_norm_state = ckpt_data.get("glimpse_cls_norm_state")
@@ -343,8 +344,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         targets = compute_normalized_targets(images, scene_size, scene_norm, cls_norm)
         return TrainBatch(images=images, labels=labels, scene_target=targets.patches, cls_target=targets.cls)
 
-    # Glimpse targets callable (only if glimpse losses enabled)
-    if cfg.enable_glimpse_losses:
+    # Glimpse targets callable (only if any glimpse loss enabled)
+    if any_glimpse_loss:
         assert glimpse_patches_norm is not None and glimpse_cls_norm is not None
         _gpn, _gcn = glimpse_patches_norm, glimpse_cls_norm
         def _compute_glimpse_targets(glimpse: Tensor) -> NormalizedTargets:
@@ -443,6 +444,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 scene_target=batch.scene_target,
                 cls_target=batch.cls_target,
                 compute_glimpse_targets=compute_glimpse_targets_fn,
+                enable_glimpse_patches_loss=cfg.enable_glimpse_patches_loss,
+                enable_glimpse_cls_loss=cfg.enable_glimpse_cls_loss,
                 glimpse_size_px=glimpse_size_px,
                 canvas_grid_size=G,
                 n_full_start_branches=cfg.n_full_start_branches,
@@ -470,8 +473,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 ema.update(f"{prefix}/loss", m.loss)
                 ema.update(f"{prefix}/scene_loss", m.scene_loss)
                 ema.update(f"{prefix}/scene_cls_loss", m.scene_cls_loss)
-                if cfg.enable_glimpse_losses:
+                if cfg.enable_glimpse_patches_loss:
                     ema.update(f"{prefix}/glimpse_patches_loss", m.glimpse_patches_loss)
+                if cfg.enable_glimpse_cls_loss:
                     ema.update(f"{prefix}/glimpse_cls_loss", m.glimpse_cls_loss)
                 ema.update(f"{prefix}/scene_cos", m.scene_cos)
                 ema.update(f"{prefix}/cls_cos", m.cls_cos)
