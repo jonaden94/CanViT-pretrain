@@ -29,7 +29,7 @@ class LossOutput(NamedTuple):
     scene_cls_loss: Tensor
     glimpse_patches_loss: Tensor
     glimpse_cls_loss: Tensor
-    combined: Tensor  # mean of active losses (for gradient scaling)
+    combined: Tensor  # sum of active losses
     scene_pred: Tensor  # for cosine similarity metrics
     cls_pred: Tensor
 
@@ -138,13 +138,13 @@ def training_step(
     def forward_glimpse(*, state: RecurrentState, vp: Viewpoint, use_ckpt: bool) -> GlimpseOutput:
         if use_ckpt:
             out = checkpoint(
-                lambda cv, cl, lr, ctr, sc: model.forward_step(
+                lambda cv, cl, ctr, sc: model.forward_step(
                     image=images,
-                    state=RecurrentState(canvas=cv, cls=cl, local_registers=lr),
+                    state=RecurrentState(canvas=cv, cls=cl),
                     viewpoint=Viewpoint(centers=ctr, scales=sc),
                     glimpse_size_px=glimpse_size_px,
                 ),
-                state.canvas, state.cls, state.local_registers, vp.centers, vp.scales,
+                state.canvas, state.cls, vp.centers, vp.scales,
                 use_reentrant=False,
             )
             assert isinstance(out, GlimpseOutput)
@@ -163,6 +163,7 @@ def training_step(
         if compute_glimpse_targets is not None:
             glimpse_targets = compute_glimpse_targets(out.glimpse)
             glimpse_patches_pred = model.predict_glimpse_teacher_patches(out.local_patches)
+            assert out.local_cls is not None, "local_cls required for glimpse losses"
             glimpse_cls_pred = model.predict_glimpse_teacher_cls(out.local_cls)
             glimpse_patches_loss = F.mse_loss(glimpse_patches_pred, glimpse_targets.patches)
             glimpse_cls_loss = F.mse_loss(glimpse_cls_pred, glimpse_targets.cls)
@@ -173,7 +174,7 @@ def training_step(
         active = [scene_loss, scene_cls_loss]
         if compute_glimpse_targets is not None:
             active.extend([glimpse_patches_loss, glimpse_cls_loss])
-        combined = torch.stack(active).mean()
+        combined = torch.stack(active).sum()
 
         return LossOutput(
             scene_loss=scene_loss,
@@ -237,7 +238,6 @@ def training_step(
                     chunk.state = RecurrentState(
                         canvas=out.state.canvas.detach(),
                         cls=out.state.cls.detach(),
-                        local_registers=out.state.local_registers.detach(),
                     )
                     chunk.vpe = out.vpe.detach() if out.vpe is not None else None
                     chunk.chunk_combined_loss = torch.zeros((), device=device)
