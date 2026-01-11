@@ -34,6 +34,8 @@ timed uv sync
 # Training
 log "Starting training..."
 exec uv run python -m avp_vit.train \
+    --train-dir "$IN21K_DIR" \
+    --val-dir "$IN1K_VAL_DIR" \
     --index-dir "$INDEX_DIR" \
     --ckpt-dir "$CHECKPOINTS_DIR" \
     --teacher-ckpt "$DINOV3_VITB16_CKPT" \
