@@ -358,6 +358,13 @@ def export_shard(
     n_patches: int,
 ) -> ShardData:
     """Run teacher inference on images, return ShardData."""
+    n_images = len(paths)
+
+    # Preallocate output buffers on GPU - fill in-place, single CPU transfer at end
+    patches = torch.empty(n_images, n_patches, embed_dim, dtype=torch.bfloat16, device=device)
+    cls = torch.empty(n_images, embed_dim, dtype=torch.bfloat16, device=device)
+    failed_indices: list[int] = []
+
     transform = val_transform(cfg.image_size)
     dataset = ImagePathDataset(image_root, paths, transform, cfg.image_size)
     loader = DataLoader(
@@ -368,14 +375,10 @@ def export_shard(
         shuffle=False,
     )
 
-    patches_list: list[Tensor] = []
-    cls_list: list[Tensor] = []
-    failed_indices: list[int] = []
-
     # Throughput tracking
     bytes_per_img = (n_patches + 1) * embed_dim * 2  # bfloat16 = 2 bytes
     t0 = time.perf_counter()
-    images_done = 0
+    write_idx = 0
 
     pbar = tqdm(loader, desc=f"Shard {shard_id}", leave=False, unit="batch")
 
@@ -386,31 +389,38 @@ def export_shard(
                 if not ok:
                     failed_indices.append(idx)
 
-            images = images.to(device, non_blocking=True)
+            # Synchronous transfer - safe
+            images = images.to(device)
             feats = teacher.forward_norm_features(images)
 
             # Verify dtype
             assert feats.patches.dtype == torch.bfloat16, f"Expected bfloat16, got {feats.patches.dtype}"
             assert feats.cls.dtype == torch.bfloat16, f"Expected bfloat16, got {feats.cls.dtype}"
 
-            # Move to CPU (GPU memory is precious, CPU has more headroom)
-            patches_list.append(feats.patches.cpu())
-            cls_list.append(feats.cls.cpu())
+            # Write in-place to preallocated buffers
+            batch_size = images.shape[0]
+            patches[write_idx : write_idx + batch_size] = feats.patches
+            cls[write_idx : write_idx + batch_size] = feats.cls
+            write_idx += batch_size
 
             # Update progress
-            images_done += images.shape[0]
             elapsed = time.perf_counter() - t0
             pbar.set_postfix({
-                "img/s": f"{images_done / elapsed:.0f}",
-                "MB/s": f"{images_done * bytes_per_img / elapsed / 1e6:.0f}",
+                "img/s": f"{write_idx / elapsed:.0f}",
+                "MB/s": f"{write_idx * bytes_per_img / elapsed / 1e6:.0f}",
             })
+
+    assert write_idx == n_images, f"Wrote {write_idx}, expected {n_images}"
+    assert patches.device.type == "cuda", f"patches on {patches.device}"
+    assert cls.device.type == "cuda", f"cls on {cls.device}"
 
     if failed_indices:
         log.warning(f"Shard {shard_id}: {len(failed_indices)} failed: {failed_indices}")
 
+    # Return GPU tensors - torch.save handles transfer
     return ShardData(
-        patches=torch.cat(patches_list),
-        cls=torch.cat(cls_list),
+        patches=patches,
+        cls=cls,
         paths=paths,
         class_idxs=class_idxs,
         shard_id=shard_id,
