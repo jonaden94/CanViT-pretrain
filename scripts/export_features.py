@@ -393,14 +393,14 @@ def export_shard(
             images = images.to(device)
             feats = teacher.forward_norm_features(images)
 
-            # Verify dtype
-            assert feats.patches.dtype == torch.bfloat16, f"Expected bfloat16, got {feats.patches.dtype}"
-            assert feats.cls.dtype == torch.bfloat16, f"Expected bfloat16, got {feats.cls.dtype}"
+            # Cast to bfloat16 (autocast affects compute, not necessarily output)
+            feats_patches = feats.patches.to(torch.bfloat16)
+            feats_cls = feats.cls.to(torch.bfloat16)
 
             # Write in-place to preallocated buffers
             batch_size = images.shape[0]
-            patches[write_idx : write_idx + batch_size] = feats.patches
-            cls[write_idx : write_idx + batch_size] = feats.cls
+            patches[write_idx : write_idx + batch_size] = feats_patches
+            cls[write_idx : write_idx + batch_size] = feats_cls
             write_idx += batch_size
 
             # Update progress
