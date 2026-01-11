@@ -238,7 +238,14 @@ def verify_or_create_meta(
         log.info("Created meta.json")
 
 
-def verify_existing_shard(path: Path, expected_hash: str, max_size: int) -> bool:
+def verify_existing_shard(
+    path: Path,
+    *,
+    expected_hash: str,
+    max_size: int,
+    teacher_model: str,
+    image_size: int,
+) -> bool:
     """Check if existing shard is valid. Uses mmap to avoid loading 6GB into RAM."""
     data = torch.load(path, weights_only=False, mmap=True)
 
@@ -252,6 +259,19 @@ def verify_existing_shard(path: Path, expected_hash: str, max_size: int) -> bool
 
     if len(data["paths"]) > max_size:
         log.warning(f"{path.name}: size {len(data['paths'])} > {max_size}, will re-export")
+        return False
+
+    # Verify critical fields match
+    if data.get("teacher_model") != teacher_model:
+        log.warning(f"{path.name}: teacher_model mismatch ({data.get('teacher_model')} != {teacher_model}), will re-export")
+        return False
+
+    if data.get("image_size") != image_size:
+        log.warning(f"{path.name}: image_size mismatch ({data.get('image_size')} != {image_size}), will re-export")
+        return False
+
+    if data.get("dtype") != "torch.bfloat16":
+        log.warning(f"{path.name}: dtype mismatch ({data.get('dtype')} != torch.bfloat16), will re-export")
         return False
 
     return True
@@ -541,7 +561,13 @@ def main(cfg: ExportConfig) -> None:
 
         # Skip if valid shard exists
         if shard_path.exists():
-            if verify_existing_shard(shard_path, parquet_sha256, cfg.shard_size):
+            if verify_existing_shard(
+                shard_path,
+                expected_hash=parquet_sha256,
+                max_size=cfg.shard_size,
+                teacher_model=cfg.teacher_model,
+                image_size=cfg.image_size,
+            ):
                 log.info(f"Shard {shard_id}: valid, skipping")
                 skipped += 1
                 continue
