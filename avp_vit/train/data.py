@@ -164,7 +164,6 @@ def create_loaders(cfg: "Config") -> Loaders:
     else:
         val_index_dir = Path(tempfile.mkdtemp(prefix="avp_val_index_"))
         log.info(f"Val: val_index_dir not provided, using temp dir: {val_index_dir}")
-        log.info("  (index will be created on first use, takes ~10-30s for IN1k)")
     val_ds: Dataset[tuple] = IndexedImageFolder(val_dir, val_index_dir, val_tf)
     assert len(val_ds) > 0, "val dataset empty"
     log.info(f"Val dataset: {len(val_ds):,} images, resolution: {sz}px")

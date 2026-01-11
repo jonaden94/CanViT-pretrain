@@ -73,7 +73,7 @@ class Config:
     )
     reset_normalizer: bool = False  # Re-warmup normalizer stats when resuming
     # Training
-    num_workers: int = 8
+    num_workers: int = 16
     crop_scale_min: float = 0.8
     image_resolution: int = 512
     # Logging

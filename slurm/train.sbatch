@@ -3,7 +3,7 @@
 #SBATCH --account=rrg-skrishna_gpu
 #SBATCH --time=3-00:00:00
 #SBATCH --gres=gpu:h100:1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --output=logs/train-%j.out
 #SBATCH --error=logs/train-%j.err
