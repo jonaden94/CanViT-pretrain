@@ -173,11 +173,14 @@ def verify_meta(
 ) -> None:
     """Verify meta.json matches current config, or create it."""
     # Fields that MUST match for shards to be compatible
+    # If ANY of these differ, features are incompatible
     expected = {
         "schema_version": 1,
         "shard_size": shard_size,
         "n_images": n_images,
         "parquet_sha256": parquet_hash,
+        "teacher_model": teacher_model,
+        "image_size": image_size,
     }
 
     if meta_path.exists():
@@ -194,12 +197,10 @@ def verify_meta(
         full_meta = {
             **expected,
             "n_shards": ceil(n_images / shard_size),
-            # Debug/provenance info (not verified, just for reference)
+            # Provenance (paths may differ across nodes, not verified)
             "parquet_path": str(parquet_path),
             "image_root": str(image_root),
-            "teacher_model": teacher_model,
             "teacher_ckpt": str(teacher_ckpt),
-            "image_size": image_size,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         with open(meta_path, "w") as f:
