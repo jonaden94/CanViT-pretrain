@@ -423,6 +423,7 @@ def export_shard(
         f"  cls:     min={cls.min().item():.3f} max={cls.max().item():.3f} "
         f"mean={cls.mean().item():.3f} std={cls.std().item():.3f}"
     )
+    log_gpu_memory(f"shard {shard_id} done")
 
     if failed_indices:
         log.warning(f"Shard {shard_id}: {len(failed_indices)} failed: {failed_indices}")
