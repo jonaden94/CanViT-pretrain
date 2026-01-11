@@ -19,9 +19,8 @@ import torch
 from PIL import Image
 from torch import Tensor
 from torch.utils.data import IterableDataset, get_worker_info
-from torchvision import transforms
 
-from .data import imagenet_normalize
+from .data import val_transform
 
 log = logging.getLogger(__name__)
 
@@ -50,21 +49,13 @@ class FeatureIterableDataset(IterableDataset):
         assert self.shard_files, f"No shards found in {shards_dir}"
 
         # Transform built lazily in __iter__ (needs image_size from shard metadata)
-        self._transform: transforms.Compose | None = None
+        self._transform = None
 
         log.info(f"FeatureIterableDataset init: {time.perf_counter() - t0:.2f}s")
 
     def set_epoch(self, epoch: int) -> None:
         """Set epoch for deterministic shard order shuffling."""
         self.epoch = epoch
-
-    def _build_transform(self, image_size: int) -> transforms.Compose:
-        return transforms.Compose([
-            transforms.Resize(image_size),
-            transforms.CenterCrop(image_size),
-            transforms.ToTensor(),
-            imagenet_normalize(),
-        ])
 
     def __iter__(self) -> Iterator[tuple[Tensor, Tensor, Tensor, int]]:
         worker_info = get_worker_info()
@@ -90,7 +81,7 @@ class FeatureIterableDataset(IterableDataset):
             # Build transform lazily from first shard's metadata
             if self._transform is None:
                 image_size = shard["image_size"]
-                self._transform = self._build_transform(image_size)
+                self._transform = val_transform(image_size)
                 log.debug(f"Worker {worker_id}: built transform for {image_size}px")
 
             n_samples = len(shard["paths"])

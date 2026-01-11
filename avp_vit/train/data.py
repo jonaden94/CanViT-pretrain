@@ -1,10 +1,12 @@
 """Data loading utilities for AVP training.
 
-Single source of truth for ImageNet normalization constants.
+Single source of truth for ImageNet normalization constants and transforms.
 """
 
 import logging
+import tempfile
 from collections.abc import Iterator
+from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias
 
 from torch import Tensor
@@ -13,7 +15,6 @@ if TYPE_CHECKING:
     from .config import Config
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
-from torchvision.datasets import ImageFolder
 
 from drac_imagenet import IndexedImageFolder
 
@@ -128,33 +129,43 @@ def create_loaders(cfg: "Config") -> Loaders:
 
     # Train loader: features or raw images
     if cfg.feature_shards_dir is not None:
-        assert cfg.feature_image_root is not None, "feature_image_root required"
+        log.info("Train: using PRECOMPUTED FEATURES")
+        assert cfg.feature_image_root is not None, "feature_image_root required with feature_shards_dir"
         from .feature_dataset import FeatureIterableDataset
         train_ds = FeatureIterableDataset(cfg.feature_shards_dir, cfg.feature_image_root)
-        log.info(f"Feature dataset: {len(train_ds.shard_files)} shards from {cfg.feature_shards_dir}")
+        log.info(f"  shards_dir: {cfg.feature_shards_dir}")
+        log.info(f"  image_root: {cfg.feature_image_root}")
+        log.info(f"  {len(train_ds.shard_files)} shards")
         train_loader = InfiniteLoader(DataLoader(
             train_ds, batch_size=cfg.batch_size, num_workers=cfg.num_workers,
             pin_memory=True, drop_last=True, persistent_workers=persistent,
         ))
     else:
-        train_dir, index_dir = cfg.train_dir, cfg.index_dir
+        log.info("Train: using RAW IMAGES (teacher inference at runtime)")
+        train_dir, train_index_dir = cfg.train_dir, cfg.train_index_dir
         assert train_dir.is_dir(), f"train_dir not found: {train_dir}"
+        assert train_index_dir is not None, "train_index_dir required for raw image training"
+        log.info(f"  train_dir: {train_dir}")
+        log.info(f"  index_dir: {train_index_dir}")
         train_tf = train_transform(sz, (cfg.crop_scale_min, 1.0))
-        if index_dir is not None:
-            log.info(f"Using IndexedImageFolder for train (index_dir={index_dir})")
-            train_ds_img: Dataset[tuple] = IndexedImageFolder(train_dir, index_dir, train_tf)
-        else:
-            train_ds_img = ImageFolder(str(train_dir), train_tf)
+        train_ds_img: Dataset[tuple] = IndexedImageFolder(train_dir, train_index_dir, train_tf)
         assert len(train_ds_img) > 0, "train dataset empty"
-        log.info(f"Train dataset: {len(train_ds_img):,} images")
+        log.info(f"  {len(train_ds_img):,} images")
         train_loader = InfiniteLoader(DataLoader(
             train_ds_img, batch_size=cfg.batch_size, shuffle=True,
             num_workers=cfg.num_workers, pin_memory=True, drop_last=True, persistent_workers=persistent,
         ))
 
-    # Val loader: always raw images
+    # Val loader
     val_tf = val_transform(sz)
-    val_ds: Dataset[tuple] = ImageFolder(str(val_dir), val_tf)
+    if cfg.val_index_dir is not None:
+        val_index_dir = cfg.val_index_dir
+        log.info(f"Val: using provided index_dir={val_index_dir}")
+    else:
+        val_index_dir = Path(tempfile.mkdtemp(prefix="avp_val_index_"))
+        log.info(f"Val: val_index_dir not provided, using temp dir: {val_index_dir}")
+        log.info("  (index will be created on first use, takes ~10-30s for IN1k)")
+    val_ds: Dataset[tuple] = IndexedImageFolder(val_dir, val_index_dir, val_tf)
     assert len(val_ds) > 0, "val dataset empty"
     log.info(f"Val dataset: {len(val_ds):,} images, resolution: {sz}px")
     # CRITICAL: shuffle=True required! Without it, batches are sequential

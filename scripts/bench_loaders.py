@@ -2,7 +2,7 @@
 """Benchmark data loader throughput.
 
 Interactive use:
-    uv run ipython -i scripts/bench_loaders.py -- --train-dir /path/to/train --num-workers 8
+    uv run ipython -i scripts/bench_loaders.py -- --train-dir /path/to/train --index-dir /path/to/index --num-workers 8
 
 Or import and call:
     from scripts.bench_loaders import bench_image_loader, bench_feature_loader
@@ -15,9 +15,11 @@ from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
-from torchvision import transforms
-from torchvision.datasets import ImageFolder
 from tqdm import tqdm
+
+from drac_imagenet import IndexedImageFolder
+
+from avp_vit.train.data import train_transform
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -30,21 +32,10 @@ DEFAULT_NUM_WORKERS = 8
 DEFAULT_IMAGE_SIZE = 512
 DEFAULT_NUM_BATCHES = 100  # how many batches to time
 
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
-
-
-def get_transform(size: int) -> transforms.Compose:
-    return transforms.Compose([
-        transforms.RandomResizedCrop(size, scale=(0.8, 1.0)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-    ])
-
 
 def bench_image_loader(
     train_dir: Path,
+    index_dir: Path,
     batch_size: int = DEFAULT_BATCH_SIZE,
     num_workers: int = DEFAULT_NUM_WORKERS,
     image_size: int = DEFAULT_IMAGE_SIZE,
@@ -56,8 +47,9 @@ def bench_image_loader(
 
     Returns images/sec.
     """
-    log.info(f"=== Image Loader Benchmark ===")
+    log.info("=== Image Loader Benchmark ===")
     log.info(f"  train_dir: {train_dir}")
+    log.info(f"  index_dir: {index_dir}")
     log.info(f"  batch_size: {batch_size}")
     log.info(f"  num_workers: {num_workers}")
     log.info(f"  image_size: {image_size}")
@@ -65,8 +57,8 @@ def bench_image_loader(
     log.info(f"  pin_memory: {pin_memory}")
     log.info(f"  persistent_workers: {persistent_workers}")
 
-    tf = get_transform(image_size)
-    ds = ImageFolder(str(train_dir), tf)
+    tf = train_transform(image_size, (0.8, 1.0))
+    ds = IndexedImageFolder(train_dir, index_dir, tf)
     log.info(f"  dataset size: {len(ds):,} images")
 
     persistent = persistent_workers and num_workers > 0
@@ -114,7 +106,7 @@ def bench_feature_loader(
     """
     from avp_vit.train.feature_dataset import FeatureIterableDataset
 
-    log.info(f"=== Feature Loader Benchmark ===")
+    log.info("=== Feature Loader Benchmark ===")
     log.info(f"  shards_dir: {shards_dir}")
     log.info(f"  image_root: {image_root}")
     log.info(f"  batch_size: {batch_size}")
@@ -170,7 +162,7 @@ def bench_feature_loader_features_only(
     """
     from torch.utils.data import IterableDataset, get_worker_info
 
-    log.info(f"=== Features-Only Benchmark (no image loading) ===")
+    log.info("=== Features-Only Benchmark (no image loading) ===")
     log.info(f"  shards_dir: {shards_dir}")
     log.info(f"  batch_size: {batch_size}")
     log.info(f"  num_workers: {num_workers}")
@@ -220,7 +212,7 @@ def sweep_workers(
     **kwargs,
 ) -> dict[int, float]:
     """Sweep num_workers and return throughput for each."""
-    results = {}
+    results: dict[int, float] = {}
     for nw in worker_counts:
         log.info(f"\n{'='*60}")
         log.info(f"num_workers = {nw}")
@@ -233,7 +225,7 @@ def sweep_workers(
     for nw, throughput in results.items():
         log.info(f"  {nw} workers: {throughput:.1f} img/sec")
 
-    best_nw = max(results, key=results.get)
+    best_nw = max(results, key=lambda k: results[k])
     log.info(f"Best: {best_nw} workers @ {results[best_nw]:.1f} img/sec")
     return results
 
@@ -241,6 +233,7 @@ def sweep_workers(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark data loaders")
     parser.add_argument("--train-dir", type=Path, help="Path to training images")
+    parser.add_argument("--index-dir", type=Path, help="Path to index (required with --train-dir)")
     parser.add_argument("--shards-dir", type=Path, help="Path to feature shards")
     parser.add_argument("--image-root", type=Path, help="Path to images for feature loader")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
@@ -254,10 +247,12 @@ if __name__ == "__main__":
     log.info(f"Device: {torch.cuda.get_device_name() if torch.cuda.is_available() else 'CPU'}")
 
     if args.train_dir:
+        assert args.index_dir, "--index-dir required with --train-dir"
         if args.sweep:
             sweep_workers(
                 bench_image_loader,
                 train_dir=args.train_dir,
+                index_dir=args.index_dir,
                 batch_size=args.batch_size,
                 image_size=args.image_size,
                 num_batches=args.num_batches,
@@ -265,6 +260,7 @@ if __name__ == "__main__":
         else:
             bench_image_loader(
                 args.train_dir,
+                args.index_dir,
                 batch_size=args.batch_size,
                 num_workers=args.num_workers,
                 image_size=args.image_size,
@@ -308,4 +304,4 @@ if __name__ == "__main__":
 
     log.info("\nDone. For interactive use:")
     log.info("  from scripts.bench_loaders import bench_image_loader, bench_feature_loader")
-    log.info("  bench_image_loader(Path('/path/to/train'), num_workers=4)")
+    log.info("  bench_image_loader(Path('/path/to/train'), Path('/path/to/index'), num_workers=4)")
