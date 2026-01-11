@@ -4,21 +4,21 @@ Precomputes DINOv3 features for all images, stores as sharded .pt files.
 This eliminates expensive 512px teacher inference during training.
 
 USAGE:
-    # Single shard (for testing)
-    uv run python scripts/export_features.py --shard 0
+    uv run python scripts/export_features.py \
+        --parquet /path/to/index.parquet \
+        --image-root /path/to/images \
+        --out-dir /path/to/output \
+        --teacher-ckpt /path/to/weights.pth \
+        --shard 0
 
     # Range of shards (for SLURM array jobs)
-    uv run python scripts/export_features.py --start-shard 0 --end-shard 100
-
-    # Paths default to env vars: AVP_TRAIN_DIR, AVP_INDEX_DIR, AVP_FEATURES_DIR, AVP_TEACHER_CKPT
+    uv run python scripts/export_features.py ... --start-shard 0 --end-shard 100
 
 DESIGN DECISIONS:
     - Shards are self-describing: each .pt contains all metadata needed to verify compatibility
-    - No meta.json: shards can be verified pairwise, no central coordination file
     - Atomic writes: .tmp → .pt rename prevents partial/corrupt shards on crash
     - Resume-friendly: existing shards are skipped automatically
     - GPU buffers preallocated: no per-batch .cpu() calls, no memory fragmentation
-    - No artificial sync: torch.save implicitly syncs when serializing GPU tensors
 
 SHARD SCHEMA (v1):
     # Data
@@ -68,7 +68,6 @@ THROUGHPUT:
 import gc
 import hashlib
 import logging
-import os
 import time
 import warnings
 from dataclasses import dataclass
@@ -118,16 +117,16 @@ log = logging.getLogger(__name__)
 class Config:
     """CLI arguments. Parsed by tyro."""
 
+    # Required paths
+    parquet: Path  # Index file (columns: path, class_idx, class_name)
+    image_root: Path  # Root directory containing images
+    out_dir: Path  # Output directory (shards/ subdirectory created)
+    teacher_ckpt: Path  # Teacher model weights
+
     # Shard selection: use --shard for single, or --start-shard/--end-shard for range
     shard: int | None = None
     start_shard: int | None = None
     end_shard: int | None = None
-
-    # Paths: default to env vars if not specified
-    parquet: Path | None = None  # Index file (columns: path, class_idx, class_name)
-    image_root: Path | None = None  # Root directory containing images
-    out_dir: Path | None = None  # Output directory (shards/ subdirectory created)
-    teacher_ckpt: Path | None = None  # Teacher model weights
 
     # Export settings
     teacher_model: str = "dinov3_vitb16"  # Model architecture name
@@ -200,19 +199,6 @@ def sha256_file(path: Path) -> str:
         while chunk := f.read(65536):
             h.update(chunk)
     return h.hexdigest()[:16]
-
-
-def resolve_paths(cfg: Config) -> tuple[Path, Path, Path, Path]:
-    """Resolve paths from config or env vars."""
-    image_root = cfg.image_root or Path(os.environ["AVP_TRAIN_DIR"])
-    parquet = (
-        cfg.parquet or Path(os.environ["AVP_INDEX_DIR"]) / f"{image_root.name}.parquet"
-    )
-    out_dir = cfg.out_dir or Path(os.environ["AVP_FEATURES_DIR"])
-    teacher_ckpt = cfg.teacher_ckpt or Path(
-        os.path.expanduser(os.environ["AVP_TEACHER_CKPT"])
-    )
-    return parquet, image_root, out_dir, teacher_ckpt
 
 
 def get_shard_range(cfg: Config, n_shards: int) -> tuple[int, int]:
@@ -401,16 +387,14 @@ def main(cfg: Config) -> None:
     """Main entry point. Run with: uv run python scripts/export_features.py --help"""
     device = torch.device("cuda")
 
-    # --- Resolve paths ---
-    parquet_path, image_root, out_dir, teacher_ckpt = resolve_paths(cfg)
-    shards_dir = out_dir / "shards"
+    shards_dir = cfg.out_dir / "shards"
     shards_dir.mkdir(parents=True, exist_ok=True)
 
-    log.info(f"out_dir: {out_dir}")
+    log.info(f"out_dir: {cfg.out_dir}")
     log.info(f"dtype: {STORAGE_DTYPE} ({STORAGE_BYTES} bytes)")
 
     # --- Load parquet metadata (cheap: doesn't load data) ---
-    n_images = pq.read_metadata(parquet_path).num_rows
+    n_images = pq.read_metadata(cfg.parquet).num_rows
     n_shards = ceil(n_images / cfg.shard_size)
     log.info(f"Parquet: {n_images:,} images → {n_shards} shards")
 
@@ -419,17 +403,26 @@ def main(cfg: Config) -> None:
 
     # --- Preflight checks (before any GPU work) ---
     preflight_checks(
-        parquet_path, image_root, teacher_ckpt, cfg, n_images, n_shards, start, end
+        cfg.parquet,
+        cfg.image_root,
+        cfg.teacher_ckpt,
+        cfg,
+        n_images,
+        n_shards,
+        start,
+        end,
     )
     log.info("Preflight OK")
 
     # --- Compute parquet hash (ensures same image ordering across runs) ---
-    parquet_hash = sha256_file(parquet_path)
+    parquet_hash = sha256_file(cfg.parquet)
     log.info(f"Parquet hash: {parquet_hash}")
 
     # --- Load teacher model ---
     teacher = (
-        create_backbone(cfg.teacher_model, weights=str(teacher_ckpt)).to(device).eval()
+        create_backbone(cfg.teacher_model, weights=str(cfg.teacher_ckpt))
+        .to(device)
+        .eval()
     )
     for p in teacher.parameters():
         p.requires_grad = False  # Inference only
@@ -472,7 +465,7 @@ def main(cfg: Config) -> None:
     )
 
     # --- Load full parquet table for slicing ---
-    table = pq.read_table(parquet_path)
+    table = pq.read_table(cfg.parquet)
 
     # --- Export loop ---
     t0_total = time.perf_counter()
@@ -497,16 +490,16 @@ def main(cfg: Config) -> None:
             paths=paths,
             class_idxs=class_idxs,
             start_idx=start_idx,
-            image_root=image_root,
+            image_root=cfg.image_root,
             shards_dir=shards_dir,
             teacher=teacher,
             device=device,
             cfg=cfg,
             n_patches=n_patches,
             embed_dim=embed_dim,
-            parquet_path=parquet_path,
+            parquet_path=cfg.parquet,
             parquet_hash=parquet_hash,
-            teacher_ckpt=teacher_ckpt,
+            teacher_ckpt=cfg.teacher_ckpt,
             pbar_global=pbar,
         )
         total_bytes += shard_bytes
