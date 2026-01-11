@@ -38,9 +38,10 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ImageNet normalization constants
+# Constants
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+FILE_READ_CHUNK = 65536  # 64KB - standard I/O buffer size
 
 
 # =============================================================================
@@ -132,7 +133,7 @@ def load_teacher(model: str, ckpt: Path, device: torch.device):
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
+        for chunk in iter(lambda: f.read(FILE_READ_CHUNK), b""):
             h.update(chunk)
     return h.hexdigest()[:16]
 
