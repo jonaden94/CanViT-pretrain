@@ -166,10 +166,13 @@ def create_loaders(cfg: "Config") -> Loaders:
     val_tf = val_transform(sz)
     if cfg.val_index_dir is not None:
         val_index_dir = cfg.val_index_dir
-        log.info(f"Val: using provided index_dir={val_index_dir}")
+        log.info(f"Val: using provided val_index_dir={val_index_dir}")
+    elif cfg.train_index_dir is not None:
+        val_index_dir = cfg.train_index_dir
+        log.info(f"Val: val_index_dir not set, using train_index_dir={val_index_dir}")
     else:
         val_index_dir = Path(tempfile.mkdtemp(prefix="avp_val_index_"))
-        log.info(f"Val: val_index_dir not provided, using temp dir: {val_index_dir}")
+        log.info(f"Val: no index_dir available, using temp dir: {val_index_dir}")
     val_ds: Dataset[tuple] = IndexedImageFolder(val_dir, val_index_dir, val_tf)
     assert len(val_ds) > 0, "val dataset empty"
     log.info(f"Val dataset: {len(val_ds):,} images, resolution: {sz}px")
