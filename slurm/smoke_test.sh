@@ -28,13 +28,15 @@ run_checks() {
     echo "  HF_HOME:                $HF_HOME"
     echo "  TORCH_HOME:             $TORCH_HOME"
     echo "  SCRATCH:                $SCRATCH"
+    echo "  AVP_TRAIN_DIR:          $AVP_TRAIN_DIR"
+    echo "  AVP_INDEX_DIR:          $AVP_INDEX_DIR"
     echo ""
 
-    # 1. Paths
+    # 1. Paths (uses AVP_* from env.sh)
     echo "--- Paths ---"
-    [ -f ~/projects/def-skrishna/checkpoints/dinov3/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth ] && ok "Teacher checkpoint" || fail "Teacher checkpoint missing"
-    [ -d /datashare/imagenet/winter21_whole ] && ok "IN21k train dir" || fail "IN21k train dir missing"
-    [ -d /datashare/imagenet/ILSVRC2012/val ] && ok "IN1k val dir" || fail "IN1k val dir missing"
+    [ -f "$AVP_TEACHER_CKPT" ] && ok "Teacher checkpoint" || fail "Teacher checkpoint missing: $AVP_TEACHER_CKPT"
+    [ -d "$AVP_TRAIN_DIR" ] && ok "IN21k train dir" || fail "IN21k train dir missing: $AVP_TRAIN_DIR"
+    [ -d "$AVP_VAL_DIR" ] && ok "IN1k val dir" || fail "IN1k val dir missing: $AVP_VAL_DIR"
     [ -f ~/comet_api_key.txt ] && ok "Comet API key" || echo "   (optional) Comet API key missing"
     echo ""
 
@@ -56,7 +58,7 @@ run_checks() {
     uv run python -c "
 from canvit.hub import create_backbone
 import os
-b = create_backbone('dinov3_vitb16', weights=os.path.expanduser('~/projects/def-skrishna/checkpoints/dinov3/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth'))
+b = create_backbone('dinov3_vitb16', weights=os.path.expanduser(os.environ['AVP_TEACHER_CKPT']))
 print(f'  {b.embed_dim}d, {b.n_blocks} blocks')
 " && ok "Teacher loads" || fail "Teacher load failed"
     echo ""
@@ -72,10 +74,11 @@ print('  loaded')
 
     # 6. Dataset index
     echo "--- Dataset Index ---"
-    if [ -f "$SCRATCH/in21k_index/winter21_whole.parquet" ]; then
+    if [ -f "$AVP_INDEX_DIR/winter21_whole.parquet" ]; then
         ok "IN21k index cached"
     else
-        echo "   (not cached - will take ~8 min on first train run)"
+        echo "   Not cached: $AVP_INDEX_DIR/winter21_whole.parquet"
+        echo "   Will be built on first train run"
     fi
     echo ""
 

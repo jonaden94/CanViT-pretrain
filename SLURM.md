@@ -118,18 +118,20 @@ print('Probe loaded')
 
 ### Dataset Index
 
-Saves ~8 min on first training run:
+Pre-build parquet index (otherwise built on first train run):
 ```bash
+source slurm/env.sh
 uv run python -c "
-import os; from pathlib import Path; from drac_imagenet import IndexedImageFolder
-IndexedImageFolder(Path('/datashare/imagenet/winter21_whole'), Path(os.environ['SCRATCH']) / 'in21k_index', None)
+from pathlib import Path; from drac_imagenet import IndexedImageFolder; import os
+IndexedImageFolder(Path(os.environ['AVP_TRAIN_DIR']), Path(os.environ['AVP_INDEX_DIR']), None)
 "
 ```
 
 ### HF Probe
 
 ```bash
-HF_HOME="$SCRATCH/.huggingface" uv run python -c "
+source slurm/env.sh
+uv run python -c "
 from dinov3_probes import DINOv3LinearClassificationHead
 DINOv3LinearClassificationHead.from_pretrained('yberreby/dinov3-vitb16-lvd1689m-in1k-512x512-linear-clf-probe')
 "
