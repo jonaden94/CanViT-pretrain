@@ -414,6 +414,16 @@ def export_shard(
     assert patches.device.type == "cuda", f"patches on {patches.device}"
     assert cls.device.type == "cuda", f"cls on {cls.device}"
 
+    # Stats (cheap reductions on GPU)
+    log.info(
+        f"  patches: min={patches.min().item():.3f} max={patches.max().item():.3f} "
+        f"mean={patches.mean().item():.3f} std={patches.std().item():.3f}"
+    )
+    log.info(
+        f"  cls:     min={cls.min().item():.3f} max={cls.max().item():.3f} "
+        f"mean={cls.mean().item():.3f} std={cls.std().item():.3f}"
+    )
+
     if failed_indices:
         log.warning(f"Shard {shard_id}: {len(failed_indices)} failed: {failed_indices}")
 
