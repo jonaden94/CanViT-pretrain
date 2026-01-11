@@ -62,7 +62,7 @@ from tqdm import tqdm
 # Constants
 # -----------------------------------------------------------------------------
 
-STORAGE_DTYPE = torch.bfloat16
+STORAGE_DTYPE = torch.float16
 STORAGE_BYTES = torch.tensor([], dtype=STORAGE_DTYPE).element_size()
 
 ImageFile.LOAD_TRUNCATED_IMAGES = False
