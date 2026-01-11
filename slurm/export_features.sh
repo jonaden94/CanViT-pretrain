@@ -3,7 +3,7 @@
 #SBATCH --gres=gpu:nvidia_h100_80gb_hbm3_1g.10gb:1
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=0:30:00
+#SBATCH --time=1:00:00
 #SBATCH --output=logs/export_%A_%a.out
 #SBATCH --error=logs/export_%A_%a.err
 
