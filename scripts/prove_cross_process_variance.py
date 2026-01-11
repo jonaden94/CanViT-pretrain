@@ -16,7 +16,7 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
-def get_features(image_path: Path, ckpt_path: Path, size: int, warmup_f32: bool = False) -> torch.Tensor:
+def get_features(image_path: Path, ckpt_path: Path, size: int, batch_size: int = 1) -> torch.Tensor:
     """Run bf16 autocast inference, return raw output."""
     device = torch.device("cuda")
 
@@ -30,6 +30,11 @@ def get_features(image_path: Path, ckpt_path: Path, size: int, warmup_f32: bool 
     img = Image.open(image_path).convert("RGB")
     tensor = transform(img).unsqueeze(0).to(device)
 
+    # Pad batch with copies to test batch size effect
+    if batch_size > 1:
+        tensor = tensor.repeat(batch_size, 1, 1, 1)
+        print(f"Using batch_size={batch_size}, input shape={tensor.shape}")
+
     # Load model
     teacher = create_backbone("dinov3_vitb16", weights=str(ckpt_path))
     teacher = teacher.to(device).eval()
@@ -37,14 +42,9 @@ def get_features(image_path: Path, ckpt_path: Path, size: int, warmup_f32: bool 
         p.requires_grad = False
 
     # Inference
-    with torch.no_grad():
-        if warmup_f32:
-            print("Running f32 warmup first...")
-            _ = teacher.forward_norm_features(tensor)
-
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            feats = teacher.forward_norm_features(tensor)
-            return feats.patches[0].cpu()
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        feats = teacher.forward_norm_features(tensor)
+        return feats.patches[0].cpu()  # Return first image only
 
 
 def main():
@@ -54,10 +54,10 @@ def main():
     parser.add_argument("--size", type=int, default=512)
     parser.add_argument("--output", type=Path, required=True, help="Save output tensor here")
     parser.add_argument("--compare", type=Path, help="Compare to this saved tensor")
-    parser.add_argument("--warmup-f32", action="store_true", help="Run f32 inference before bf16")
+    parser.add_argument("--batch-size", type=int, default=1, help="Batch size (export uses 64)")
     args = parser.parse_args()
 
-    patches = get_features(args.image, args.ckpt, args.size, warmup_f32=args.warmup_f32)
+    patches = get_features(args.image, args.ckpt, args.size, batch_size=args.batch_size)
     print(f"Output shape: {patches.shape}, dtype: {patches.dtype}")
     print(f"Output range: [{patches.min():.4f}, {patches.max():.4f}]")
 
