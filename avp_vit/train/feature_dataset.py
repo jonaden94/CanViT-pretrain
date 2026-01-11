@@ -1,19 +1,24 @@
-"""Dataset for loading precomputed teacher features from shards.
+"""IterableDataset for precomputed teacher features + images.
 
-Assumes shards are pre-shuffled (random class distribution per shard).
-Use ShardSampler for efficient shard-sequential access with within-shard shuffle.
+Design choices:
+- IterableDataset, not map-style: each worker loads its own shards independently,
+  no shared file handles, no forking issues.
+- Sequential iteration within shards: shards are pre-shuffled, no need to shuffle
+  within. Shuffle shard order between epochs if desired.
+- Workers split shards via get_worker_info(): worker i gets shards i, i+nw, i+2*nw, ...
+- No __init__ file I/O beyond glob: avoids creating handles that get forked.
+- Metadata (image_size, etc.) read lazily from first shard in each worker.
 """
 
-import bisect
 import logging
-import random
+import time
 from pathlib import Path
-from typing import Iterator, NamedTuple
+from typing import Iterator
 
 import torch
 from PIL import Image
 from torch import Tensor
-from torch.utils.data import Dataset, Sampler
+from torch.utils.data import IterableDataset, get_worker_info
 from torchvision import transforms
 
 from .data import imagenet_normalize
@@ -21,141 +26,87 @@ from .data import imagenet_normalize
 log = logging.getLogger(__name__)
 
 
-class FeatureSample(NamedTuple):
-    """Single sample from feature dataset."""
-    image: Tensor    # [3, H, W] normalized
-    patches: Tensor  # [n_patches, embed_dim]
-    cls: Tensor      # [embed_dim]
-    class_idx: int
+class FeatureIterableDataset(IterableDataset):
+    """Iterable dataset for precomputed features + corresponding images.
 
+    Args:
+        shards_dir: Directory containing shard .pt files
+        image_root: Root directory for images (paths in shards are relative to this)
+        epoch: Current epoch (for shard order shuffling between epochs)
+    """
 
-class FeatureDataset(Dataset[FeatureSample]):
-    """Dataset for precomputed teacher features + corresponding images."""
-
-    def __init__(self, shards_dir: Path, image_root: Path):
+    def __init__(self, shards_dir: Path, image_root: Path, epoch: int = 0):
+        t0 = time.perf_counter()
         self.shards_dir = Path(shards_dir)
         self.image_root = Path(image_root)
+        self.epoch = epoch
 
-        # Discover shards
-        shard_files = sorted(self.shards_dir.glob("*.pt"))
-        assert shard_files, f"No shards found in {shards_dir}"
-        self._shard_ids = [int(f.stem) for f in shard_files]
-        self.n_shards = len(self._shard_ids)
+        # Only glob here - no torch.load, no file handles to fork
+        log.info(f"Globbing shards in {self.shards_dir}...")
+        t_glob = time.perf_counter()
+        self.shard_files = sorted(self.shards_dir.glob("*.pt"))
+        log.info(f"  Found {len(self.shard_files)} shards in {time.perf_counter() - t_glob:.2f}s")
 
-        # Load metadata from first shard
-        first = self._load_shard(0)
-        self.image_size = first["image_size"]
-        self.embed_dim = first["embed_dim"]
-        self.n_patches = first["n_patches"]
+        assert self.shard_files, f"No shards found in {shards_dir}"
 
-        # Build shard offsets
-        self._shard_sizes: list[int] = []
-        self._shard_offsets: list[int] = []
-        offset = 0
-        for i in range(self.n_shards):
-            self._shard_offsets.append(offset)
-            size = len(self._load_shard(i)["paths"])
-            self._shard_sizes.append(size)
-            offset += size
-        self.n_images = offset
+        # Transform built lazily in __iter__ (needs image_size from shard metadata)
+        self._transform: transforms.Compose | None = None
 
-        # Transform matching export
-        self.transform = transforms.Compose([
-            transforms.Resize(self.image_size),
-            transforms.CenterCrop(self.image_size),
+        log.info(f"FeatureIterableDataset init: {time.perf_counter() - t0:.2f}s")
+
+    def set_epoch(self, epoch: int) -> None:
+        """Set epoch for deterministic shard order shuffling."""
+        self.epoch = epoch
+
+    def _build_transform(self, image_size: int) -> transforms.Compose:
+        return transforms.Compose([
+            transforms.Resize(image_size),
+            transforms.CenterCrop(image_size),
             transforms.ToTensor(),
             imagenet_normalize(),
         ])
 
-        # Current shard cache (single shard, no LRU)
-        self._cached_shard_idx: int | None = None
-        self._cached_shard: dict | None = None
+    def __iter__(self) -> Iterator[tuple[Tensor, Tensor, Tensor, int]]:
+        worker_info = get_worker_info()
+        worker_id = worker_info.id if worker_info else 0
+        num_workers = worker_info.num_workers if worker_info else 1
 
-        log.info(f"FeatureDataset: {self.n_images:,} images, {self.n_shards} shards")
+        # Shuffle shard order deterministically per epoch
+        import random
+        rng = random.Random(self.epoch)
+        shards = list(self.shard_files)
+        rng.shuffle(shards)
 
-    def _load_shard(self, logical_idx: int) -> dict:
-        shard_id = self._shard_ids[logical_idx]
-        path = self.shards_dir / f"{shard_id:05d}.pt"
-        return torch.load(path, map_location="cpu", weights_only=False, mmap=True)
+        # Each worker takes every num_workers-th shard
+        shards = shards[worker_id::num_workers]
 
-    def _get_shard(self, logical_idx: int) -> dict:
-        """Get shard, using single-shard cache."""
-        if self._cached_shard_idx != logical_idx:
-            self._cached_shard = self._load_shard(logical_idx)
-            self._cached_shard_idx = logical_idx
-        assert self._cached_shard is not None
-        return self._cached_shard
+        log.debug(f"Worker {worker_id}/{num_workers}: processing {len(shards)} shards")
 
-    def _find_shard(self, idx: int) -> tuple[int, int]:
-        """Find (logical_shard_idx, local_idx) for global index."""
-        logical_idx = bisect.bisect_right(self._shard_offsets, idx) - 1
-        local_idx = idx - self._shard_offsets[logical_idx]
-        return logical_idx, local_idx
+        for shard_idx, shard_path in enumerate(shards):
+            t0 = time.perf_counter()
+            shard = torch.load(shard_path, map_location="cpu", weights_only=False, mmap=True)
+            load_time = time.perf_counter() - t0
 
-    def __len__(self) -> int:
-        return self.n_images
+            # Build transform lazily from first shard's metadata
+            if self._transform is None:
+                image_size = shard["image_size"]
+                self._transform = self._build_transform(image_size)
+                log.debug(f"Worker {worker_id}: built transform for {image_size}px")
 
-    def __getitem__(self, idx: int) -> FeatureSample:
-        logical_shard_idx, local_idx = self._find_shard(idx)
-        shard = self._get_shard(logical_shard_idx)
+            n_samples = len(shard["paths"])
+            log.debug(f"Worker {worker_id}: shard {shard_idx}/{len(shards)} "
+                     f"({shard_path.name}, {n_samples} samples, loaded in {load_time:.2f}s)")
 
-        rel_path = shard["paths"][local_idx]
-        img = Image.open(self.image_root / rel_path).convert("RGB")
-        img_tensor = self.transform(img)
-        assert isinstance(img_tensor, Tensor)
+            # Sequential iteration - shards are pre-shuffled
+            for i in range(n_samples):
+                rel_path = shard["paths"][i]
+                img = Image.open(self.image_root / rel_path).convert("RGB")
+                img_tensor = self._transform(img)
+                assert isinstance(img_tensor, Tensor)
 
-        return FeatureSample(
-            image=img_tensor,
-            patches=shard["patches"][local_idx],
-            cls=shard["cls"][local_idx],
-            class_idx=int(shard["class_idxs"][local_idx]),
-        )
-
-    def get_path(self, idx: int) -> str:
-        logical_shard_idx, local_idx = self._find_shard(idx)
-        return self._get_shard(logical_shard_idx)["paths"][local_idx]
-
-    def get_metadata(self) -> dict:
-        shard = self._get_shard(0)
-        return {
-            "teacher_model": shard["teacher_model"],
-            "image_size": shard["image_size"],
-            "embed_dim": shard["embed_dim"],
-            "n_patches": shard["n_patches"],
-            "dtype": shard["dtype"],
-            "parquet_sha256": shard["parquet_sha256"],
-        }
-
-
-class ShardSampler(Sampler[int]):
-    """Sampler for shard-sequential access with within-shard shuffle.
-
-    Each epoch: shuffle shard order, shuffle within each shard.
-    Yields all indices from shard N before moving to shard N+1.
-    """
-
-    def __init__(self, dataset: FeatureDataset, seed: int = 0):
-        self.dataset = dataset
-        self.seed = seed
-        self.epoch = 0
-
-    def set_epoch(self, epoch: int) -> None:
-        self.epoch = epoch
-
-    def __len__(self) -> int:
-        return self.dataset.n_images
-
-    def __iter__(self) -> Iterator[int]:
-        rng = random.Random(self.seed + self.epoch)
-
-        # Shuffle shard order
-        shard_order = list(range(self.dataset.n_shards))
-        rng.shuffle(shard_order)
-
-        for shard_idx in shard_order:
-            offset = self.dataset._shard_offsets[shard_idx]
-            size = self.dataset._shard_sizes[shard_idx]
-            # Shuffle within shard
-            local_indices = list(range(offset, offset + size))
-            rng.shuffle(local_indices)
-            yield from local_indices
+                yield (
+                    img_tensor,
+                    shard["patches"][i],
+                    shard["cls"][i],
+                    int(shard["class_idxs"][i]),
+                )
