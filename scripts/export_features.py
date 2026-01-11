@@ -11,6 +11,7 @@ import os
 import time
 import warnings
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from math import ceil
 from pathlib import Path
 
@@ -153,7 +154,9 @@ def export_shard(
     cfg: Config,
     n_patches: int,
     embed_dim: int,
+    parquet_path: Path,
     parquet_hash: str,
+    teacher_ckpt: Path,
 ) -> None:
     """Export one shard: inference → save → cleanup."""
     n = len(paths)
@@ -204,18 +207,22 @@ def export_shard(
             "paths": paths,
             "class_idxs": torch.tensor(class_idxs, dtype=torch.int32),
             "failed_indices": failed,
-            # Position
+            # Position (indices into parquet table)
             "shard_id": shard_id,
             "start_idx": start_idx,
             "end_idx": start_idx + n,
             # Compatibility (must match across shards)
+            "parquet_path": str(parquet_path),
             "parquet_sha256": parquet_hash,
             "teacher_model": cfg.teacher_model,
+            "teacher_ckpt": str(teacher_ckpt),
             "image_size": cfg.image_size,
             "shard_size": cfg.shard_size,
             "dtype": str(STORAGE_DTYPE),
             "embed_dim": embed_dim,
             "n_patches": n_patches,
+            # Provenance
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "schema_version": 1,
         },
         tmp,
@@ -309,7 +316,9 @@ def main(cfg: Config) -> None:
             cfg=cfg,
             n_patches=n_patches,
             embed_dim=embed_dim,
+            parquet_path=parquet_path,
             parquet_hash=parquet_hash,
+            teacher_ckpt=teacher_ckpt,
         )
 
     log.info("Done")
