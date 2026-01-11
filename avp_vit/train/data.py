@@ -56,28 +56,34 @@ MAX_CONSECUTIVE_FAILURES = 10
 
 
 class InfiniteLoader:
-    """Infinite iterator over a DataLoader, yields images only."""
+    """Infinite iterator over a DataLoader with retry on worker errors.
+
+    Note: We use explicit iterator management instead of a generator because
+    when an exception propagates out of a Python generator, the generator is
+    finalized (gi_frame=None) and subsequent next() calls raise StopIteration.
+    """
 
     def __init__(self, loader: DataLoader[ImageBatch]) -> None:
-        self._gen = self._infinite(loader)
-
-    def _infinite(self, loader: DataLoader[ImageBatch]) -> Iterator[ImageBatch]:
-        while True:
-            yield from loader
+        self._loader = loader
+        self._iter: Iterator[ImageBatch] | None = None
 
     def _next_with_retry(self) -> ImageBatch:
         failures = 0
         while True:
+            if self._iter is None:
+                self._iter = iter(self._loader)
             try:
-                batch = next(self._gen)
-                return batch
+                return next(self._iter)
             except StopIteration:
-                raise
+                # End of epoch - start new one
+                self._iter = iter(self._loader)
             except Exception as e:
                 failures += 1
                 log.warning(f"Batch failed ({failures}/{MAX_CONSECUTIVE_FAILURES}): {e}")
                 if failures >= MAX_CONSECUTIVE_FAILURES:
                     raise RuntimeError(f"{MAX_CONSECUTIVE_FAILURES} consecutive batch failures") from e
+                # Worker error corrupts iterator state - reset it
+                self._iter = None
 
     def next_batch(self) -> Tensor:
         """Get next batch of images (discards labels)."""
