@@ -366,7 +366,7 @@ class FeatureExporter:
         t0 = time.perf_counter()
         write_idx = 0
 
-        with torch.no_grad(), torch.autocast("cuda", dtype=STORAGE_DTYPE):
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
             for imgs, indices, ok, batch_hashes in tqdm(loader, desc=f"Shard {shard_id}", leave=False):
                 for i, success, h in zip(indices.tolist(), ok.tolist(), batch_hashes):
                     hashes[i] = h

@@ -10,26 +10,15 @@ Usage (in interactive session):
 """
 
 import argparse
+import sys
 from pathlib import Path
 
 import torch
 from canvit.hub import create_backbone
-from PIL import Image
-from torchvision import transforms
 
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
-
-
-def load_and_transform(path: Path, size: int) -> torch.Tensor:
-    transform = transforms.Compose([
-        transforms.Resize(size),
-        transforms.CenterCrop(size),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-    ])
-    img = Image.open(path).convert("RGB")
-    return transform(img)
+# Import exact same dataset class as export
+sys.path.insert(0, str(Path(__file__).parent))
+from export_features import ImageDataset
 
 
 def compare(name: str, a: torch.Tensor, b: torch.Tensor) -> None:
@@ -51,18 +40,25 @@ def main():
 
     # Load shard
     shard = torch.load(args.shard, map_location="cpu", weights_only=False, mmap=True)
-    stored_patches = shard["patches"][args.idx]  # bfloat16
+    stored_patches = shard["patches"][args.idx]
     rel_path = shard["paths"][args.idx]
     print(f"Image: {rel_path}")
     print(f"Stored dtype: {stored_patches.dtype}")
 
-    # Load image
-    image_path = args.image_root / rel_path
-    img_tensor = load_and_transform(image_path, shard["image_size"]).unsqueeze(0).to(device)
+    # Load image using EXACT same Dataset class as export
+    dataset = ImageDataset(args.image_root, [rel_path], shard["image_size"])
+    img_tensor, idx, success, img_hash = dataset[0]
+    assert success, f"Failed to load image: {rel_path}"
+    print(f"Image hash: {img_hash}")
+    print(f"Stored hash: {shard['image_hashes'][args.idx]}")
+    assert img_hash == shard["image_hashes"][args.idx], "Hash mismatch!"
+    img_tensor = img_tensor.unsqueeze(0).to(device)
 
-    # Load teacher
+    # Load teacher (exact same as export)
     teacher = create_backbone(args.teacher_model, weights=str(args.teacher_ckpt))
     teacher = teacher.to(device).eval()
+    for p in teacher.parameters():
+        p.requires_grad = False
 
     with torch.no_grad():
         # Run inference at different precisions
@@ -73,11 +69,11 @@ def main():
         patches_f32 = feats_f32.patches[0].cpu()  # float32
         print(f"float32 output range: [{patches_f32.min():.4f}, {patches_f32.max():.4f}]")
 
-        # bfloat16 autocast (what export uses)
+        # bfloat16 autocast → float16 storage (what export uses)
         with torch.autocast(device.type, dtype=torch.bfloat16):
             feats_bf16 = teacher.forward_norm_features(img_tensor)
-            patches_bf16_raw = feats_bf16.patches[0].cpu()  # f32 from autocast
-            patches_bf16_stored = patches_bf16_raw.to(torch.bfloat16)  # matches export path
+            patches_autocast_raw = feats_bf16.patches[0].cpu()  # f32 from autocast
+            patches_export_path = patches_autocast_raw.to(torch.float16)  # matches export: bf16 autocast → f16 storage
 
         print("\n=== Precision comparison ===")
 
@@ -90,14 +86,14 @@ def main():
         compare("f32 → f16 ", patches_f32, patches_to_f16.float())
 
         print("\nAutocast vs f32 (same run):")
-        compare("bf16 autocast raw vs f32", patches_f32, patches_bf16_raw)
-        compare("bf16 autocast→bf16 vs f32", patches_f32, patches_bf16_stored)
+        compare("bf16 autocast raw vs f32  ", patches_f32, patches_autocast_raw)
+        compare("bf16 autocast→f16 vs f32  ", patches_f32, patches_export_path)
 
-        print("\nStored (bf16) vs fresh:")
-        compare("stored vs f32              ", stored_patches, patches_f32)
-        compare("stored vs f32→bf16         ", stored_patches, patches_to_bf16)
-        compare("stored vs autocast raw     ", stored_patches, patches_bf16_raw)
-        compare("stored vs autocast→bf16   ", stored_patches, patches_bf16_stored)  # exact export path
+        print("\nStored vs fresh:")
+        compare("stored vs f32             ", stored_patches, patches_f32)
+        compare("stored vs f32→f16         ", stored_patches, patches_to_f16)
+        compare("stored vs autocast raw    ", stored_patches, patches_autocast_raw)
+        compare("stored vs autocast→f16   ", stored_patches, patches_export_path)  # exact export path
 
         # Run autocast twice to check determinism
         print("\n=== Determinism check ===")
