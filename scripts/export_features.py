@@ -408,6 +408,7 @@ class FeatureExporter:
                 "dtype": str(STORAGE_DTYPE),
                 "embed_dim": self.embed_dim,
                 "n_patches": self.n_patches,
+                "batch_size": cfg.batch_size,
                 # Provenance
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "git_commit": self.git_commit,
