@@ -16,8 +16,8 @@ from canvit import Viewpoint
 from .viewpoint import Viewpoint as NamedViewpoint, ViewpointType
 
 
-class NormalizedTargets(NamedTuple):
-    """Normalized teacher features (patches + CLS)."""
+class TeacherTargets(NamedTuple):
+    """Teacher features (patches + CLS). May be normalized or raw depending on use."""
     patches: Tensor
     cls: Tensor
 
@@ -78,7 +78,11 @@ def training_step(
     images: Tensor,
     scene_target: Tensor,
     cls_target: Tensor,
-    compute_glimpse_targets: Callable[[Tensor], NormalizedTargets] | None,
+    raw_scene_target: Tensor,
+    raw_cls_target: Tensor,
+    scene_denorm: Callable[[Tensor], Tensor],
+    cls_denorm: Callable[[Tensor], Tensor],
+    compute_glimpse_targets: Callable[[Tensor], TeacherTargets] | None,
     enable_scene_patches_loss: bool,
     enable_scene_cls_loss: bool,
     enable_glimpse_patches_loss: bool,
@@ -176,10 +180,12 @@ def training_step(
             glimpse_targets = compute_glimpse_targets(out.glimpse)
             if enable_glimpse_patches_loss:
                 glimpse_patches_pred = model.predict_glimpse_teacher_patches(out.local_patches)
-                glimpse_patches_loss = F.mse_loss(glimpse_patches_pred, glimpse_targets.patches)
+                cos_sim = F.cosine_similarity(glimpse_patches_pred, glimpse_targets.patches, dim=-1)
+                glimpse_patches_loss = 1 - cos_sim.mean()
             if enable_glimpse_cls_loss:
                 glimpse_cls_pred = model.predict_glimpse_teacher_cls(out.ephemeral_cls)
-                glimpse_cls_loss = F.mse_loss(glimpse_cls_pred, glimpse_targets.cls)
+                cos_sim = F.cosine_similarity(glimpse_cls_pred, glimpse_targets.cls, dim=-1)
+                glimpse_cls_loss = 1 - cos_sim.mean()
 
         active: list[Tensor] = []
         if enable_scene_patches_loss:
@@ -265,16 +271,18 @@ def training_step(
                 chunk.state = out.state
                 chunk.vpe = out.vpe
 
-        # Return metrics
+        # Return metrics (cosine similarity on RAW features for stability across runs)
         n = chunk.n_steps
+        scene_pred_raw = scene_denorm(chunk.scene_pred)
+        cls_pred_raw = cls_denorm(chunk.cls_pred.unsqueeze(1)).squeeze(1)
         return (
             chunk.total_combined_loss / n,
             chunk.total_scene_patches_loss / n,
             chunk.total_scene_cls_loss / n,
             chunk.total_glimpse_patches_loss / n,
             chunk.total_glimpse_cls_loss / n,
-            F.cosine_similarity(chunk.scene_pred, scene_target, dim=-1).mean(),
-            F.cosine_similarity(chunk.cls_pred, cls_target, dim=-1).mean(),
+            F.cosine_similarity(scene_pred_raw, raw_scene_target, dim=-1).mean(),
+            F.cosine_similarity(cls_pred_raw, raw_cls_target, dim=-1).mean(),
         )
 
     # Run all branches (full-start first, then random-start)

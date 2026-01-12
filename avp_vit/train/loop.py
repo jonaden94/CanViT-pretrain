@@ -7,6 +7,7 @@ import traceback
 from datetime import datetime, timezone
 from collections.abc import Callable
 from contextlib import nullcontext
+from pathlib import Path
 from typing import NamedTuple
 
 import comet_ml
@@ -24,6 +25,8 @@ class TrainBatch(NamedTuple):
     labels: Tensor  # ImageNet class labels (for probe-based accuracy, if probe available)
     scene_target: Tensor  # Normalized teacher scene features
     cls_target: Tensor  # Normalized teacher CLS features
+    raw_scene_target: Tensor  # Raw teacher scene features (for metrics)
+    raw_cls_target: Tensor  # Raw teacher CLS features (for metrics)
 
 # Force FlashAttention for SDPA - fail loud if unavailable
 torch.backends.cuda.enable_flash_sdp(True)
@@ -37,13 +40,13 @@ from avp_vit.checkpoint import save as save_checkpoint  # noqa: E402
 from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
 
 from .config import Config  # noqa: E402
-from .data import InfiniteLoader, create_loaders, scene_size_px  # noqa: E402
+from .data import create_loaders, scene_size_px  # noqa: E402
 from .ema import EMATracker  # noqa: E402
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher  # noqa: E402
 from .norm import PositionAwareNorm  # noqa: E402
 from .probe import load_probe  # noqa: E402
 from .scheduler import warmup_cosine_scheduler  # noqa: E402
-from .step import NormalizedTargets, training_step  # noqa: E402
+from .step import TeacherTargets, training_step  # noqa: E402
 from .viz import validate  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -85,43 +88,22 @@ def grad_norms_by_module(model: nn.Module, depth: int = 1) -> dict[str, float]:
     }
 
 
-def warmup_normalizer(
+def init_normalizer_stats_from_shard(
+    shard_path: Path,
     scene_norm: PositionAwareNorm,
     cls_norm: PositionAwareNorm,
-    glimpse_patches_norm: PositionAwareNorm | None,
-    glimpse_cls_norm: PositionAwareNorm | None,
-    train_loader: InfiniteLoader,
-    compute_raw_targets: Callable[[Tensor, int], NormFeatures],
-    warmup_images: int,
-    scene_size: int,
-    glimpse_size: int,
     device: torch.device,
 ) -> None:
-    """Warm up normalizer running stats (scene, and optionally glimpse)."""
-    scene_norm.train()
-    cls_norm.train()
-    if glimpse_patches_norm is not None:
-        glimpse_patches_norm.train()
-    if glimpse_cls_norm is not None:
-        glimpse_cls_norm.train()
-    images_seen = 0
-    pbar = tqdm(total=warmup_images, desc="Warmup normalizers", unit="img", leave=False)
-    while images_seen < warmup_images:
-        batch = train_loader.next_batch().to(device, non_blocking=True)
-        with torch.no_grad():
-            # Scene normalizers (full image at scene size)
-            feats = compute_raw_targets(batch, scene_size)
-            scene_norm(feats.patches)
-            cls_norm(feats.cls.unsqueeze(1))
-            # Glimpse normalizers (same images at glimpse size)
-            if glimpse_patches_norm is not None and glimpse_cls_norm is not None:
-                glimpse_feats = compute_raw_targets(batch, glimpse_size)
-                glimpse_patches_norm(glimpse_feats.patches)
-                glimpse_cls_norm(glimpse_feats.cls.unsqueeze(1))
-        images_seen += batch.shape[0]
-        pbar.update(batch.shape[0])
-    pbar.close()
-    log.info(f"Warmup done: {images_seen} images")
+    """Initialize normalizer stats from one precomputed shard."""
+    log.info(f"Computing normalizer stats from shard: {shard_path.name}")
+    shard = torch.load(shard_path, map_location=device, weights_only=False)
+    patches = shard["patches"].float()  # [N, n_tokens, D]
+    cls = shard["cls"].float()  # [N, D]
+    scene_norm.set_stats(patches)
+    cls_norm.set_stats(cls.unsqueeze(1))  # [N, 1, D] for n_tokens=1
+    log.info(f"  Scene/CLS stats from {patches.shape[0]} samples")
+    del shard
+    torch.cuda.empty_cache()
 
 
 def train(cfg: Config, trial: optuna.Trial) -> float:
@@ -278,24 +260,13 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             return NormFeatures(patches=feats.patches.float(), cls=feats.cls.float())
 
     scene_norm = PositionAwareNorm(
-        n_tokens=G * G, embed_dim=teacher.embed_dim, grid_size=G, momentum=cfg.norm_momentum,
+        n_tokens=G * G, embed_dim=teacher.embed_dim, grid_size=G,
     ).to(cfg.device)
     cls_norm = PositionAwareNorm(
-        n_tokens=1, embed_dim=teacher.embed_dim, grid_size=1, momentum=cfg.norm_momentum,
+        n_tokens=1, embed_dim=teacher.embed_dim, grid_size=1,
     ).to(cfg.device)
 
-    # Glimpse normalizers (only if any glimpse loss enabled)
     any_glimpse_loss = cfg.enable_glimpse_patches_loss or cfg.enable_glimpse_cls_loss
-    glimpse_patches_norm: PositionAwareNorm | None = None
-    glimpse_cls_norm: PositionAwareNorm | None = None
-    if any_glimpse_loss:
-        glimpse_G = glimpse_size_px // patch_size
-        glimpse_patches_norm = PositionAwareNorm(
-            n_tokens=glimpse_G * glimpse_G, embed_dim=teacher.embed_dim, grid_size=glimpse_G, momentum=cfg.norm_momentum,
-        ).to(cfg.device)
-        glimpse_cls_norm = PositionAwareNorm(
-            n_tokens=1, embed_dim=teacher.embed_dim, grid_size=1, momentum=cfg.norm_momentum,
-        ).to(cfg.device)
 
     norm_loaded = False
     if ckpt_data is not None and not cfg.reset_normalizer:
@@ -305,47 +276,23 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             scene_norm.load_state_dict(scene_norm_state)
             cls_norm.load_state_dict(cls_norm_state)
             norm_loaded = True
-            # Load glimpse normalizers if available and enabled
-            if any_glimpse_loss:
-                assert glimpse_patches_norm is not None and glimpse_cls_norm is not None
-                glimpse_patches_norm_state = ckpt_data.get("glimpse_patches_norm_state")
-                glimpse_cls_norm_state = ckpt_data.get("glimpse_cls_norm_state")
-                if glimpse_patches_norm_state is not None and glimpse_cls_norm_state is not None:
-                    glimpse_patches_norm.load_state_dict(glimpse_patches_norm_state)
-                    glimpse_cls_norm.load_state_dict(glimpse_cls_norm_state)
-                    log.info("Loaded all normalizer states from checkpoint")
-                else:
-                    log.info("Loaded scene/cls normalizers, glimpse normalizers will warm up")
-                    norm_loaded = False  # Need to warm up glimpse normalizers
-            else:
-                log.info("Loaded scene/cls normalizer states from checkpoint")
+            log.info("Loaded scene/cls normalizer states from checkpoint")
         else:
             log.warning("Checkpoint has no normalizer states")
     elif cfg.reset_normalizer:
-        log.info("Reset normalizer: will re-warmup")
+        log.info("Reset normalizer: will re-init stats")
 
     if not norm_loaded:
-        log.info(f"Warming up normalizers ({cfg.norm_warmup_images} images)...")
-        warmup_normalizer(
-            scene_norm, cls_norm, glimpse_patches_norm, glimpse_cls_norm,
-            train_loader, compute_raw_targets, cfg.norm_warmup_images,
-            scene_size, glimpse_size_px, cfg.device,
-        )
+        assert cfg.feature_base_dir is not None, "feature_base_dir required for normalizer init"
+        shards_dir = cfg.feature_base_dir / cfg.teacher_model / str(cfg.image_resolution) / "shards"
+        shard_files = sorted(shards_dir.glob("*.pt"))
+        assert shard_files, f"No shards in {shards_dir}"
+        init_normalizer_stats_from_shard(shard_files[0], scene_norm, cls_norm, cfg.device)
 
     log.info(f"Training: {cfg.n_full_start_branches} full + {cfg.n_random_start_branches} random branches, chunk_size={cfg.chunk_size}, continue_prob={cfg.continue_prob}")
 
     # EMA tracking for all metrics
     ema = EMATracker(alpha=cfg.ema_alpha)
-
-    def compute_normalized_targets(
-        images: Tensor, size: int, patches_norm: PositionAwareNorm, cls_norm_: PositionAwareNorm
-    ) -> NormalizedTargets:
-        """Compute normalized teacher targets."""
-        with torch.no_grad():
-            feats = compute_raw_targets(images, size)
-            patches = patches_norm(feats.patches)
-            cls = cls_norm_(feats.cls.unsqueeze(1)).squeeze(1)
-        return NormalizedTargets(patches=patches, cls=cls)
 
     def load_train_batch() -> TrainBatch:
         """Load training batch and compute/load normalized scene targets."""
@@ -366,15 +313,15 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             raw_patches, raw_cls = raw.patches, raw.cls
         norm_patches = scene_norm(raw_patches)
         norm_cls = cls_norm(raw_cls.unsqueeze(1)).squeeze(1)
-        return TrainBatch(images, labels, norm_patches, norm_cls)
+        return TrainBatch(images, labels, norm_patches, norm_cls, raw_patches, raw_cls)
 
-    # Glimpse targets callable (only if any glimpse loss enabled)
+    # Glimpse targets: raw features (cosine similarity loss, no normalization)
     if any_glimpse_loss:
-        assert glimpse_patches_norm is not None and glimpse_cls_norm is not None
-        _gpn, _gcn = glimpse_patches_norm, glimpse_cls_norm
-        def _compute_glimpse_targets(glimpse: Tensor) -> NormalizedTargets:
-            return compute_normalized_targets(glimpse, glimpse_size_px, _gpn, _gcn)
-        compute_glimpse_targets_fn: Callable[[Tensor], NormalizedTargets] | None = _compute_glimpse_targets
+        def _compute_glimpse_targets(glimpse: Tensor) -> TeacherTargets:
+            with torch.no_grad():
+                feats = compute_raw_targets(glimpse, glimpse_size_px)
+            return TeacherTargets(patches=feats.patches, cls=feats.cls)
+        compute_glimpse_targets_fn: Callable[[Tensor], TeacherTargets] | None = _compute_glimpse_targets
     else:
         compute_glimpse_targets_fn = None
 
@@ -437,18 +384,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 comet_id=exp.get_key(),
                 scene_norm_state=scene_norm.state_dict(),
                 cls_norm_state=cls_norm.state_dict(),
-                glimpse_patches_norm_state=glimpse_patches_norm.state_dict() if glimpse_patches_norm else None,
-                glimpse_cls_norm_state=glimpse_cls_norm.state_dict() if glimpse_cls_norm else None,
                 optimizer_state=optimizer.state_dict(),
                 scheduler_state=scheduler.state_dict(),
                 training_config_history=training_config_history,
             )
             exp.log_metric("norm/scene_mean_norm", scene_norm.mean.norm().item(), step=step)
             exp.log_metric("norm/cls_mean_norm", cls_norm.mean.norm().item(), step=step)
-            if glimpse_patches_norm is not None:
-                exp.log_metric("norm/glimpse_patches_mean_norm", glimpse_patches_norm.mean.norm().item(), step=step)
-            if glimpse_cls_norm is not None:
-                exp.log_metric("norm/glimpse_cls_mean_norm", glimpse_cls_norm.mean.norm().item(), step=step)
 
         # === TRAINING PHASE (only for step < n_steps) ===
         if step < cfg.n_steps:
@@ -468,6 +409,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 images=batch.images,
                 scene_target=batch.scene_target,
                 cls_target=batch.cls_target,
+                raw_scene_target=batch.raw_scene_target,
+                raw_cls_target=batch.raw_cls_target,
+                scene_denorm=scene_norm.denormalize,
+                cls_denorm=cls_norm.denormalize,
                 compute_glimpse_targets=compute_glimpse_targets_fn,
                 enable_scene_patches_loss=cfg.enable_scene_patches_loss,
                 enable_scene_cls_loss=cfg.enable_scene_cls_loss,
@@ -547,8 +492,6 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             comet_id=exp.get_key(),
             scene_norm_state=scene_norm.state_dict(),
             cls_norm_state=cls_norm.state_dict(),
-            glimpse_patches_norm_state=glimpse_patches_norm.state_dict() if glimpse_patches_norm else None,
-            glimpse_cls_norm_state=glimpse_cls_norm.state_dict() if glimpse_cls_norm else None,
             optimizer_state=optimizer.state_dict(),
             scheduler_state=scheduler.state_dict(),
             training_config_history=training_config_history,

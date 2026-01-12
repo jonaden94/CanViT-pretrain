@@ -55,9 +55,6 @@ class Config:
     grad_clip: float = 1.0
     policy_grad_clip: float = 1.0  # Separate clip for policy (applied first)
     n_steps: int = 1_000_000
-    # Target normalization
-    norm_warmup_images: int = 4096
-    norm_momentum: float = 0.1
     # Data
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")

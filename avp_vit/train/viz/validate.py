@@ -350,20 +350,13 @@ def validate(
     has_probe = probe is not None and labels is not None and labels_are_in1k(labels)
 
     model_was_training = model.training
-    scene_was_training = scene_normalizer.training
-    cls_was_training = cls_normalizer.training
     model.eval()
-    scene_normalizer.eval()
-    cls_normalizer.eval()
 
     try:
         with torch.inference_mode():
             raw_feats = compute_raw_targets(images, scene_size_px)
+            # Normalized target only used for PCA visualization
             target = scene_normalizer(raw_feats.patches)
-            cls_target = (
-                cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1) if has_cls else None
-            )
-
             target_sample0 = target[0].cpu().float().numpy() if log_pca else None
 
             gt_idx = int(labels[0].item()) if has_probe and labels is not None else 0
@@ -402,17 +395,19 @@ def validate(
                     model.predict_scene_teacher_cls(out.state.recurrent_cls, out.state.canvas) if has_cls else None
                 )
 
-                scene_cos = F.cosine_similarity(predicted_scene, target, dim=-1).mean().item()
+                # Cosine similarity on RAW features (denormalize predictions, compare to raw targets)
+                scene_pred_raw = scene_normalizer.denormalize(predicted_scene)
+                scene_cos = F.cosine_similarity(scene_pred_raw, raw_feats.patches, dim=-1).mean().item()
                 acc.scene_cos_sims.append(scene_cos)
 
-                if has_cls and cls_target is not None and predicted_cls is not None:
-                    cls_cos = F.cosine_similarity(predicted_cls, cls_target, dim=-1).mean().item()
+                if has_cls and predicted_cls is not None:
+                    cls_pred_raw = cls_normalizer.denormalize(predicted_cls.unsqueeze(1)).squeeze(1)
+                    cls_cos = F.cosine_similarity(cls_pred_raw, raw_feats.cls, dim=-1).mean().item()
                     acc.cls_cos_sims.append(cls_cos)
 
                     if has_probe:
                         assert probe is not None and labels is not None
-                        cls_raw = cls_normalizer.denormalize(predicted_cls)
-                        logits = probe(cls_raw)
+                        logits = probe(cls_pred_raw)
                         acc.in1k_accs.append(compute_in1k_top1(logits, labels))
 
                         if log_pca:
@@ -540,7 +535,3 @@ def validate(
     finally:
         if model_was_training:
             model.train()
-        if scene_was_training:
-            scene_normalizer.train()
-        if cls_was_training:
-            cls_normalizer.train()
