@@ -92,11 +92,15 @@ class FeatureIterableDataset(IterableDataset):
             # .clone() required: mmap'd tensor views serialize poorly across DataLoader workers
             for i in range(n_samples):
                 rel_path = shard["paths"][i]
-                with Image.open(self.image_root / rel_path) as f:
-                    img = f.convert("RGB")
-                img_tensor = self._transform(img)
-                assert isinstance(img_tensor, Tensor)
+                try:
+                    with Image.open(self.image_root / rel_path) as f:
+                        img = f.convert("RGB")
+                    img_tensor = self._transform(img)
+                except Exception as e:
+                    log.warning(f"Worker {worker_id}: skipping {rel_path}: {type(e).__name__}: {e}")
+                    continue
 
+                assert isinstance(img_tensor, Tensor)
                 yield (
                     img_tensor,
                     shard["patches"][i].clone(),
