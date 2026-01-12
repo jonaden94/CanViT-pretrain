@@ -5,7 +5,7 @@ Usage:
     uv run python scripts/normalization_analysis.py \
         --val-dir $IN1K_VAL_DIR \
         --teacher-ckpt $DINOV3_VITB16_CKPT \
-        --shard-path $FEATURES_DIR/dinov3_vitb16/512/shards/00000.pt
+        --shard-path $FEATURES_DIR/in21k/dinov3_vitb16/512/shards/00000.pt
 """
 
 import logging
