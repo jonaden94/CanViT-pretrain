@@ -1,7 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=avp-train
 #SBATCH --account=rrg-skrishna_gpu
-#SBATCH --time=3-00:00:00
+#SBATCH --time=00:30:00
+#SBATCH --array=0-400%1
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
@@ -10,17 +11,16 @@
 #SBATCH --mail-user=me@yberreby.com
 #SBATCH --mail-type=BEGIN,END,FAIL,REQUEUE
 
-# AVP-ViT training on IN21k with precomputed features
-# Default: 5000 steps/job (~25 min at 200 steps/min)
+# AVP-ViT training: 400 jobs × 5000 steps = 2M steps (~8 days)
 #
-# Production job array (recommended - auto-resume, fault tolerant):
-#   sbatch --time=00:30:00 --array=0-400%1 slurm/train.sbatch
+# Default (just run it):
+#   sbatch slurm/train.sbatch
 #
 # Continue existing run:
-#   sbatch --time=00:30:00 --array=0-99%1 slurm/train.sbatch --run-name train-XXXXXXX
+#   sbatch --array=0-99%1 slurm/train.sbatch --run-name train-XXXXXXX
 #
 # Quick test:
-#   sbatch --time=00:10:00 --array=0-2%1 slurm/train.sbatch --steps-per-job 10
+#   sbatch --array=0-2%1 --time=00:10:00 slurm/train.sbatch --steps-per-job 10
 
 set -eux
 
