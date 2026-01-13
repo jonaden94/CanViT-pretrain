@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=signal-test
-#SBATCH --time=0:01:00
-#SBATCH --signal=TERM@30
+#SBATCH --time=0:03:00
+#SBATCH --signal=TERM@60
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=1G
 #SBATCH --output=signal_test_%j.out
 
-# 1-minute job, SIGTERM 10 seconds before walltime
-# At 0.1s/step, we do ~10 steps/sec = ~500 steps in 50s before SIGTERM
-# Target is 1000 steps, so we'll need 2 jobs to complete
+# 3-minute job, SIGTERM 60 seconds before walltime
+# At 0.1s/step, we do ~10 steps/sec = ~1200 steps in 2 min before SIGTERM
+# Target is 1000 steps, should complete in one job (or test signal if it doesn't)
 
 set -euo pipefail
 
