@@ -65,7 +65,7 @@ def main() -> None:
     current_step = load_state()
     log(f"Starting from step {current_step}")
 
-    target_step = 1000  # Arbitrary target
+    target_step = 5000  # High enough to hit walltime
 
     # "Training" loop
     while current_step < target_step:
