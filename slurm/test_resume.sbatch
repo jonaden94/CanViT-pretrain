@@ -28,20 +28,8 @@ uv sync
 
 mkdir -p logs
 
-# Use fixed run name so all array tasks share the same checkpoint dir
-RUN_NAME="resume-test-$$"
-if [ "$SLURM_ARRAY_TASK_ID" -eq 0 ]; then
-    # First task generates the name and saves it
-    echo "$RUN_NAME" > /tmp/resume_test_run_name_$SLURM_ARRAY_JOB_ID
-else
-    # Subsequent tasks read the name (wait for file to exist)
-    for i in {1..30}; do
-        [ -f /tmp/resume_test_run_name_$SLURM_ARRAY_JOB_ID ] && break
-        sleep 1
-    done
-    RUN_NAME=$(cat /tmp/resume_test_run_name_$SLURM_ARRAY_JOB_ID)
-fi
-
+# All array tasks share SLURM_ARRAY_JOB_ID - deterministic, no coordination needed
+RUN_NAME="resume-test-${SLURM_ARRAY_JOB_ID}"
 log "Run name: $RUN_NAME"
 
 # Ultra-minimal settings:
