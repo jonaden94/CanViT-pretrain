@@ -53,7 +53,7 @@ def main():
     f16_err = (patches - to_f16.float()).abs()
     bf16_err = (patches - to_bf16.float()).abs()
 
-    print(f"\nStorage quantization error:")
+    print("\nStorage quantization error:")
     print(f"  fp16:  max={f16_err.max():.6f}, mean={f16_err.mean():.6f}")
     print(f"  bf16:  max={bf16_err.max():.6f}, mean={bf16_err.mean():.6f}")
     print(f"  ratio: bf16/fp16 = {bf16_err.max() / f16_err.max():.1f}x worse")

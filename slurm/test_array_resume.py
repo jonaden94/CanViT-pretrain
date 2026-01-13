@@ -17,7 +17,6 @@ Run: sbatch slurm/test_array_resume.sbatch
 import json
 import os
 import signal
-import sys
 import time
 from pathlib import Path
 

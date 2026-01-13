@@ -65,6 +65,11 @@ def test_strips_orig_mod() -> None:
             "policy_config": None,
             "optimizer_state": None,
             "scheduler_state": None,
+            "training_config_history": None,
+            "hostname": None,
+            "slurm_job_id": None,
+            "slurm_array_task_id": None,
+            "cmdline": None,
         }
         torch.save(raw, path)
 
