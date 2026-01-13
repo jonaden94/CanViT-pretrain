@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=signal-test
 #SBATCH --time=0:01:00
-#SBATCH --signal=B:TERM@10
+#SBATCH --signal=TERM@30
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=1G
 #SBATCH --output=signal_test_%j.out
