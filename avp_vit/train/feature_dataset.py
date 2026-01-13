@@ -85,12 +85,24 @@ class FeatureIterableDataset(IterableDataset):
                 log.debug(f"Worker {worker_id}: built transform for {image_size}px")
 
             n_samples = len(shard["paths"])
+            failed_indices = set(shard.get("failed_indices", []))
+            if failed_indices:
+                failed_paths = [shard["paths"][i] for i in sorted(failed_indices)]
+                log.warning(
+                    f"Worker {worker_id}: shard {shard_path.name} has {len(failed_indices)} "
+                    f"failed indices (NaN features), skipping: {failed_paths}"
+                )
+
             log.debug(f"Worker {worker_id}: shard {shard_idx}/{len(shards)} "
                      f"({shard_path.name}, {n_samples} samples, loaded in {load_time:.2f}s)")
 
             # Sequential iteration - shards are pre-shuffled
             # .clone() required: mmap'd tensor views serialize poorly across DataLoader workers
             for i in range(n_samples):
+                # Skip samples that failed during feature export (NaN features)
+                if i in failed_indices:
+                    continue
+
                 rel_path = shard["paths"][i]
                 try:
                     with Image.open(self.image_root / rel_path) as f:
