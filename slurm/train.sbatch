@@ -11,15 +11,12 @@
 #SBATCH --mail-type=BEGIN,END,FAIL,REQUEUE
 
 # AVP-ViT training on IN21k with precomputed features
-#
-# Single job (long run, manual resume):
-#   sbatch slurm/train.sbatch
+# Default: 5000 steps/job (~25 min at 200 steps/min)
 #
 # Production job array (recommended - auto-resume, fault tolerant):
-#   sbatch --time=00:30:00 --array=0-333%1 slurm/train.sbatch --steps-per-job 6000
-#   (333 jobs × 6000 steps = 2M steps, ~7 days at 200 steps/min)
+#   sbatch --time=00:30:00 --array=0-400%1 slurm/train.sbatch
 #
-# Continue existing run (manual or after job array completes):
+# Continue existing run:
 #   sbatch --time=00:30:00 --array=0-99%1 slurm/train.sbatch --run-name train-XXXXXXX
 #
 # Quick test:
