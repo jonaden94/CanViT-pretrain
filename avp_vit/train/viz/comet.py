@@ -23,18 +23,25 @@ def log_curve(exp: comet_ml.CometExperiment, name: str, **kwargs) -> None:
             log.warning(f"Curve budget exhausted ({_CURVE_BUDGET}), skipping further curves")
             _curve_count += 1  # only warn once
         return
-    exp.log_curve(name, **kwargs)
-    _curve_count += 1
+    try:
+        exp.log_curve(name, **kwargs)
+        _curve_count += 1
+    except Exception as e:
+        log.exception(f"Failed to log curve {name}: {e}")
 
 
 def log_figure(exp: comet_ml.CometExperiment, fig: Figure, name: str, step: int) -> None:
     """Log matplotlib figure to Comet. Aggressively cleans up to prevent memory leaks."""
-    with io.BytesIO() as buf:
-        fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
-        buf.seek(0)
-        exp.log_image(buf, name=name, step=step)
-    for ax in fig.axes:
-        ax.clear()
-    fig.clf()
-    plt.close(fig)
-    gc.collect()
+    try:
+        with io.BytesIO() as buf:
+            fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+            buf.seek(0)
+            exp.log_image(buf, name=name, step=step)
+    except Exception as e:
+        log.exception(f"Failed to log figure {name} at step {step}: {e}")
+    finally:
+        for ax in fig.axes:
+            ax.clear()
+        fig.clf()
+        plt.close(fig)
+        gc.collect()
