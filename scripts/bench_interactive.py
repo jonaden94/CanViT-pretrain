@@ -23,9 +23,9 @@ WARMUP = 5
 
 # === Load models ===
 print("Loading teacher...")
-from canvit.hub import create_backbone
-from canvit.viewpoint import Viewpoint
-from avp_vit import ActiveCanViT, ActiveCanViTConfig
+from canvit.hub import create_backbone  # noqa: E402
+from canvit.viewpoint import Viewpoint  # noqa: E402
+from avp_vit import ActiveCanViT, ActiveCanViTConfig  # noqa: E402
 
 CKPT = os.path.expanduser(os.environ.get(
     'AVP_TEACHER_CKPT',

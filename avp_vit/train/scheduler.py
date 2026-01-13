@@ -2,44 +2,37 @@
 
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import (
-    CosineAnnealingLR,
+    ConstantLR,
     LinearLR,
     LRScheduler,
     SequentialLR,
 )
 
 
-def warmup_cosine_scheduler(
+def warmup_constant_scheduler(
     optimizer: Optimizer,
-    total_steps: int,
     warmup_steps: int,
     peak_lr: float,
     start_lr: float | None = None,
-    end_lr: float | None = None,
 ) -> LRScheduler:
-    """Create warmup + cosine decay scheduler.
+    """Create warmup + constant LR scheduler.
 
     Warmup: linear from start_lr to peak_lr over warmup_steps.
-    Decay: cosine from peak_lr to end_lr over remaining steps.
+    Then: constant at peak_lr forever.
 
     Args:
         optimizer: The optimizer to schedule.
-        total_steps: Total training steps.
-        warmup_steps: Number of warmup steps (0 = no warmup, pure cosine).
-        peak_lr: Learning rate at end of warmup.
+        warmup_steps: Number of warmup steps (0 = constant from start).
+        peak_lr: Learning rate after warmup.
         start_lr: Learning rate at step 0. None = peak_lr / warmup_steps.
-        end_lr: Learning rate at final step. None = 0.
 
     Returns:
-        LRScheduler (SequentialLR if warmup, else CosineAnnealingLR).
+        LRScheduler.
     """
     assert warmup_steps >= 0, "warmup_steps must be non-negative"
-    assert warmup_steps < total_steps, "warmup_steps must be less than total_steps"
-
-    effective_end_lr = end_lr if end_lr is not None else 0.0
 
     if warmup_steps == 0:
-        return CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=effective_end_lr)
+        return ConstantLR(optimizer, factor=1.0, total_iters=0)
 
     effective_start_lr = start_lr if start_lr is not None else peak_lr / warmup_steps
     start_factor = effective_start_lr / peak_lr
@@ -50,13 +43,9 @@ def warmup_cosine_scheduler(
         end_factor=1.0,
         total_iters=warmup_steps,
     )
-    cosine = CosineAnnealingLR(
-        optimizer,
-        T_max=total_steps - warmup_steps,
-        eta_min=effective_end_lr,
-    )
+    constant = ConstantLR(optimizer, factor=1.0, total_iters=0)
     return SequentialLR(
         optimizer,
-        schedulers=[warmup, cosine],
+        schedulers=[warmup, constant],
         milestones=[warmup_steps],
     )
