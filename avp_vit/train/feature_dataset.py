@@ -11,7 +11,7 @@ Design:
 import logging
 import time
 from pathlib import Path
-from typing import Iterator, TypedDict
+from typing import Iterator
 
 import torch
 from PIL import Image
@@ -21,11 +21,6 @@ from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 from .transforms import val_transform
 
 log = logging.getLogger(__name__)
-
-
-class LoaderState(TypedDict):
-    """Checkpoint state for ShardedFeatureLoader."""
-    shards_completed: int
 
 
 class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
@@ -60,22 +55,18 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
             shard_idx = shard_counter % n_shards
             shard_path = self.shard_files[shard_idx]
 
-            if worker_id == 0:
-                log.info(f"Worker 0: starting shard {shard_idx}/{n_shards} ({shard_path.name})")
+            log.info(f"Worker {worker_id}: loading shard {shard_idx}/{n_shards} ({shard_path.name})")
 
             t0 = time.perf_counter()
             shard = torch.load(shard_path, map_location="cpu", weights_only=False, mmap=True)
             t_load = time.perf_counter() - t0
 
-            t1 = time.perf_counter()
             n_samples = len(shard["paths"])
             failed_indices = set(shard.get("failed_indices", []))
-            t_parse = time.perf_counter() - t1
 
-            if worker_id == 0:
-                log.info(f"  torch.load: {t_load:.3f}s, parse: {t_parse:.3f}s, {n_samples} samples")
-                if failed_indices:
-                    log.warning(f"  {len(failed_indices)} pre-marked failures")
+            log.info(f"Worker {worker_id}: shard {shard_idx} loaded in {t_load:.3f}s, {n_samples} samples")
+            if failed_indices:
+                log.warning(f"Worker {worker_id}: {len(failed_indices)} pre-marked failures")
 
             yielded = 0
             skipped = 0
@@ -104,8 +95,7 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
                 )
                 yielded += 1
 
-            if worker_id == 0:
-                log.debug(f"  Worker 0: shard done, yielded={yielded}, skipped={skipped}")
+            log.info(f"Worker {worker_id}: shard {shard_idx} done, yielded={yielded}, skipped={skipped}")
 
             shard_counter += 1
 
@@ -123,6 +113,7 @@ class ShardedFeatureLoader:
         image_size: int,
         batch_size: int,
         num_workers: int,
+        start_step: int,
     ) -> None:
         self.shards_dir = Path(shards_dir)
         self.image_root = Path(image_root)
@@ -138,34 +129,23 @@ class ShardedFeatureLoader:
 
         # Read first shard to get samples_per_shard (all shards same size)
         first_shard = torch.load(self.shard_files[0], map_location="cpu", weights_only=False)
-        samples_per_shard = len(first_shard["paths"])
+        self.samples_per_shard = len(first_shard["paths"])
         del first_shard
-        log.info(f"  {samples_per_shard} samples/shard")
-
-        self.shards_completed = 0
-        self.batches_per_shard = samples_per_shard // batch_size
+        self.batches_per_shard = self.samples_per_shard // batch_size
+        self.start_shard = start_step // self.batches_per_shard
+        log.info(f"  {self.samples_per_shard} samples/shard, {self.batches_per_shard} batches/shard, start_shard={self.start_shard}")
 
         # Will be created lazily on first iteration
         self.loader: DataLoader | None = None
         self.loader_iter: Iterator | None = None
-        self.batch_in_shard = 0
-
-    def state_dict(self) -> LoaderState:
-        """Return checkpoint state."""
-        return {"shards_completed": self.shards_completed}
-
-    def load_state_dict(self, state: LoaderState) -> None:
-        """Restore from checkpoint."""
-        self.shards_completed = state["shards_completed"]
-        log.info(f"Resumed ShardedFeatureLoader at shard {self.shards_completed}")
 
     def _create_loader(self) -> DataLoader:
-        """Create DataLoader with dataset starting at current shard."""
+        """Create DataLoader with dataset starting at start_shard."""
         dataset = AllShardsDataset(
             shard_files=self.shard_files,
             image_root=self.image_root,
             image_size=self.image_size,
-            start_shard=self.shards_completed,
+            start_shard=self.start_shard,
         )
         return DataLoader(
             dataset,

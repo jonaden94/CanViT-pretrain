@@ -232,20 +232,28 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     scene_size = scene_size_px(G, patch_size)
     log.info(f"Grid size: {G}, scene size: {scene_size}px")
 
-    train_loader, val_loader = create_loaders(cfg)
+    # Extract start_step from checkpoint scheduler state (BEFORE creating loaders)
+    # NOTE: PyTorch LRScheduler uses "last_epoch" but we call scheduler.step() once per
+    # training step, so last_epoch == number of gradient updates == our "step"
+    if ckpt_data is not None:
+        sched_state = ckpt_data.get("scheduler_state")
+        assert sched_state is not None, "CORRUPT CHECKPOINT: missing scheduler_state"
+        start_step = sched_state["last_epoch"]  # PyTorch API: last_epoch = num scheduler.step() calls
+        log.info("=" * 60)
+        log.info(f"RESUME FROM CHECKPOINT: start_step={start_step}")
+        log.info(f"  (scheduler_state['last_epoch']={start_step})")
+        log.info("=" * 60)
+    else:
+        start_step = 0
+        log.info("=" * 60)
+        log.info(f"FRESH START: start_step={start_step}")
+        log.info("=" * 60)
+
+    train_loader, val_loader = create_loaders(cfg, start_step=start_step)
 
     # Feature-based training is the only supported path
     assert cfg.feature_base_dir is not None, "feature_base_dir required (raw image training removed)"
     assert isinstance(train_loader, ShardedFeatureLoader)
-
-    # Restore loader state from checkpoint
-    if ckpt_data is not None:
-        loader_state = ckpt_data.get("loader_state")
-        if loader_state is not None:
-            train_loader.load_state_dict(loader_state)
-            log.info(f"Restored loader state: shards_completed={train_loader.shards_completed}")
-        else:
-            log.warning("Checkpoint has no loader_state - starting from shard 0")
 
     trainable = [p for p in model.parameters() if p.requires_grad]
     n_trainable = sum(p.numel() for p in trainable)
@@ -470,12 +478,11 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 optimizer_state=optimizer.state_dict(),
                 scheduler_state=scheduler.state_dict(),
                 training_config_history=training_config_history,
-                loader_state=train_loader.state_dict(),
             )
             update_symlink(run_dir / "latest.pt", ckpt_path)
             exp.log_metric("norm/scene_mean_norm", scene_norm.mean.norm().item(), step=step)
             exp.log_metric("norm/cls_mean_norm", cls_norm.mean.norm().item(), step=step)
-            exp.log_metric("data/shards_completed", train_loader.shards_completed, step=step)
+            exp.log_metric("data/start_shard", train_loader.start_shard, step=step)
 
         # === TRAINING PHASE (only for step < end_step) ===
         if step < end_step:
@@ -612,7 +619,6 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             optimizer_state=optimizer.state_dict(),
             scheduler_state=scheduler.state_dict(),
             training_config_history=training_config_history,
-            loader_state=train_loader.state_dict(),
         )
         update_symlink(run_dir / "latest.pt", ckpt_path)
 

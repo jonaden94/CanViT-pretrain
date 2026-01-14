@@ -64,14 +64,15 @@ def main(cfg: Config) -> None:
         image_size=cfg.image_size,
         batch_size=cfg.batch_size,
         num_workers=cfg.num_workers,
+        start_step=0,
     )
-    log.info(f"Found {len(loader.shard_files)} shards")
+    log.info(f"Found {len(loader.shard_files)} shards, start_shard={loader.start_shard}")
 
     # Warmup
     log.info(f"Warming up ({cfg.warmup_batches} batches)...")
     for _ in range(cfg.warmup_batches):
         _ = loader.next()
-    log.info(f"After warmup: shards_completed={loader.shards_completed}")
+    log.info("Warmup done")
 
     # Benchmark
     log.info(f"Benchmarking ({cfg.n_batches} batches)...")
@@ -81,10 +82,7 @@ def main(cfg: Config) -> None:
     for _ in pbar:
         batch = loader.next()
         images, patches, cls, labels = batch
-        pbar.set_postfix({
-            "img": f"{images.shape}",
-            "shards": loader.shards_completed,
-        })
+        pbar.set_postfix({"img": f"{images.shape}"})
 
     elapsed = time.perf_counter() - t0
     batches_per_sec = cfg.n_batches / elapsed
@@ -96,23 +94,6 @@ def main(cfg: Config) -> None:
     log.info(f"Total time: {elapsed:.2f}s")
     log.info(f"Batches/sec: {batches_per_sec:.2f}")
     log.info(f"Images/sec: {images_per_sec:.2f}")
-    log.info(f"Final shards_completed: {loader.shards_completed}")
-
-    # Checkpoint roundtrip test
-    log.info("Testing checkpoint roundtrip...")
-    state = loader.state_dict()
-    log.info(f"state_dict: {state}")
-    loader2 = ShardedFeatureLoader(
-        shards_dir=shards_dir,
-        image_root=cfg.image_root,
-        image_size=cfg.image_size,
-        batch_size=cfg.batch_size,
-        num_workers=cfg.num_workers,
-    )
-    loader2.load_state_dict(state)
-    log.info(f"Restored shards_completed: {loader2.shards_completed}")
-    assert loader2.shards_completed == loader.shards_completed
-    log.info("Checkpoint roundtrip OK")
 
     # Interactive: export for ipython
     globals()["loader"] = loader

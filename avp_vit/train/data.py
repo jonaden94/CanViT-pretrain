@@ -86,14 +86,19 @@ def scene_size_px(grid_size: int, patch_size: int) -> int:
     return grid_size * patch_size
 
 
-def create_loaders(cfg: "Config") -> Loaders:
+def create_loaders(cfg: "Config", start_step: int) -> Loaders:
     """Create train and validation data loaders.
 
     Train uses precomputed features (ShardedFeatureLoader).
     Val uses raw images (InfiniteLoader over IndexedImageFolder).
+
+    Args:
+        cfg: Training config
+        start_step: Step to resume from (0 for fresh start). CRITICAL for correct shard positioning.
     """
     from .config import Config
     assert isinstance(cfg, Config)
+    log.info(f"=== CREATE_LOADERS: start_step={start_step} ===")
 
     val_dir = cfg.val_dir
     assert val_dir.is_dir(), f"val_dir not found: {val_dir}"
@@ -118,8 +123,9 @@ def create_loaders(cfg: "Config") -> Loaders:
         image_size=sz,
         batch_size=cfg.batch_size,
         num_workers=cfg.num_workers,
+        start_step=start_step,
     )
-    log.info(f"  {len(train_loader.shard_files)} shards")
+    log.info(f"  {len(train_loader.shard_files)} shards, start_shard={train_loader.start_shard}")
 
     # Val loader
     val_tf = val_transform(sz)
