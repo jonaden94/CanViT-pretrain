@@ -157,20 +157,11 @@ class ShardedFeatureLoader:
         )
 
     def next(self) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Get next batch. Tracks shard completion for checkpointing."""
+        """Get next batch."""
         if self.loader is None:
             log.info(f"Creating DataLoader with {self.num_workers} workers, persistent={self.num_workers > 0}")
             self.loader = self._create_loader()
             self.loader_iter = iter(self.loader)
-            self.batch_in_shard = 0
 
         assert self.loader_iter is not None
-        batch = next(self.loader_iter)
-
-        self.batch_in_shard += 1
-        if self.batch_in_shard >= self.batches_per_shard:
-            self.shards_completed += 1
-            self.batch_in_shard = 0
-            log.info(f"Shard boundary: shards_completed={self.shards_completed}")
-
-        return batch
+        return next(self.loader_iter)
