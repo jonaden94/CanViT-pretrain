@@ -40,7 +40,7 @@ from avp_vit.checkpoint import save as save_checkpoint, update_symlink, find_lat
 from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
 
 from .config import Config  # noqa: E402
-from .data import create_loaders, scene_size_px  # noqa: E402
+from .data import ShardedFeatureLoader, create_loaders, scene_size_px  # noqa: E402
 from .ema import EMATracker  # noqa: E402
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher  # noqa: E402
 from .norm import PositionAwareNorm  # noqa: E402
@@ -231,8 +231,28 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     scene_size = scene_size_px(G, patch_size)
     log.info(f"Grid size: {G}, scene size: {scene_size}px")
 
-    train_loader, val_loader = create_loaders(cfg)
-    has_features = cfg.feature_base_dir is not None
+    # Extract start_step from checkpoint scheduler state (BEFORE creating loaders)
+    # NOTE: PyTorch LRScheduler uses "last_epoch" but we call scheduler.step() once per
+    # training step, so last_epoch == number of gradient updates == our "step"
+    if ckpt_data is not None:
+        sched_state = ckpt_data.get("scheduler_state")
+        assert sched_state is not None, "CORRUPT CHECKPOINT: missing scheduler_state"
+        start_step = sched_state["last_epoch"]  # PyTorch API: last_epoch = num scheduler.step() calls
+        log.info("=" * 60)
+        log.info(f"RESUME FROM CHECKPOINT: start_step={start_step}")
+        log.info(f"  (scheduler_state['last_epoch']={start_step})")
+        log.info("=" * 60)
+    else:
+        start_step = 0
+        log.info("=" * 60)
+        log.info(f"FRESH START: start_step={start_step}")
+        log.info("=" * 60)
+
+    train_loader, val_loader = create_loaders(cfg, start_step=start_step)
+
+    # Feature-based training is the only supported path
+    assert cfg.feature_base_dir is not None, "feature_base_dir required (raw image training removed)"
+    assert isinstance(train_loader, ShardedFeatureLoader)
 
     trainable = [p for p in model.parameters() if p.requires_grad]
     n_trainable = sum(p.numel() for p in trainable)
@@ -362,22 +382,15 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     nb = cfg.non_blocking_transfer  # Ablation flag for async transfers
 
     def load_train_batch() -> TrainBatch:
-        """Load training batch and compute/load normalized scene targets."""
+        """Load training batch from precomputed features."""
         # non_blocking=True: CPU returns immediately, GPU ops serialize on same stream
         # Safe because we don't mutate source tensors after transfer
-        if has_features:
-            images, raw_patches, raw_cls, labels = train_loader.next()
-            images = images.to(cfg.device, non_blocking=nb)
-            labels = labels.to(cfg.device, non_blocking=nb)
-            # .float() for consistency - stored features may be fp16
-            raw_patches = raw_patches.to(device=cfg.device, dtype=torch.float32, non_blocking=nb)
-            raw_cls = raw_cls.to(device=cfg.device, dtype=torch.float32, non_blocking=nb)
-        else:
-            images, labels = train_loader.next_batch_with_labels()
-            images = images.to(cfg.device, non_blocking=nb)
-            labels = labels.to(cfg.device, non_blocking=nb)
-            raw = compute_raw_targets(images, scene_size)
-            raw_patches, raw_cls = raw.patches, raw.cls
+        images, raw_patches, raw_cls, labels = train_loader.next()
+        images = images.to(cfg.device, non_blocking=nb)
+        labels = labels.to(cfg.device, non_blocking=nb)
+        # .float() for consistency - stored features may be fp16
+        raw_patches = raw_patches.to(device=cfg.device, dtype=torch.float32, non_blocking=nb)
+        raw_cls = raw_cls.to(device=cfg.device, dtype=torch.float32, non_blocking=nb)
         norm_patches = scene_norm(raw_patches)
         norm_cls = cls_norm(raw_cls.unsqueeze(1)).squeeze(1)
         return TrainBatch(images, labels, norm_patches, norm_cls, raw_patches, raw_cls)
@@ -468,6 +481,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             update_symlink(run_dir / "latest.pt", ckpt_path)
             exp.log_metric("norm/scene_mean_norm", scene_norm.mean.norm().item(), step=step)
             exp.log_metric("norm/cls_mean_norm", cls_norm.mean.norm().item(), step=step)
+            exp.log_metric("data/start_shard", train_loader.start_shard, step=step)
 
         # === TRAINING PHASE (only for step < end_step) ===
         if step < end_step:
