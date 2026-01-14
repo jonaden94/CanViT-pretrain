@@ -1,11 +1,11 @@
 """Shard-based feature loading with deterministic resume.
 
 Design:
-- One shard at a time, fully exhausted before moving to next
-- Workers split SAMPLES within a shard (not shards across workers)
+- Single IterableDataset that iterates over ALL shards sequentially
+- Workers split SAMPLES within each shard (not shards across workers)
 - Deterministic order: shard 0, 1, 2, ..., n-1, 0, 1, ... (no shuffling)
-- Progress tracked via `shards_completed` for clean checkpoint/resume
-- Runtime failures: log and skip (batches stay full via IterableDataset pattern)
+- Progress tracked via `shards_completed` for checkpoint/resume
+- Persistent workers work naturally (dataset controls iteration)
 """
 
 import logging
@@ -23,83 +23,97 @@ from .transforms import val_transform
 log = logging.getLogger(__name__)
 
 
-class SingleShardDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
-    """IterableDataset for a single shard. Workers split samples internally.
+class LoaderState(TypedDict):
+    """Checkpoint state for ShardedFeatureLoader."""
+    shards_completed: int
 
-    Workers iterate over samples where `sample_idx % num_workers == worker_id`.
-    This ensures all samples are covered exactly once across workers.
+
+class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
+    """IterableDataset that iterates over all shards sequentially, forever.
+
+    Workers split samples within each shard via `sample_idx % num_workers == worker_id`.
+    Tracks `shards_completed` for resume support.
     """
 
-    def __init__(self, shard_path: Path, image_root: Path, image_size: int) -> None:
-        self.shard_path = Path(shard_path)
+    def __init__(
+        self,
+        shard_files: list[Path],
+        image_root: Path,
+        image_size: int,
+        start_shard: int = 0,
+    ) -> None:
+        self.shard_files = shard_files
         self.image_root = Path(image_root)
         self.image_size = image_size
-        self._transform = val_transform(image_size)
+        self.start_shard = start_shard
+        self.transform = val_transform(image_size)
 
     def __iter__(self) -> Iterator[tuple[Tensor, Tensor, Tensor, int]]:
         worker_info = get_worker_info()
         worker_id = worker_info.id if worker_info else 0
         num_workers = worker_info.num_workers if worker_info else 1
 
-        t0 = time.perf_counter()
-        shard = torch.load(self.shard_path, map_location="cpu", weights_only=False, mmap=True)
-        load_time = time.perf_counter() - t0
+        n_shards = len(self.shard_files)
+        shard_counter = self.start_shard
 
-        n_samples = len(shard["paths"])
-        failed_indices = set(shard.get("failed_indices", []))
+        while True:
+            shard_idx = shard_counter % n_shards
+            shard_path = self.shard_files[shard_idx]
 
-        if worker_id == 0:
-            log.info(f"Loaded shard {self.shard_path.name}: {n_samples} samples in {load_time:.2f}s")
-            if failed_indices:
-                log.warning(f"  {len(failed_indices)} pre-marked failures will be skipped")
+            if worker_id == 0:
+                log.info(f"Worker 0: starting shard {shard_idx}/{n_shards} ({shard_path.name})")
 
-        yielded = 0
-        skipped_failed = 0
-        skipped_runtime = 0
+            t0 = time.perf_counter()
+            shard = torch.load(shard_path, map_location="cpu", weights_only=False, mmap=True)
+            t_load = time.perf_counter() - t0
 
-        # Workers split by sample index: worker i gets samples i, i+nw, i+2*nw, ...
-        for i in range(worker_id, n_samples, num_workers):
-            if i in failed_indices:
-                skipped_failed += 1
-                continue
+            t1 = time.perf_counter()
+            n_samples = len(shard["paths"])
+            failed_indices = set(shard.get("failed_indices", []))
+            t_parse = time.perf_counter() - t1
 
-            rel_path = shard["paths"][i]
-            try:
-                with Image.open(self.image_root / rel_path) as f:
-                    img = f.convert("RGB")
-                img_tensor = self._transform(img)
-            except Exception as e:
-                # Vanishingly rare runtime failure - log and skip
-                log.warning(f"Worker {worker_id}: RUNTIME FAILURE {rel_path}: {type(e).__name__}: {e}")
-                skipped_runtime += 1
-                continue
+            if worker_id == 0:
+                log.info(f"  torch.load: {t_load:.3f}s, parse: {t_parse:.3f}s, {n_samples} samples")
+                if failed_indices:
+                    log.warning(f"  {len(failed_indices)} pre-marked failures")
 
-            assert isinstance(img_tensor, Tensor)
-            yield (
-                img_tensor,
-                shard["patches"][i].clone(),
-                shard["cls"][i].clone(),
-                int(shard["class_idxs"][i]),
-            )
-            yielded += 1
+            yielded = 0
+            skipped = 0
 
-        log.debug(
-            f"Worker {worker_id}: shard done - yielded={yielded}, "
-            f"skipped_failed={skipped_failed}, skipped_runtime={skipped_runtime}"
-        )
+            for i in range(worker_id, n_samples, num_workers):
+                if i in failed_indices:
+                    skipped += 1
+                    continue
 
+                rel_path = shard["paths"][i]
+                try:
+                    with Image.open(self.image_root / rel_path) as f:
+                        img = f.convert("RGB")
+                    img_tensor = self.transform(img)
+                except Exception as e:
+                    log.warning(f"Worker {worker_id}: RUNTIME FAILURE {rel_path}: {e}")
+                    skipped += 1
+                    continue
 
-class LoaderState(TypedDict):
-    """Checkpoint state for ShardedFeatureLoader."""
-    shards_completed: int
+                assert isinstance(img_tensor, Tensor)
+                yield (
+                    img_tensor,
+                    shard["patches"][i].clone(),
+                    shard["cls"][i].clone(),
+                    int(shard["class_idxs"][i]),
+                )
+                yielded += 1
+
+            if worker_id == 0:
+                log.debug(f"  Worker 0: shard done, yielded={yielded}, skipped={skipped}")
+
+            shard_counter += 1
 
 
 class ShardedFeatureLoader:
     """Infinite loader over shards with checkpoint/resume support.
 
-    Iterates shards in deterministic order: 0, 1, 2, ..., n-1, 0, 1, ...
-    Each shard is fully exhausted before moving to the next.
-    Progress is tracked via `shards_completed` for clean resume.
+    Wraps AllShardsDataset + DataLoader. Tracks shards_completed for checkpointing.
     """
 
     def __init__(
@@ -122,7 +136,19 @@ class ShardedFeatureLoader:
         log.info(f"  Found {len(self.shard_files)} shards in {time.perf_counter() - t0:.2f}s")
         assert self.shard_files, f"No shards found in {shards_dir}"
 
+        # Read first shard to get samples_per_shard (all shards same size)
+        first_shard = torch.load(self.shard_files[0], map_location="cpu", weights_only=False)
+        samples_per_shard = len(first_shard["paths"])
+        del first_shard
+        log.info(f"  {samples_per_shard} samples/shard")
+
         self.shards_completed = 0
+        self.batches_per_shard = samples_per_shard // batch_size
+
+        # Will be created lazily on first iteration
+        self.loader: DataLoader | None = None
+        self.loader_iter: Iterator | None = None
+        self.batch_in_shard = 0
 
     def state_dict(self) -> LoaderState:
         """Return checkpoint state."""
@@ -133,45 +159,38 @@ class ShardedFeatureLoader:
         self.shards_completed = state["shards_completed"]
         log.info(f"Resumed ShardedFeatureLoader at shard {self.shards_completed}")
 
-    def _create_dataloader(self, shard_path: Path) -> DataLoader:
-        """Create DataLoader for a single shard."""
-        ds = SingleShardDataset(shard_path, self.image_root, self.image_size)
+    def _create_loader(self) -> DataLoader:
+        """Create DataLoader with dataset starting at current shard."""
+        dataset = AllShardsDataset(
+            shard_files=self.shard_files,
+            image_root=self.image_root,
+            image_size=self.image_size,
+            start_shard=self.shards_completed,
+        )
         return DataLoader(
-            ds,
+            dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             pin_memory=True,
             drop_last=True,
-            persistent_workers=False,  # New loader per shard, no persistence
+            persistent_workers=self.num_workers > 0,
         )
 
-    def __iter__(self) -> Iterator[tuple[Tensor, Tensor, Tensor, Tensor]]:
-        """Infinite iteration over shards.
-
-        Yields batched (images, patches, cls, class_idxs).
-        Never stops - loops back to shard 0 after exhausting all shards.
-        """
-        n_shards = len(self.shard_files)
-
-        while True:
-            shard_idx = self.shards_completed % n_shards
-            shard_path = self.shard_files[shard_idx]
-
-            log.info(f"Starting shard {shard_idx}/{n_shards} ({shard_path.name}), "
-                     f"total shards_completed={self.shards_completed}")
-
-            loader = self._create_dataloader(shard_path)
-            batches_this_shard = 0
-
-            for batch in loader:
-                batches_this_shard += 1
-                yield batch
-
-            log.info(f"Finished shard {shard_idx}: {batches_this_shard} batches")
-            self.shards_completed += 1
-
     def next(self) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Get next batch (images, patches, cls, class_idxs). Creates iterator on first call."""
-        if not hasattr(self, "_iter"):
-            self._iter = iter(self)
-        return next(self._iter)
+        """Get next batch. Tracks shard completion for checkpointing."""
+        if self.loader is None:
+            log.info(f"Creating DataLoader with {self.num_workers} workers, persistent={self.num_workers > 0}")
+            self.loader = self._create_loader()
+            self.loader_iter = iter(self.loader)
+            self.batch_in_shard = 0
+
+        assert self.loader_iter is not None
+        batch = next(self.loader_iter)
+
+        self.batch_in_shard += 1
+        if self.batch_in_shard >= self.batches_per_shard:
+            self.shards_completed += 1
+            self.batch_in_shard = 0
+            log.info(f"Shard boundary: shards_completed={self.shards_completed}")
+
+        return batch
