@@ -27,8 +27,8 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    # Paths (defaults from env vars set by slurm/env.sh)
-    features_dir: Path = Path(os.environ.get("FEATURES_DIR", "~/projects/def-skrishna/dinov3_dense_features")).expanduser()
+    # Paths - feature_base_dir should include dataset (e.g. $FEATURES_DIR/in21k)
+    feature_base_dir: Path = Path(os.environ.get("FEATURES_DIR", "~/projects/def-skrishna/dinov3_dense_features")).expanduser() / "in21k"
     image_root: Path = Path(os.environ.get("IN21K_DIR", "/datashare/imagenet/winter21_whole"))
     teacher_model: str = "dinov3_vitb16"
     image_size: int = 512
@@ -45,7 +45,7 @@ class Config:
 def main(cfg: Config) -> None:
     from avp_vit.train.feature_dataset import ShardedFeatureLoader
 
-    shards_dir = cfg.features_dir / cfg.teacher_model / str(cfg.image_size) / "shards"
+    shards_dir = cfg.feature_base_dir / cfg.teacher_model / str(cfg.image_size) / "shards"
     log.info("=" * 60)
     log.info("ShardedFeatureLoader Benchmark")
     log.info("=" * 60)
