@@ -27,7 +27,7 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
     """IterableDataset that iterates over all shards sequentially, forever.
 
     Workers split samples within each shard via `sample_idx % num_workers == worker_id`.
-    Tracks `shards_completed` for resume support.
+    Resume is handled via `start_shard` parameter.
     """
 
     def __init__(
@@ -105,7 +105,7 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
 class ShardedFeatureLoader:
     """Infinite loader over shards with checkpoint/resume support.
 
-    Wraps AllShardsDataset + DataLoader. Tracks shards_completed for checkpointing.
+    Wraps AllShardsDataset + DataLoader. Resume via start_shard = start_step // batches_per_shard.
     """
 
     def __init__(

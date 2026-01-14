@@ -55,7 +55,7 @@ class Config:
     ema_alpha: float = 0.1  # EMA smoothing for metrics
     grad_clip: float = 1.0
     policy_grad_clip: float = 1.0  # Separate clip for policy (applied first)
-    # 4992 = 78 × 64 (batches_per_shard) - clean shard boundary alignment
+    # Must be multiple of batches_per_shard (shard_size // batch_size) for clean resume
     steps_per_job: int = 4_992  # Steps this job does before exiting (for SLURM arrays)
     # Data
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
