@@ -26,6 +26,7 @@ dependencies = [
     "albumentations>=2.0.8",
     "ml-dtypes>=0.5.4",
     "xxhash>=3.6.0",
+    "polars>=1.37.1",
 ]
 
 [build-system]
