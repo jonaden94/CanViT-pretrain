@@ -8,9 +8,12 @@ Logs mIoU curves vs timestep to see feature quality evolution.
 """
 
 import logging
+import os
+import tempfile
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict
 
 import albumentations as A
 import comet_ml
@@ -68,6 +71,7 @@ class Config:
     warmup_ratio: float = 0.1
     max_steps: int = 5000
     grad_clip: float = 1.0
+    focal_gamma: float = 2.0
 
     log_every: int = 20
     val_every: int = 500
@@ -78,6 +82,7 @@ class Config:
     comet_workspace: str = "m2b3-ava"
     device: str | None = None
     amp: bool = True
+    probe_ckpt_dir: Path | None = None
 
 
 class ProbeHead(nn.Module):
@@ -128,7 +133,7 @@ class Features:
         return self.teacher_full if feat_type == "teacher_full" else self.teacher_glimpse
 
 
-def focal_loss(logits: Tensor, masks: Tensor, gamma: float = 2.0) -> Tensor:
+def focal_loss(logits: Tensor, masks: Tensor, gamma: float) -> Tensor:
     """Pixel-wise focal loss. Upsamples logits to mask resolution."""
     C, H, W = logits.shape[1], masks.shape[1], masks.shape[2]
     logits_up = F.interpolate(logits, (H, W), mode="bilinear", align_corners=False)
@@ -216,11 +221,11 @@ def upsample_preds(logits: Tensor, target_size: int) -> Tensor:
     return F.interpolate(logits, (target_size, target_size), mode="bilinear", align_corners=False).argmax(1)
 
 
-def train_probe(probe: Probe, feat: Tensor, masks: Tensor, grad_clip: float, ema_alpha: float) -> None:
+def train_probe(probe: Probe, feat: Tensor, masks: Tensor, *, grad_clip: float, ema_alpha: float, focal_gamma: float) -> None:
     """Single probe training step."""
     probe.head.train()
     probe.optimizer.zero_grad()
-    loss = focal_loss(probe.head(feat.detach().float()), masks)
+    loss = focal_loss(probe.head(feat.detach().float()), masks, gamma=focal_gamma)
     loss.backward()
     grad_norm = nn.utils.clip_grad_norm_(probe.head.parameters(), grad_clip).item()
     probe.optimizer.step()
@@ -307,6 +312,39 @@ def make_probe(name: str, dim: int, cfg: Config, device: torch.device) -> Probe:
     warmup = LinearLR(opt, cfg.min_lr / cfg.peak_lr, 1.0, max(1, warmup_steps))
     cosine = CosineAnnealingLR(opt, cfg.max_steps - warmup_steps, eta_min=cfg.min_lr)
     return Probe(name, head, opt, SequentialLR(opt, [warmup, cosine], [warmup_steps]))
+
+
+class ProbeCheckpoint(TypedDict):
+    """Checkpoint for probe heads."""
+    probe_state_dicts: dict[str, dict[str, Tensor]]
+    best_mious: dict[str, float]
+    step: int
+    config: dict
+    avp_ckpt: str
+    timestamp: str
+
+
+def save_probes(path: Path, probes: dict[str, Probe], step: int, cfg: Config) -> None:
+    """Save all probe heads atomically."""
+    data: ProbeCheckpoint = {
+        "probe_state_dicts": {name: p.head.state_dict() for name, p in probes.items()},
+        "best_mious": {name: p.best_miou for name, p in probes.items()},
+        "step": step,
+        "config": asdict(cfg),
+        "avp_ckpt": str(cfg.avp_ckpt),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(suffix=".pt.tmp", dir=path.parent)
+    try:
+        os.close(fd)
+        torch.save(data, tmp)
+        Path(tmp).rename(path)
+        size_mb = path.stat().st_size / (1024 * 1024)
+        log.info(f"Saved probes: {path} ({size_mb:.1f} MB, step={step})")
+    except Exception:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def main(cfg: Config) -> None:
@@ -432,11 +470,16 @@ def main(cfg: Config) -> None:
                         elif feat_type in probes:
                             eval_probe(probes[feat_type], feats.get_static(feat_type), vm, ious[feat_type])
 
+            any_improved = False
             for name, iou in ious.items():
                 miou = iou.compute().item()
                 exp.log_metric(f"{name}/val_miou", miou, step=step)
                 if miou > probes[name].best_miou:
                     probes[name].best_miou = miou
+                    any_improved = True
+
+            if any_improved and cfg.probe_ckpt_dir:
+                save_probes(cfg.probe_ckpt_dir / "best.pt", probes, step, cfg)
 
             for feat_type in cfg.features:
                 if feat_type in RECURRENT_FEATURES:
@@ -465,9 +508,9 @@ def main(cfg: Config) -> None:
         for feat_type in cfg.features:
             if feat_type in RECURRENT_FEATURES:
                 for t, feat in enumerate(feats.get_recurrent(feat_type)):
-                    train_probe(probes[f"{feat_type}/t{t}"], feat, masks, cfg.grad_clip, cfg.ema_alpha)
+                    train_probe(probes[f"{feat_type}/t{t}"], feat, masks, grad_clip=cfg.grad_clip, ema_alpha=cfg.ema_alpha, focal_gamma=cfg.focal_gamma)
             elif feat_type in probes:
-                train_probe(probes[feat_type], feats.get_static(feat_type), masks, cfg.grad_clip, cfg.ema_alpha)
+                train_probe(probes[feat_type], feats.get_static(feat_type), masks, grad_clip=cfg.grad_clip, ema_alpha=cfg.ema_alpha, focal_gamma=cfg.focal_gamma)
 
         step += 1
         pbar.update(1)
