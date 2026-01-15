@@ -43,13 +43,9 @@ IGNORE_LABEL = 255
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406])
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225])
 
-# Recurrent features change across timesteps, static features don't
-RecurrentFeature = Literal["hidden", "predicted_norm"]
-StaticFeature = Literal["teacher_full", "teacher_glimpse"]
 FeatureType = Literal["hidden", "predicted_norm", "teacher_full", "teacher_glimpse"]
-
-RECURRENT_FEATURES: set[FeatureType] = {"hidden", "predicted_norm"}
-STATIC_FEATURES: set[FeatureType] = {"teacher_full", "teacher_glimpse"}
+RECURRENT_FEATURES: frozenset[FeatureType] = frozenset({"hidden", "predicted_norm"})
+STATIC_FEATURES: frozenset[FeatureType] = frozenset({"teacher_full", "teacher_glimpse"})
 
 
 @dataclass
@@ -58,8 +54,8 @@ class Config:
     ade20k_root: Path = Path("/datasets/ADE20k/ADEChallengeData2016")
     teacher_ckpt: Path | None = None
 
-    features: list[FeatureType] = field(default_factory=lambda: ["hidden", "predicted_norm", "teacher_full"])
-    n_timesteps: int = 5  # t=0 full, t=1..4 random
+    features: list[FeatureType] = field(default_factory=lambda: ["hidden", "predicted_norm", "teacher_glimpse"])
+    n_timesteps: int = 5
 
     image_size: int = 512
     batch_size: int = 64
@@ -76,6 +72,7 @@ class Config:
     log_every: int = 20
     val_every: int = 500
     viz_every: int = 1000
+    ema_alpha: float = 0.1
 
     comet_project: str = "avp-ade20k-probe"
     comet_workspace: str = "m2b3-ava"
@@ -83,8 +80,58 @@ class Config:
     amp: bool = True
 
 
+class ProbeHead(nn.Module):
+    def __init__(self, embed_dim: int) -> None:
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.ln = nn.LayerNorm(embed_dim)
+        self.linear = nn.Linear(embed_dim, NUM_CLASSES)
+
+    def forward(self, x: Tensor) -> Tensor:
+        assert x.ndim == 4, f"Expected [B,H,W,D], got {x.shape}"
+        assert x.shape[-1] == self.embed_dim, f"Expected D={self.embed_dim}, got {x.shape[-1]}"
+        return self.linear(self.ln(x)).permute(0, 3, 1, 2)
+
+
+@dataclass
+class Probe:
+    name: str
+    head: ProbeHead
+    optimizer: AdamW
+    scheduler: SequentialLR
+    loss_ema: float = 0.0
+    grad_norm_ema: float = 0.0
+    best_miou: float = 0.0
+
+    def update(self, loss: float, grad_norm: float, alpha: float) -> None:
+        if self.loss_ema == 0.0:
+            self.loss_ema, self.grad_norm_ema = loss, grad_norm
+        else:
+            self.loss_ema = alpha * loss + (1 - alpha) * self.loss_ema
+            self.grad_norm_ema = alpha * grad_norm + (1 - alpha) * self.grad_norm_ema
+
+
+@dataclass
+class Features:
+    """Extracted features. Recurrent have list per timestep, static have single tensor."""
+    hidden: list[Tensor]
+    predicted_norm: list[Tensor]
+    teacher_full: Tensor
+    teacher_glimpse: Tensor
+
+    def get_recurrent(self, feat_type: FeatureType) -> list[Tensor]:
+        assert feat_type in RECURRENT_FEATURES
+        return self.hidden if feat_type == "hidden" else self.predicted_norm
+
+    def get_static(self, feat_type: FeatureType) -> Tensor:
+        assert feat_type in STATIC_FEATURES
+        return self.teacher_full if feat_type == "teacher_full" else self.teacher_glimpse
+
+
 def focal_loss(logits: Tensor, masks: Tensor, scale: int, gamma: float = 2.0) -> Tensor:
     B, C, h, w = logits.shape
+    assert masks.shape == (B, h * scale, w * scale), f"Mask shape {masks.shape} vs logits {logits.shape}, scale={scale}"
+
     log_probs = F.log_softmax(logits, dim=1).permute(0, 2, 3, 1).reshape(-1, C)
     probs = log_probs.exp()
     mask_patches = masks.reshape(B, h, scale, w, scale).permute(0, 1, 3, 2, 4).reshape(-1, scale * scale)
@@ -95,17 +142,7 @@ def focal_loss(logits: Tensor, masks: Tensor, scale: int, gamma: float = 2.0) ->
     return -((1 - p) ** gamma * log_p * valid).sum() / valid.sum().clamp(min=1)
 
 
-class ProbeHead(nn.Module):
-    def __init__(self, embed_dim: int) -> None:
-        super().__init__()
-        self.ln = nn.LayerNorm(embed_dim)
-        self.linear = nn.Linear(embed_dim, NUM_CLASSES)
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.linear(self.ln(x)).permute(0, 3, 1, 2)
-
-
-class ADE20kDataset(Dataset):
+class ADE20kDataset(Dataset[tuple[Tensor, Tensor]]):
     def __init__(self, root: Path, split: str, size: int, augment: bool = False) -> None:
         self.size = size
         self.load_size = size * 2 if augment else size
@@ -113,7 +150,9 @@ class ADE20kDataset(Dataset):
         img_dir, ann_dir = root / "images" / split, root / "annotations" / split
         self.imgs = sorted(img_dir.glob("*.jpg"))
         self.anns = [ann_dir / (p.stem + ".png") for p in self.imgs]
-        log.info(f"ADE20k {split}: {len(self)} images")
+        assert len(self.imgs) > 0, f"No images found in {img_dir}"
+        assert len(self.imgs) == len(self.anns)
+        log.info(f"ADE20k {split}: {len(self)} images from {root}")
 
     def __len__(self) -> int:
         return len(self.imgs)
@@ -131,35 +170,6 @@ class ADE20kDataset(Dataset):
         return img_t, torch.where(valid, mask_t - 1, IGNORE_LABEL)
 
 
-@dataclass
-class Probe:
-    name: str
-    head: ProbeHead
-    optimizer: AdamW
-    scheduler: SequentialLR
-    loss_sum: float = 0.0
-    loss_count: int = 0
-    best_miou: float = 0.0
-
-    def accumulate(self, loss: Tensor) -> None:
-        self.loss_sum += loss.item()
-        self.loss_count += 1
-
-    def reset(self) -> float:
-        avg = self.loss_sum / max(self.loss_count, 1)
-        self.loss_sum, self.loss_count = 0.0, 0
-        return avg
-
-
-@dataclass
-class Features:
-    """Extracted features. Recurrent have list per timestep, static have single tensor."""
-    hidden: list[Tensor]  # [t0, t1, ...]
-    predicted_norm: list[Tensor]
-    teacher_full: Tensor  # single
-    teacher_glimpse: Tensor  # single
-
-
 def extract_features(
     model: ActiveCanViT,
     teacher: DINOv3Backbone,
@@ -170,11 +180,11 @@ def extract_features(
     glimpse_px: int,
     device: torch.device,
 ) -> Features:
-    """Extract features. Recurrent features vary by timestep, static don't."""
-    B = images.shape[0]
+    B, C, H, W = images.shape
+    assert C == 3 and H == W, f"Expected square RGB images, got {images.shape}"
+
     hidden_list: list[Tensor] = []
     predicted_list: list[Tensor] = []
-
     state = model.init_state(batch_size=B, canvas_grid_size=canvas_grid)
 
     for t in range(n_timesteps):
@@ -186,16 +196,43 @@ def extract_features(
         out = model.forward_step(image=images, state=state, viewpoint=vp, glimpse_size_px=glimpse_px)
         state = out.state
 
-        hidden_list.append(model.get_spatial(state.canvas).view(B, canvas_grid, canvas_grid, -1))
-        predicted_list.append(model.predict_teacher_scene(state.canvas).view(B, canvas_grid, canvas_grid, -1))
+        h = model.get_spatial(state.canvas).view(B, canvas_grid, canvas_grid, -1)
+        p = model.predict_teacher_scene(state.canvas).view(B, canvas_grid, canvas_grid, -1)
+        hidden_list.append(h)
+        predicted_list.append(p)
 
-    # Static: teacher on full image and glimpse-sized image (baselines)
     teacher_full = teacher.forward_norm_features(images).patches.view(B, canvas_grid, canvas_grid, -1)
     sz = glimpse_grid * teacher.patch_size_px
     small = F.interpolate(images, (sz, sz), mode="bilinear", align_corners=False)
     teacher_glimpse = teacher.forward_norm_features(small).patches.view(B, glimpse_grid, glimpse_grid, -1)
 
+    assert len(hidden_list) == n_timesteps
     return Features(hidden_list, predicted_list, teacher_full, teacher_glimpse)
+
+
+def upsample_preds(logits: Tensor, target_size: int) -> Tensor:
+    """Upsample probe predictions to mask resolution."""
+    scale = target_size // logits.shape[2]
+    return logits.argmax(1).repeat_interleave(scale, 1).repeat_interleave(scale, 2)
+
+
+def train_probe(probe: Probe, feat: Tensor, masks: Tensor, grad_clip: float, ema_alpha: float) -> None:
+    """Single probe training step."""
+    probe.head.train()
+    probe.optimizer.zero_grad()
+    scale = masks.shape[1] // feat.shape[1]
+    loss = focal_loss(probe.head(feat.detach().float()), masks, scale)
+    loss.backward()
+    grad_norm = nn.utils.clip_grad_norm_(probe.head.parameters(), grad_clip).item()
+    probe.optimizer.step()
+    probe.scheduler.step()
+    probe.update(loss.item(), grad_norm, ema_alpha)
+
+
+def eval_probe(probe: Probe, feat: Tensor, masks: Tensor, iou_metric: MulticlassJaccardIndex) -> None:
+    """Single probe evaluation step."""
+    preds = upsample_preds(probe.head(feat.float()), masks.shape[1])
+    iou_metric.update(preds, masks)
 
 
 def log_viz(
@@ -206,12 +243,9 @@ def log_viz(
     images: Tensor,
     masks: Tensor,
     cfg: Config,
-    n_samples: int = 4,
 ) -> None:
-    """Log visualization of predictions to Comet."""
-    n = min(n_samples, images.shape[0])
-    H_mask = masks.shape[1]
-
+    """Log segmentation visualization to Comet."""
+    n = min(4, images.shape[0])
     palette = np.random.RandomState(42).randint(0, 255, (NUM_CLASSES + 1, 3), dtype=np.uint8)
     palette[NUM_CLASSES] = 0
 
@@ -222,32 +256,22 @@ def log_viz(
         t = t * IMAGENET_STD.view(3, 1, 1).to(t.device) + IMAGENET_MEAN.view(3, 1, 1).to(t.device)
         return (t.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
 
-    # Collect predictions for t=0 and last timestep
     preds_t0: dict[str, np.ndarray] = {}
     preds_tlast: dict[str, np.ndarray] = {}
 
     for feat_type in cfg.features:
         if feat_type in RECURRENT_FEATURES:
-            feat_list = feats.hidden if feat_type == "hidden" else feats.predicted_norm
+            feat_list = feats.get_recurrent(feat_type)
             for t, feat in [(0, feat_list[0]), (cfg.n_timesteps - 1, feat_list[-1])]:
                 name = f"{feat_type}/t{t}"
                 if name in probes:
-                    scale = H_mask // feat.shape[1]
-                    logits = probes[name].head(feat.float())
-                    pred = logits[:n].argmax(1).repeat_interleave(scale, 1).repeat_interleave(scale, 2).cpu().numpy()
-                    if t == 0:
-                        preds_t0[feat_type] = pred
-                    else:
-                        preds_tlast[feat_type] = pred
-        else:
-            feat = feats.teacher_full if feat_type == "teacher_full" else feats.teacher_glimpse
-            if feat_type in probes:
-                scale = H_mask // feat.shape[1]
-                logits = probes[feat_type].head(feat.float())
-                pred = logits[:n].argmax(1).repeat_interleave(scale, 1).repeat_interleave(scale, 2).cpu().numpy()
-                preds_t0[feat_type] = pred
+                    pred = upsample_preds(probes[name].head(feat.float()), masks.shape[1])[:n].cpu().numpy()
+                    (preds_t0 if t == 0 else preds_tlast)[feat_type] = pred
+        elif feat_type in probes:
+            feat = feats.get_static(feat_type)
+            pred = upsample_preds(probes[feat_type].head(feat.float()), masks.shape[1])[:n].cpu().numpy()
+            preds_t0[feat_type] = pred
 
-    # Plot: image, GT, then predictions
     cols = 2 + len(preds_t0) + len(preds_tlast)
     fig, axes = plt.subplots(n, cols, figsize=(2.5 * cols, 2.5 * n))
     if n == 1:
@@ -258,21 +282,17 @@ def log_viz(
         axes[i, col].imshow(denorm(images[i]))
         axes[i, col].set_title("Image")
         col += 1
-
         axes[i, col].imshow(colorize(masks[i].cpu().numpy()))
         axes[i, col].set_title("GT")
         col += 1
-
         for name, pred in preds_t0.items():
             axes[i, col].imshow(colorize(pred[i]))
             axes[i, col].set_title(f"{name[:6]}/t0")
             col += 1
-
         for name, pred in preds_tlast.items():
             axes[i, col].imshow(colorize(pred[i]))
             axes[i, col].set_title(f"{name[:6]}/t{cfg.n_timesteps-1}")
             col += 1
-
         for ax in axes[i]:
             ax.axis("off")
 
@@ -281,14 +301,32 @@ def log_viz(
     plt.close(fig)
 
 
+def make_probe(name: str, dim: int, cfg: Config, device: torch.device) -> Probe:
+    warmup_steps = int(cfg.warmup_ratio * cfg.max_steps)
+    head = ProbeHead(dim).to(device)
+    opt = AdamW(head.parameters(), lr=cfg.peak_lr, weight_decay=cfg.weight_decay)
+    warmup = LinearLR(opt, cfg.min_lr / cfg.peak_lr, 1.0, max(1, warmup_steps))
+    cosine = CosineAnnealingLR(opt, cfg.max_steps - warmup_steps, eta_min=cfg.min_lr)
+    return Probe(name, head, opt, SequentialLR(opt, [warmup, cosine], [warmup_steps]))
+
+
 def main(cfg: Config) -> None:
     torch.set_float32_matmul_precision("high")
     device = torch.device(cfg.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+
+    log.info("=" * 60)
+    log.info("ADE20K Probe Training")
+    log.info("=" * 60)
     log.info(f"Device: {device}, AMP: {cfg.amp}")
+    log.info(f"AVP checkpoint: {cfg.avp_ckpt}")
+    log.info(f"Features: {cfg.features}")
+    log.info(f"Timesteps: {cfg.n_timesteps}")
+    log.info(f"Batch size: {cfg.batch_size}, Max steps: {cfg.max_steps}")
 
     amp_ctx = torch.autocast(device_type=device.type, dtype=torch.bfloat16) if cfg.amp else torch.autocast(device_type=device.type, enabled=False)
 
     # Load AVP model
+    log.info("Loading AVP model...")
     ckpt = load_ckpt(cfg.avp_ckpt, device)
     model_cfg = dacite.from_dict(ActiveCanViTConfig, {**ckpt["model_config"], "teacher_dim": ckpt["teacher_dim"]})
     bb = create_backbone(ckpt["backbone"], pretrained=False)
@@ -297,19 +335,25 @@ def main(cfg: Config) -> None:
     model = model.to(device).eval()
     for p in model.parameters():
         p.requires_grad_(False)
+    avp_params = sum(p.numel() for p in model.parameters())
+    log.info(f"  Backbone: {ckpt['backbone']}, AVP params: {avp_params:,}")
 
-    # Teacher
+    # Load teacher
+    log.info("Loading teacher...")
     weights = str(cfg.teacher_ckpt) if cfg.teacher_ckpt else None
     teacher = create_backbone(ckpt["backbone"], pretrained=weights is None, weights=weights)
     assert isinstance(teacher, DINOv3Backbone)
     teacher = teacher.to(device).eval()
     for p in teacher.parameters():
         p.requires_grad_(False)
+    log.info(f"  Teacher embed_dim: {teacher.embed_dim}, patch_size: {teacher.patch_size_px}")
 
-    # Dimensions
+    # Compute grid sizes
     canvas_grid = cfg.image_size // model.backbone.patch_size_px
     glimpse_grid = ckpt["model_config"].get("glimpse_grid_size", 8)
     glimpse_px = glimpse_grid * model.backbone.patch_size_px
+    log.info(f"  Canvas grid: {canvas_grid}x{canvas_grid}, Glimpse grid: {glimpse_grid}x{glimpse_grid}")
+
     dims: dict[FeatureType, int] = {
         "hidden": model.canvas_dim,
         "predicted_norm": ckpt["teacher_dim"],
@@ -318,40 +362,40 @@ def main(cfg: Config) -> None:
     }
 
     # Create probes
+    log.info("Creating probes...")
     probes: dict[str, Probe] = {}
-    warmup_steps = int(cfg.warmup_ratio * cfg.max_steps)
-
-    def make_probe(name: str, dim: int) -> Probe:
-        head = ProbeHead(dim).to(device)
-        opt = AdamW(head.parameters(), lr=cfg.peak_lr, weight_decay=cfg.weight_decay)
-        warmup = LinearLR(opt, cfg.min_lr / cfg.peak_lr, 1.0, max(1, warmup_steps))
-        cosine = CosineAnnealingLR(opt, cfg.max_steps - warmup_steps, eta_min=cfg.min_lr)
-        return Probe(name, head, opt, SequentialLR(opt, [warmup, cosine], [warmup_steps]))
-
     for feat in cfg.features:
         if feat in RECURRENT_FEATURES:
-            # One probe per timestep
             for t in range(cfg.n_timesteps):
                 name = f"{feat}/t{t}"
-                probes[name] = make_probe(name, dims[feat])
+                probes[name] = make_probe(name, dims[feat], cfg, device)
         else:
-            # Single probe (static baseline)
-            probes[feat] = make_probe(feat, dims[feat])
+            probes[feat] = make_probe(feat, dims[feat], cfg, device)
 
-    log.info(f"Probes: {list(probes.keys())}")
+    probe_params = sum(sum(p.numel() for p in probe.head.parameters()) for probe in probes.values())
+    log.info(f"  {len(probes)} probes, {probe_params:,} trainable params total")
+    log.info(f"  Probe names: {list(probes.keys())}")
 
     # Data
+    log.info("Loading datasets...")
     train_ds = ADE20kDataset(cfg.ade20k_root, "training", cfg.image_size, augment=True)
     val_ds = ADE20kDataset(cfg.ade20k_root, "validation", cfg.image_size)
     train_loader = DataLoader(train_ds, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True, drop_last=True)
     val_loader = DataLoader(val_ds, cfg.eval_batch_size, num_workers=cfg.num_workers, pin_memory=True)
 
     # Comet
+    log.info(f"Initializing Comet: {cfg.comet_workspace}/{cfg.comet_project}")
     exp = comet_ml.Experiment(project_name=cfg.comet_project, workspace=cfg.comet_workspace)
     exp.log_parameters(asdict(cfg))
+    exp.log_parameter("avp_params", avp_params)
+    exp.log_parameter("probe_params", probe_params)
 
-    # Training
-    step, train_iter = 0, iter(train_loader)
+    log.info("=" * 60)
+    log.info("Starting training loop")
+    log.info("=" * 60)
+
+    step = 0
+    train_iter = iter(train_loader)
     pbar = tqdm(total=cfg.max_steps, desc="Training")
 
     while step < cfg.max_steps:
@@ -361,7 +405,6 @@ def main(cfg: Config) -> None:
             train_iter = iter(train_loader)
             images, masks = next(train_iter)
         images, masks = images.to(device), masks.to(device)
-        H_mask = masks.shape[1]
 
         # Validation
         if step % cfg.val_every == 0:
@@ -374,42 +417,31 @@ def main(cfg: Config) -> None:
                     vi, vm = vi.to(device), vm.to(device)
                     with amp_ctx:
                         feats = extract_features(model, teacher, vi, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, device)
-
-                    # Recurrent features: evaluate each timestep
                     for feat_type in cfg.features:
                         if feat_type in RECURRENT_FEATURES:
-                            feat_list = feats.hidden if feat_type == "hidden" else feats.predicted_norm
-                            for t, feat in enumerate(feat_list):
-                                name = f"{feat_type}/t{t}"
-                                scale = vm.shape[1] // feat.shape[1]
-                                preds = probes[name].head(feat.float()).argmax(1).repeat_interleave(scale, 1).repeat_interleave(scale, 2)
-                                ious[name].update(preds, vm)
+                            for t, feat in enumerate(feats.get_recurrent(feat_type)):
+                                eval_probe(probes[f"{feat_type}/t{t}"], feat, vm, ious[f"{feat_type}/t{t}"])
                         elif feat_type in probes:
-                            feat = feats.teacher_full if feat_type == "teacher_full" else feats.teacher_glimpse
-                            scale = vm.shape[1] // feat.shape[1]
-                            preds = probes[feat_type].head(feat.float()).argmax(1).repeat_interleave(scale, 1).repeat_interleave(scale, 2)
-                            ious[feat_type].update(preds, vm)
+                            eval_probe(probes[feat_type], feats.get_static(feat_type), vm, ious[feat_type])
 
-            # Log metrics
             for name, iou in ious.items():
                 miou = iou.compute().item()
                 exp.log_metric(f"{name}/val_miou", miou, step=step)
                 if miou > probes[name].best_miou:
                     probes[name].best_miou = miou
 
-            # Log curves for recurrent features
             for feat_type in cfg.features:
                 if feat_type in RECURRENT_FEATURES:
                     curve_y = [ious[f"{feat_type}/t{t}"].compute().item() for t in range(cfg.n_timesteps)]
                     exp.log_curve(f"{feat_type}/miou_vs_t", x=list(range(cfg.n_timesteps)), y=curve_y, step=step)
 
-            # Postfix: show t0 mIoU for recurrent, single mIoU for static
             postfix = {}
             for feat in cfg.features:
+                key = feat[:3]
                 if feat in RECURRENT_FEATURES:
-                    postfix[feat[:3]] = f"{ious[f'{feat}/t0'].compute().item():.3f}"
+                    postfix[key] = f"{ious[f'{feat}/t0'].compute().item():.3f}"
                 elif feat in probes:
-                    postfix[feat[:3]] = f"{ious[feat].compute().item():.3f}"
+                    postfix[key] = f"{ious[feat].compute().item():.3f}"
             pbar.set_postfix(postfix)
 
         # Visualization
@@ -418,52 +450,34 @@ def main(cfg: Config) -> None:
                 viz_feats = extract_features(model, teacher, images, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, device)
             log_viz(exp, step, probes, viz_feats, images, masks, cfg)
 
-        # Train
+        # Train step
         with amp_ctx:
             feats = extract_features(model, teacher, images, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, device)
 
         for feat_type in cfg.features:
             if feat_type in RECURRENT_FEATURES:
-                feat_list = feats.hidden if feat_type == "hidden" else feats.predicted_norm
-                for t, feat in enumerate(feat_list):
-                    name = f"{feat_type}/t{t}"
-                    p = probes[name]
-                    p.head.train()
-                    p.optimizer.zero_grad()
-                    scale = H_mask // feat.shape[1]
-                    loss = focal_loss(p.head(feat.detach().float()), masks, scale)
-                    loss.backward()
-                    nn.utils.clip_grad_norm_(p.head.parameters(), cfg.grad_clip)
-                    p.optimizer.step()
-                    p.scheduler.step()
-                    p.accumulate(loss)
+                for t, feat in enumerate(feats.get_recurrent(feat_type)):
+                    train_probe(probes[f"{feat_type}/t{t}"], feat, masks, cfg.grad_clip, cfg.ema_alpha)
             elif feat_type in probes:
-                feat = feats.teacher_full if feat_type == "teacher_full" else feats.teacher_glimpse
-                p = probes[feat_type]
-                p.head.train()
-                p.optimizer.zero_grad()
-                scale = H_mask // feat.shape[1]
-                loss = focal_loss(p.head(feat.detach().float()), masks, scale)
-                loss.backward()
-                nn.utils.clip_grad_norm_(p.head.parameters(), cfg.grad_clip)
-                p.optimizer.step()
-                p.scheduler.step()
-                p.accumulate(loss)
+                train_probe(probes[feat_type], feats.get_static(feat_type), masks, cfg.grad_clip, cfg.ema_alpha)
 
         step += 1
         pbar.update(1)
 
         if step % cfg.log_every == 0:
-            log_dict = {"lr": list(probes.values())[0].scheduler.get_last_lr()[0]}
+            log_dict: dict[str, float] = {"lr": list(probes.values())[0].scheduler.get_last_lr()[0]}
             for name, p in probes.items():
-                log_dict[f"{name}/loss"] = p.reset()
+                log_dict[f"{name}/loss"] = p.loss_ema
+                log_dict[f"{name}/grad_norm"] = p.grad_norm_ema
             exp.log_metrics(log_dict, step=step)
 
     pbar.close()
-    log.info("Best mIoU:")
+    log.info("=" * 60)
+    log.info("Training complete. Best mIoU:")
     for name, p in probes.items():
         log.info(f"  {name}: {p.best_miou:.4f}")
         exp.log_metric(f"best/{name}", p.best_miou)
+    log.info("=" * 60)
 
 
 if __name__ == "__main__":
