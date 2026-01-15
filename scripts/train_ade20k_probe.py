@@ -128,17 +128,18 @@ class Features:
         return self.teacher_full if feat_type == "teacher_full" else self.teacher_glimpse
 
 
-def focal_loss(logits: Tensor, masks: Tensor, scale: int, gamma: float = 2.0) -> Tensor:
-    B, C, h, w = logits.shape
-    assert masks.shape == (B, h * scale, w * scale), f"Mask shape {masks.shape} vs logits {logits.shape}, scale={scale}"
-
-    log_probs = F.log_softmax(logits, dim=1).permute(0, 2, 3, 1).reshape(-1, C)
+def focal_loss(logits: Tensor, masks: Tensor, gamma: float = 2.0) -> Tensor:
+    """Pixel-wise focal loss. Upsamples logits to mask resolution."""
+    C, H, W = logits.shape[1], masks.shape[1], masks.shape[2]
+    logits_up = F.interpolate(logits, (H, W), mode="bilinear", align_corners=False)
+    log_probs = F.log_softmax(logits_up, dim=1)  # [B, C, H, W]
     probs = log_probs.exp()
-    mask_patches = masks.reshape(B, h, scale, w, scale).permute(0, 1, 3, 2, 4).reshape(-1, scale * scale)
-    valid = mask_patches != IGNORE_LABEL
-    targets = mask_patches.clamp(0, C - 1).long()
-    log_p = log_probs.gather(1, targets)
-    p = probs.gather(1, targets)
+
+    valid = masks != IGNORE_LABEL  # [B, H, W]
+    targets = masks.clamp(0, C - 1).long()  # [B, H, W]
+
+    log_p = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)  # [B, H, W]
+    p = probs.gather(1, targets.unsqueeze(1)).squeeze(1)  # [B, H, W]
     return -((1 - p) ** gamma * log_p * valid).sum() / valid.sum().clamp(min=1)
 
 
@@ -219,8 +220,7 @@ def train_probe(probe: Probe, feat: Tensor, masks: Tensor, grad_clip: float, ema
     """Single probe training step."""
     probe.head.train()
     probe.optimizer.zero_grad()
-    scale = masks.shape[1] // feat.shape[1]
-    loss = focal_loss(probe.head(feat.detach().float()), masks, scale)
+    loss = focal_loss(probe.head(feat.detach().float()), masks)
     loss.backward()
     grad_norm = nn.utils.clip_grad_norm_(probe.head.parameters(), grad_clip).item()
     probe.optimizer.step()
