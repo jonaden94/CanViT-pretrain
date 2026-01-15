@@ -54,6 +54,38 @@ print(dir(bb))  # see available attributes
 
 Or read source: `.venv/lib/python3.12/site-packages/dinov3/` and `canvit/backbone/dinov3.py`.
 
+## CanViT Model Architecture
+
+**⚠️ VERIFY THIS SECTION AGAINST SOURCE CODE** — it can go stale. Check `avp_vit/__init__.py` and canvit source in `.venv/lib/python3.12/site-packages/canvit/`.
+
+**CRITICAL ALIAS**: `avp_vit.ActiveCanViT` is actually `ActiveCanViTForReconstructivePretraining` (see `avp_vit/__init__.py`). This is why `predict_teacher_scene` exists on loaded models.
+
+**Class hierarchy** (each adds methods):
+```
+CanViT (canvit/model/base.py)
+  → init_state, get_spatial, init_canvas, forward
+
+ActiveCanViT (canvit/model/active/base.py)
+  → forward_step, forward_reduce
+
+ActiveCanViTForReconstructivePretraining (canvit/model/active/pretraining/base.py)
+  → predict_teacher_scene, predict_scene_teacher_cls, predict_glimpse_*
+```
+
+**RecurrentState** (passed between timesteps):
+```python
+RecurrentState(
+    canvas: Tensor,        # [B, n_canvas_regs + G², canvas_dim]
+    recurrent_cls: Tensor  # [B, 1, local_dim]
+)
+```
+
+**Canvas layout**: `[registers | spatial]`. Use `model.get_spatial(canvas)` to extract spatial tokens.
+
+**Viewpoint coordinates**: `centers` is `[cy, cx]` — **y first**, normalized to `[-1, 1]`.
+
+**Reference implementation**: `inference_app/gpu_worker.py` shows correct checkpoint loading and inference.
+
 ## Commands
 
 ```bash
