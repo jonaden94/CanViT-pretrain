@@ -28,6 +28,7 @@ export TORCH_COMPILE_CACHE_DIR="$SCRATCH/.torch_compile_cache"
 
 export IN21K_DIR=/datashare/imagenet/winter21_whole
 export IN1K_VAL_DIR=/datashare/imagenet/ILSVRC2012/val
+export ADE20K_ZIP=~/projects/def-skrishna/datasets/ade20k/ADEChallengeData2016.zip
 
 # ==============================================================================
 # STORAGE

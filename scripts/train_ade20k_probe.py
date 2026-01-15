@@ -64,6 +64,7 @@ ABBREV = {
 class Config:
     avp_ckpt: Path
     ade20k_root: Path = Path("/datasets/ADE20k/ADEChallengeData2016")
+    teacher_ckpt: Path | None = None  # local teacher weights (avoids download)
 
     # Which feature types to train probes on
     frozen_features: list[FeatureType] = field(
@@ -684,7 +685,8 @@ def main(cfg: Config) -> None:
     need_teacher = bool(set(cfg.frozen_features) & {"teacher_full", "teacher_glimpse"})
     teacher = None
     if need_teacher:
-        teacher = create_backbone(backbone_name, pretrained=True)
+        weights = str(cfg.teacher_ckpt) if cfg.teacher_ckpt else None
+        teacher = create_backbone(backbone_name, pretrained=weights is None, weights=weights)
         assert isinstance(teacher, DINOv3Backbone)
         teacher = teacher.to(device).eval()
         for p in teacher.parameters():
