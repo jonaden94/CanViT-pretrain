@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Train ADE20K segmentation probes across multiple timesteps.
+"""Train ADE20K segmentation probes on AVP features.
 
-Recurrent probes (per-timestep): hidden, predicted_norm
-Static probes (single, baseline): teacher_full, teacher_glimpse
+Recurrent probes: ONE probe per feature type, trained on features AVERAGED across timesteps.
+Static probes (baselines): teacher_full, teacher_glimpse.
 
-Logs mIoU curves vs timestep to see feature quality evolution.
+Logs mIoU to compare feature quality.
 """
 
 import logging
@@ -26,7 +26,6 @@ import torch.nn.functional as F
 import tyro
 from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit.hub import create_backbone
-from canvit.viewpoint import Viewpoint
 from PIL import Image
 from torch import Tensor
 from torch.optim import AdamW
@@ -37,6 +36,7 @@ from tqdm import tqdm
 
 from avp_vit import ActiveCanViT, ActiveCanViTConfig
 from avp_vit.checkpoint import load as load_ckpt
+from avp_vit.train.viewpoint import Viewpoint  # Use this, NOT canvit.viewpoint - has safe-box sampling
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -118,19 +118,26 @@ class Probe:
 
 @dataclass
 class Features:
-    """Extracted features. Recurrent have list per timestep, static have single tensor."""
-    hidden: list[Tensor]
-    predicted_norm: list[Tensor]
-    teacher_full: Tensor
-    teacher_glimpse: Tensor
+    """Extracted features. All are single tensors [B, H, W, D].
 
-    def get_recurrent(self, feat_type: FeatureType) -> list[Tensor]:
-        assert feat_type in RECURRENT_FEATURES
-        return self.hidden if feat_type == "hidden" else self.predicted_norm
+    Recurrent features (hidden, predicted_norm) are AVERAGED across timesteps.
+    This is the correct approach: ONE probe trained on averaged features.
+    """
+    hidden: Tensor           # canvas hidden state, averaged across timesteps
+    predicted_norm: Tensor   # predicted teacher features, averaged across timesteps
+    teacher_full: Tensor     # teacher features on full image (baseline)
+    teacher_glimpse: Tensor  # teacher features on small image (baseline)
 
-    def get_static(self, feat_type: FeatureType) -> Tensor:
-        assert feat_type in STATIC_FEATURES
-        return self.teacher_full if feat_type == "teacher_full" else self.teacher_glimpse
+    def get(self, feat_type: FeatureType) -> Tensor:
+        if feat_type == "hidden":
+            return self.hidden
+        elif feat_type == "predicted_norm":
+            return self.predicted_norm
+        elif feat_type == "teacher_full":
+            return self.teacher_full
+        elif feat_type == "teacher_glimpse":
+            return self.teacher_glimpse
+        raise ValueError(f"Unknown feature type: {feat_type}")
 
 
 def focal_loss(logits: Tensor, masks: Tensor, gamma: float) -> Tensor:
@@ -184,36 +191,50 @@ def extract_features(
     canvas_grid: int,
     glimpse_grid: int,
     glimpse_px: int,
+    teacher_dim: int,
     device: torch.device,
 ) -> Features:
+    """Extract features from model and teacher.
+
+    Recurrent features are AVERAGED across all timesteps - this is the correct
+    approach for probe training (ONE probe on averaged features, not N probes).
+
+    IMPORTANT: Uses Viewpoint.random() for proper safe-box-area sampling.
+    DO NOT use raw torch.rand() - viewpoints can go out of bounds!
+    """
     B, C, H, W = images.shape
     assert C == 3 and H == W, f"Expected square RGB images, got {images.shape}"
 
-    hidden_list: list[Tensor] = []
-    predicted_list: list[Tensor] = []
+    hidden_sum = torch.zeros(B, canvas_grid, canvas_grid, model.canvas_dim, device=device)
+    predicted_sum = torch.zeros(B, canvas_grid, canvas_grid, teacher_dim, device=device)
     state = model.init_state(batch_size=B, canvas_grid_size=canvas_grid)
 
     for t in range(n_timesteps):
+        # t=0: full scene view. t>0: random viewpoints with PROPER safe-box sampling.
         if t == 0:
-            vp = Viewpoint(torch.zeros(B, 2, device=device), torch.ones(B, device=device))
+            vp = Viewpoint.full_scene(batch_size=B, device=device)
         else:
-            vp = Viewpoint(torch.rand(B, 2, device=device) * 2 - 1, torch.rand(B, device=device) * 0.4 + 0.1)
+            # MUST use Viewpoint.random() - ensures |center| + scale <= 1
+            # DO NOT use raw torch.rand() - viewpoints can go out of bounds!
+            vp = Viewpoint.random(batch_size=B, device=device, min_scale=0.1, max_scale=0.5)
 
         out = model.forward_step(image=images, state=state, viewpoint=vp, glimpse_size_px=glimpse_px)
         state = out.state
 
-        h = model.get_spatial(state.canvas).view(B, canvas_grid, canvas_grid, -1)
-        p = model.predict_teacher_scene(state.canvas).view(B, canvas_grid, canvas_grid, -1)
-        hidden_list.append(h)
-        predicted_list.append(p)
+        hidden_sum += model.get_spatial(state.canvas).view(B, canvas_grid, canvas_grid, -1)
+        predicted_sum += model.predict_teacher_scene(state.canvas).view(B, canvas_grid, canvas_grid, -1)
 
+    # Average across timesteps
+    hidden_avg = hidden_sum / n_timesteps
+    predicted_avg = predicted_sum / n_timesteps
+
+    # Teacher baselines (no recurrence)
     teacher_full = teacher.forward_norm_features(images).patches.view(B, canvas_grid, canvas_grid, -1)
     sz = glimpse_grid * teacher.patch_size_px
     small = F.interpolate(images, (sz, sz), mode="bilinear", align_corners=False)
     teacher_glimpse = teacher.forward_norm_features(small).patches.view(B, glimpse_grid, glimpse_grid, -1)
 
-    assert len(hidden_list) == n_timesteps
-    return Features(hidden_list, predicted_list, teacher_full, teacher_glimpse)
+    return Features(hidden_avg, predicted_avg, teacher_full, teacher_glimpse)
 
 
 def upsample_preds(logits: Tensor, target_size: int) -> Tensor:
@@ -260,23 +281,13 @@ def log_viz(
         t = t * IMAGENET_STD.view(3, 1, 1).to(t.device) + IMAGENET_MEAN.view(3, 1, 1).to(t.device)
         return (t.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
 
-    preds_t0: dict[str, np.ndarray] = {}
-    preds_tlast: dict[str, np.ndarray] = {}
-
+    preds: dict[str, np.ndarray] = {}
     for feat_type in cfg.features:
-        if feat_type in RECURRENT_FEATURES:
-            feat_list = feats.get_recurrent(feat_type)
-            for t, feat in [(0, feat_list[0]), (cfg.n_timesteps - 1, feat_list[-1])]:
-                name = f"{feat_type}/t{t}"
-                if name in probes:
-                    pred = upsample_preds(probes[name].head(feat.float()), masks.shape[1])[:n].cpu().numpy()
-                    (preds_t0 if t == 0 else preds_tlast)[feat_type] = pred
-        elif feat_type in probes:
-            feat = feats.get_static(feat_type)
-            pred = upsample_preds(probes[feat_type].head(feat.float()), masks.shape[1])[:n].cpu().numpy()
-            preds_t0[feat_type] = pred
+        feat = feats.get(feat_type)
+        pred = upsample_preds(probes[feat_type].head(feat.float()), masks.shape[1])[:n].cpu().numpy()
+        preds[feat_type] = pred
 
-    cols = 2 + len(preds_t0) + len(preds_tlast)
+    cols = 2 + len(preds)
     fig, axes = plt.subplots(n, cols, figsize=(2.5 * cols, 2.5 * n))
     if n == 1:
         axes = axes[np.newaxis, :]
@@ -289,13 +300,9 @@ def log_viz(
         axes[i, col].imshow(colorize(masks[i].cpu().numpy()))
         axes[i, col].set_title("GT")
         col += 1
-        for name, pred in preds_t0.items():
+        for name, pred in preds.items():
             axes[i, col].imshow(colorize(pred[i]))
-            axes[i, col].set_title(f"{name[:6]}/t0")
-            col += 1
-        for name, pred in preds_tlast.items():
-            axes[i, col].imshow(colorize(pred[i]))
-            axes[i, col].set_title(f"{name[:6]}/t{cfg.n_timesteps-1}")
+            axes[i, col].set_title(name[:8])
             col += 1
         for ax in axes[i]:
             ax.axis("off")
@@ -393,10 +400,19 @@ def main(cfg: Config) -> None:
     patch_size = model.backbone.patch_size_px
     assert teacher.patch_size_px == patch_size, f"Teacher/model patch size mismatch: {teacher.patch_size_px} vs {patch_size}"
     assert cfg.image_size % patch_size == 0, f"image_size {cfg.image_size} not divisible by patch_size {patch_size}"
-    assert "glimpse_grid_size" in ckpt["model_config"], "glimpse_grid_size missing from checkpoint model_config"
+
+    # glimpse_grid_size is in TRAINING config (not model config)
+    from avp_vit.train.config import Config as TrainConfig
+    train_hist = ckpt.get("training_config_history") or {}
+    train_cfg = list(train_hist.values())[-1] if train_hist else {}
+    if "glimpse_grid_size" in train_cfg:
+        glimpse_grid = train_cfg["glimpse_grid_size"]
+    else:
+        # FALLBACK: old checkpoint without training_config_history
+        glimpse_grid = TrainConfig.glimpse_grid_size
+        log.warning(f"glimpse_grid_size not in checkpoint, using default: {glimpse_grid}")
 
     canvas_grid = cfg.image_size // patch_size
-    glimpse_grid = ckpt["model_config"]["glimpse_grid_size"]
     glimpse_px = glimpse_grid * patch_size
     log.info(f"  Canvas grid: {canvas_grid}x{canvas_grid}, Glimpse grid: {glimpse_grid}x{glimpse_grid}, Patch: {patch_size}px")
 
@@ -407,16 +423,12 @@ def main(cfg: Config) -> None:
         "teacher_glimpse": teacher.embed_dim,
     }
 
-    # Create probes
+    # Create probes - ONE probe per feature type
+    # Recurrent features (hidden, predicted_norm) are averaged across timesteps in extract_features()
     log.info("Creating probes...")
     probes: dict[str, Probe] = {}
     for feat in cfg.features:
-        if feat in RECURRENT_FEATURES:
-            for t in range(cfg.n_timesteps):
-                name = f"{feat}/t{t}"
-                probes[name] = make_probe(name, dims[feat], cfg, device)
-        else:
-            probes[feat] = make_probe(feat, dims[feat], cfg, device)
+        probes[feat] = make_probe(feat, dims[feat], cfg, device)
 
     probe_params = sum(sum(p.numel() for p in probe.head.parameters()) for probe in probes.values())
     log.info(f"  {len(probes)} probes, {probe_params:,} trainable params total")
@@ -462,13 +474,9 @@ def main(cfg: Config) -> None:
                 for vi, vm in val_loader:
                     vi, vm = vi.to(device), vm.to(device)
                     with amp_ctx:
-                        feats = extract_features(model, teacher, vi, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, device)
+                        feats = extract_features(model, teacher, vi, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, ckpt["teacher_dim"], device)
                     for feat_type in cfg.features:
-                        if feat_type in RECURRENT_FEATURES:
-                            for t, feat in enumerate(feats.get_recurrent(feat_type)):
-                                eval_probe(probes[f"{feat_type}/t{t}"], feat, vm, ious[f"{feat_type}/t{t}"])
-                        elif feat_type in probes:
-                            eval_probe(probes[feat_type], feats.get_static(feat_type), vm, ious[feat_type])
+                        eval_probe(probes[feat_type], feats.get(feat_type), vm, ious[feat_type])
 
             any_improved = False
             for name, iou in ious.items():
@@ -481,36 +489,21 @@ def main(cfg: Config) -> None:
             if any_improved and cfg.probe_ckpt_dir:
                 save_probes(cfg.probe_ckpt_dir / "best.pt", probes, step, cfg)
 
-            for feat_type in cfg.features:
-                if feat_type in RECURRENT_FEATURES:
-                    curve_y = [ious[f"{feat_type}/t{t}"].compute().item() for t in range(cfg.n_timesteps)]
-                    exp.log_curve(f"{feat_type}/miou_vs_t", x=list(range(cfg.n_timesteps)), y=curve_y, step=step)
-
-            postfix = {}
-            for feat in cfg.features:
-                key = feat[:3]
-                if feat in RECURRENT_FEATURES:
-                    postfix[key] = f"{ious[f'{feat}/t0'].compute().item():.3f}"
-                elif feat in probes:
-                    postfix[key] = f"{ious[feat].compute().item():.3f}"
+            postfix = {feat[:3]: f"{ious[feat].compute().item():.3f}" for feat in cfg.features}
             pbar.set_postfix(postfix)
 
         # Visualization
         if step % cfg.viz_every == 0:
             with torch.no_grad(), amp_ctx:
-                viz_feats = extract_features(model, teacher, images, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, device)
+                viz_feats = extract_features(model, teacher, images, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, ckpt["teacher_dim"], device)
             log_viz(exp, step, probes, viz_feats, images, masks, cfg)
 
         # Train step
         with amp_ctx:
-            feats = extract_features(model, teacher, images, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, device)
+            feats = extract_features(model, teacher, images, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, ckpt["teacher_dim"], device)
 
         for feat_type in cfg.features:
-            if feat_type in RECURRENT_FEATURES:
-                for t, feat in enumerate(feats.get_recurrent(feat_type)):
-                    train_probe(probes[f"{feat_type}/t{t}"], feat, masks, grad_clip=cfg.grad_clip, ema_alpha=cfg.ema_alpha, focal_gamma=cfg.focal_gamma)
-            elif feat_type in probes:
-                train_probe(probes[feat_type], feats.get_static(feat_type), masks, grad_clip=cfg.grad_clip, ema_alpha=cfg.ema_alpha, focal_gamma=cfg.focal_gamma)
+            train_probe(probes[feat_type], feats.get(feat_type), masks, grad_clip=cfg.grad_clip, ema_alpha=cfg.ema_alpha, focal_gamma=cfg.focal_gamma)
 
         step += 1
         pbar.update(1)

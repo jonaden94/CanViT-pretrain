@@ -42,8 +42,13 @@ log "Extracting ADE20k to SLURM_TMPDIR..."
 timed unzip -q "$ADE20K_ZIP" -d "$SLURM_TMPDIR"
 ADE20K_DIR="$SLURM_TMPDIR/ADEChallengeData2016"
 
+PROBE_CKPT_DIR="$CHECKPOINTS_DIR/ade20k_probes/$SLURM_JOB_ID"
+mkdir -p "$PROBE_CKPT_DIR"
+
 log "Starting training..."
+log "Probe checkpoint dir: $PROBE_CKPT_DIR"
 exec uv run python scripts/train_ade20k_probe.py \
     --ade20k-root "$ADE20K_DIR" \
     --teacher-ckpt "$DINOV3_VITB16_CKPT" \
+    --probe-ckpt-dir "$PROBE_CKPT_DIR" \
     "$@"
