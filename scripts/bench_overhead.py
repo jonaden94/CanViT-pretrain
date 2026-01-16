@@ -1,29 +1,34 @@
 """Benchmark: Teacher vs CanViT forward+decode overhead.
 
-Measures 3 things:
+Measures 4 things:
 1. Teacher: DINOv3 backbone forward_norm_features() on 128px input
 2. CanViT forward only: model.forward() without decode
 3. CanViT forward + decode: forward() + predict_teacher_scene()
+4. Decode only: predict_teacher_scene() isolated
 
 Goal: verify measured overhead matches theoretical FLOP overhead.
 
 Theoretical (from scripts/flops.py for 8×8 glimpse, 32×32 canvas):
 - Teacher (ViT @ glimpse): 11.98G FLOPs
-- CanViT w/o heads:        15.10G FLOPs → ×1.26 overhead (26%)
-- CanViT w/ heads:         16.72G FLOPs → ×1.40 overhead (40%)
+- CanViT w/o heads:        15.10G FLOPs → ×1.26 expected (26%)
+- CanViT w/ heads:         16.72G FLOPs → ×1.40 expected (40%)
 
-GPU sync notes:
+GPU sync verification:
 - Checked canvit source: NO syncs in forward path
-- Checked dinov3 source: NO syncs in forward_features path (only train/eval)
+- Checked dinov3 source: NO syncs in forward_features path
+- Use --sync-debug to enable torch sync debug mode (errors on implicit syncs)
 - This script syncs ONCE before timing, ONCE after each benchmark
 
 Usage:
-    uv run python throwaway/bench_overhead.py --batch 2 --iters 2  # smoke test
-    uv run python throwaway/bench_overhead.py --device mps --batch 32 --iters 50
+    uv run python scripts/bench_overhead.py --batch 2 --iters 2  # smoke test
+    uv run python scripts/bench_overhead.py --device cuda --batch 64 --iters 50
+    uv run python scripts/bench_overhead.py --device cuda --batch 64 --iters 50 --compile
+    uv run python scripts/bench_overhead.py --device cuda --sync-debug  # verify no hidden syncs
 """
 
 import logging
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
@@ -42,7 +47,7 @@ log = logging.getLogger(__name__)
 class Config:
     """Benchmark configuration."""
 
-    # --- From train/config.py (DO NOT CHANGE without checking source) ---
+    # === Model config (from train/config.py - DO NOT CHANGE without checking source) ===
     glimpse_grid: int = 8
     """Glimpse grid size. Source: train/config.py:27"""
     canvas_grid: int = 32
@@ -50,17 +55,29 @@ class Config:
     patch_size: int = 16
     """DINOv3 ViT-B/16 patch size (constant)."""
 
-    # --- Benchmark params ---
+    # === Benchmark params ===
     batch: int = 2
     """Batch size. Start small (2) for smoke test."""
     iters: int = 2
     """Timed iterations. Start small (2) for smoke test."""
-    warmup: int = 3
+    warmup: int = 5
     """Warmup iterations (includes compile graph capture if enabled)."""
     device: str = "auto"
     """Device: 'cpu', 'mps', 'cuda', or 'auto'."""
+
+    # === Precision ===
+    amp: bool = True
+    """Enable AMP (bfloat16 autocast). Default ON to match training."""
+    tf32: bool = True
+    """Enable TF32 matmul precision (CUDA only). Default ON."""
+
+    # === Optimization ===
     compile: bool = False
     """Enable torch.compile (adds significant warmup time)."""
+
+    # === Debug ===
+    sync_debug: bool = False
+    """Enable CUDA sync debug mode - errors on implicit syncs."""
     cpu_threads: int = 8
     """CPU threads (only if device=cpu)."""
 
@@ -68,7 +85,7 @@ class Config:
 def bench(fn, iters: int, device: torch.device) -> float:
     """Benchmark a function. Returns total time in seconds.
 
-    Syncs ONCE before, ONCE after. No syncs inside loop.
+    Syncs ONCE before, ONCE after. NO syncs inside loop.
     """
     sync_device(device)
     t0 = time.perf_counter()
@@ -84,32 +101,54 @@ def main(cfg: Config) -> None:
     if device.type == "cpu":
         torch.set_num_threads(cfg.cpu_threads)
 
+    # === Precision setup ===
+    if cfg.tf32 and device.type == "cuda":
+        torch.set_float32_matmul_precision("high")
+
+    # === Sync debug mode ===
+    if cfg.sync_debug and device.type == "cuda":
+        # Mode 2 = error on implicit sync
+        torch.cuda.set_sync_debug_mode(2)
+        log.info("CUDA sync debug mode ENABLED - will error on implicit syncs")
+
     glimpse_px = cfg.glimpse_grid * cfg.patch_size
 
-    # === Log configuration ===
+    # === FULL CONFIG LOGGING ===
     log.info("=" * 70)
     log.info("BENCHMARK: Teacher vs CanViT overhead")
     log.info("=" * 70)
     log.info("")
     log.info("MODEL CONFIG (from train/config.py):")
-    log.info(f"  glimpse_grid:  {cfg.glimpse_grid}  (train/config.py:27)")
-    log.info(f"  canvas_grid:   {cfg.canvas_grid}  (train/config.py:29)")
-    log.info(f"  patch_size:    {cfg.patch_size}  (DINOv3 constant)")
-    log.info(f"  → glimpse_px:  {glimpse_px}")
+    log.info(f"  glimpse_grid:      {cfg.glimpse_grid}  (train/config.py:27)")
+    log.info(f"  canvas_grid:       {cfg.canvas_grid}  (train/config.py:29)")
+    log.info(f"  patch_size:        {cfg.patch_size}  (DINOv3 ViT-B/16 constant)")
+    log.info(f"  → glimpse_px:      {glimpse_px}")
     log.info("")
     log.info("BENCHMARK PARAMS:")
-    log.info(f"  batch:         {cfg.batch}")
-    log.info(f"  iters:         {cfg.iters}")
-    log.info(f"  warmup:        {cfg.warmup}")
-    log.info(f"  device:        {device}")
-    log.info(f"  compile:       {cfg.compile}")
+    log.info(f"  batch:             {cfg.batch}")
+    log.info(f"  iters:             {cfg.iters}")
+    log.info(f"  warmup:            {cfg.warmup}")
+    log.info(f"  device:            {device}")
+    log.info("")
+    log.info("PRECISION:")
+    log.info(f"  amp:               {cfg.amp}  {'(bfloat16 autocast)' if cfg.amp else '(fp32)'}")
+    log.info(f"  tf32:              {cfg.tf32}  {'(matmul precision=high)' if cfg.tf32 else ''}")
+    if device.type == "cuda":
+        log.info(f"  actual matmul:     {torch.get_float32_matmul_precision()}")
+    log.info("")
+    log.info("OPTIMIZATION:")
+    log.info(f"  compile:           {cfg.compile}")
+    log.info("")
+    log.info("DEBUG:")
+    log.info(f"  sync_debug:        {cfg.sync_debug}")
     if device.type == "cpu":
-        log.info(f"  cpu_threads:   {cfg.cpu_threads}")
+        log.info(f"  cpu_threads:       {cfg.cpu_threads}")
     log.info("")
 
     # === Create models (suppress dinov3 spam) ===
     logging.getLogger("dinov3").setLevel(logging.WARNING)
 
+    log.info("Creating models...")
     backbone = create_backbone("dinov3_vitb16", pretrained=False)
     teacher = create_backbone("dinov3_vitb16", pretrained=False)
 
@@ -117,30 +156,32 @@ def main(cfg: Config) -> None:
     model = ActiveCanViT(backbone=backbone, cfg=model_cfg, policy=None)
     model.to(device).eval()
     teacher.to(device).eval()
+    log.info("Models created.")
+    log.info("")
 
     # === Log token counts ===
     n_local = 1 + 1 + 1 + backbone.n_register_tokens + cfg.glimpse_grid**2
     n_canvas = model_cfg.n_canvas_registers + cfg.canvas_grid**2
     log.info("TOKEN COUNTS:")
-    log.info(f"  Local:   {n_local} tokens × {backbone.embed_dim}d")
-    log.info(f"           (1 VPE + 1 recurrent_cls + 1 ephemeral_cls + {backbone.n_register_tokens} regs + {cfg.glimpse_grid**2} patches)")
-    log.info(f"  Canvas:  {n_canvas} tokens × {model_cfg.canvas_dim}d")
-    log.info(f"           ({model_cfg.n_canvas_registers} canvas_regs + {cfg.canvas_grid**2} spatial)")
+    log.info(f"  Local stream:      {n_local} tokens × {backbone.embed_dim}d")
+    log.info(f"                     = 1 VPE + 1 recurrent_cls + 1 ephemeral_cls + {backbone.n_register_tokens} regs + {cfg.glimpse_grid**2} patches")
+    log.info(f"  Canvas:            {n_canvas} tokens × {model_cfg.canvas_dim}d")
+    log.info(f"                     = {model_cfg.n_canvas_registers} canvas_regs + {cfg.canvas_grid**2} spatial")
     log.info("")
 
     # === Theoretical FLOPs ===
     log.info("THEORETICAL (scripts/flops.py, 8×8 glimpse, 32×32 canvas):")
     log.info("  Teacher (ViT @ glimpse): 11.98G FLOPs")
-    log.info("  CanViT w/o heads:        15.10G FLOPs → ×1.26 expected (26%)")
-    log.info("  CanViT w/ heads:         16.72G FLOPs → ×1.40 expected (40%)")
+    log.info("  CanViT w/o heads:        15.10G FLOPs → ×1.26 expected (+26%)")
+    log.info("  CanViT w/ heads:         16.72G FLOPs → ×1.40 expected (+40%)")
     log.info("")
 
     # === Compile if requested ===
     if cfg.compile:
-        log.info("Compiling models...")
+        log.info("Compiling models (this may take a while)...")
         teacher.compile()
         model.compile()
-        log.info("Done.")
+        log.info("Compilation done.")
         log.info("")
 
     # === Create inputs ===
@@ -151,30 +192,42 @@ def main(cfg: Config) -> None:
     )
     state = model.init_state(batch_size=cfg.batch, canvas_grid_size=cfg.canvas_grid)
 
-    # Pre-allocate output to avoid allocation in loop
+    # Pre-allocate for decode benchmark
     canvas_for_decode = state.canvas
 
-    # === Define benchmark functions (no syncs inside!) ===
+    # === AMP context ===
+    amp_ctx = (
+        torch.autocast(device_type=device.type, dtype=torch.bfloat16)
+        if cfg.amp and device.type in ("cuda", "cpu")
+        else nullcontext()
+    )
+    amp_str = "bfloat16" if cfg.amp else "fp32"
+
+    # === Define benchmark functions (NO syncs inside!) ===
     def teacher_fn():
-        return teacher.forward_norm_features(glimpse)
+        with amp_ctx:
+            return teacher.forward_norm_features(glimpse)
 
     def canvit_fwd_fn():
         nonlocal canvas_for_decode
-        out = model.forward(glimpse=glimpse, state=state, viewpoint=vp)
-        canvas_for_decode = out.state.canvas
-        return out
+        with amp_ctx:
+            out = model.forward(glimpse=glimpse, state=state, viewpoint=vp)
+            canvas_for_decode = out.state.canvas
+            return out
 
     def canvit_fwd_decode_fn():
         nonlocal canvas_for_decode
-        out = model.forward(glimpse=glimpse, state=state, viewpoint=vp)
-        canvas_for_decode = out.state.canvas
-        return model.predict_teacher_scene(canvas_for_decode)
+        with amp_ctx:
+            out = model.forward(glimpse=glimpse, state=state, viewpoint=vp)
+            canvas_for_decode = out.state.canvas
+            return model.predict_teacher_scene(canvas_for_decode)
 
     def decode_only_fn():
-        return model.predict_teacher_scene(canvas_for_decode)
+        with amp_ctx:
+            return model.predict_teacher_scene(canvas_for_decode)
 
     # === Warmup ===
-    log.info(f"Warmup ({cfg.warmup} iters)...")
+    log.info(f"Warmup ({cfg.warmup} iters, {amp_str})...")
     with torch.no_grad():
         for _ in range(cfg.warmup):
             teacher_fn()
@@ -184,7 +237,8 @@ def main(cfg: Config) -> None:
     log.info("")
 
     # === Benchmark ===
-    log.info(f"Benchmarking ({cfg.iters} iters each)...")
+    log.info(f"Benchmarking ({cfg.iters} iters each, {amp_str})...")
+    log.info("  [sync once before, once after each benchmark - NO syncs in loop]")
     with torch.no_grad():
         t_teacher = bench(teacher_fn, cfg.iters, device)
         t_canvit_fwd = bench(canvit_fwd_fn, cfg.iters, device)
@@ -204,13 +258,13 @@ def main(cfg: Config) -> None:
     log.info("=" * 70)
     log.info("RESULTS")
     log.info("=" * 70)
-    log.info(f"  Teacher:              {fmt(t_teacher)}")
-    log.info(f"  CanViT forward only:  {fmt(t_canvit_fwd)}  ×{ovh_fwd:.2f} ({(ovh_fwd-1)*100:+.0f}%)")
-    log.info(f"  CanViT forward+decode:{fmt(t_canvit_fwd_dec)}  ×{ovh_fwd_dec:.2f} ({(ovh_fwd_dec-1)*100:+.0f}%)")
-    log.info(f"  Decode only:          {fmt(t_decode)}")
+    log.info(f"  Teacher:               {fmt(t_teacher)}")
+    log.info(f"  CanViT forward only:   {fmt(t_canvit_fwd)}  ×{ovh_fwd:.2f} ({(ovh_fwd-1)*100:+.0f}%)")
+    log.info(f"  CanViT forward+decode: {fmt(t_canvit_fwd_dec)}  ×{ovh_fwd_dec:.2f} ({(ovh_fwd_dec-1)*100:+.0f}%)")
+    log.info(f"  Decode only:           {fmt(t_decode)}")
     log.info("")
-    log.info("EXPECTED:")
-    log.info(f"  CanViT forward only:  ×1.26 (+26%)")
+    log.info("EXPECTED (theoretical):")
+    log.info(f"  CanViT forward only:   ×1.26 (+26%)")
     log.info(f"  CanViT forward+decode: ×1.40 (+40%)")
     log.info("")
 
@@ -220,13 +274,17 @@ def main(cfg: Config) -> None:
         log.info("  ⚠️  Overhead too LOW - likely not compute-bound. Try larger batch.")
     elif ovh_fwd_dec > 2.0:
         log.info("  ⚠️  Overhead too HIGH - possible causes:")
-        log.info("      - Memory-bound (especially on CPU)")
+        log.info("      - Memory-bound (especially on CPU/MPS)")
         log.info("      - Batch too small to saturate compute")
         log.info("      - Non-FLOP overhead (RoPE, tensor creation, etc.)")
     elif 1.2 <= ovh_fwd_dec <= 1.6:
         log.info("  ✓  Overhead in expected range!")
     else:
         log.info("  ?  Overhead outside expected range but not extreme.")
+
+    # Disable sync debug if enabled
+    if cfg.sync_debug and device.type == "cuda":
+        torch.cuda.set_sync_debug_mode(0)
 
 
 if __name__ == "__main__":
