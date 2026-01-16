@@ -142,8 +142,80 @@ def main(cfg: Config) -> None:
     console = Console()
     model = CanViT(backbone=backbone, cfg=CanViTConfig())
 
+    # === VALIDATE TOKEN COUNTS WITH ACTUAL FORWARD PASS ===
+    _validate_token_counts(backbone, model, cfg)
+
     _print_tables(console, cfg, backbone, model, teacher_dim)
     console.print()
+
+
+def _validate_token_counts(backbone: "DINOv3Backbone", model: "CanViT", cfg: Config) -> None:
+    """Validate that our token count formulas match actual model shapes."""
+    import torch
+    from canvit.viewpoint import Viewpoint
+
+    log.info("=== Validating Token Counts ===")
+
+    g = cfg.glimpse_grids[0]
+    c = cfg.canvas_grids[0]
+    patch_size = backbone.patch_size_px
+    glimpse_px = g * patch_size
+
+    # Expected counts from our formulas
+    n_backbone_prefix = backbone.n_prefix_tokens  # CLS + registers
+    n_extra_canvit = (1 if model.cfg.enable_vpe else 0) + 1  # VPE + recurrent_cls
+    expected_teacher_tokens = n_backbone_prefix + g * g
+    expected_canvit_local = expected_teacher_tokens + n_extra_canvit
+    expected_canvas = model.cfg.n_canvas_registers + c * c
+
+    # Run actual forward pass
+    B = 1
+    glimpse = torch.randn(B, 3, glimpse_px, glimpse_px)
+    vp = Viewpoint(centers=torch.zeros(B, 2), scales=torch.ones(B))
+    state = model.init_state(batch_size=B, canvas_grid_size=c)
+
+    # Teacher forward
+    teacher_out = backbone.forward_norm_features(glimpse)
+    actual_teacher_patches = teacher_out.patches.shape[1]  # [B, n_patches, D]
+    actual_teacher_patches + 1  # +1 for CLS (patches excludes CLS)
+
+    # CanViT forward
+    with torch.no_grad():
+        out = model.forward(glimpse=glimpse, state=state, viewpoint=vp)
+
+    actual_canvas = out.state.canvas.shape[1]
+
+    # Validate
+    log.info(f"  Glimpse grid: {g}×{g} = {g*g} patches @ {patch_size}px = {glimpse_px}px")
+    log.info(f"  Canvas grid:  {c}×{c} = {c*c} spatial tokens")
+    log.info("")
+
+    # Teacher tokens: patches output excludes CLS, so we check patches + 1
+    # But n_prefix_tokens = 1 (CLS) + n_registers, and forward_norm_features
+    # returns only patches (no CLS, no registers in output)
+    log.info(f"  Teacher patches (output): expected={g*g}, actual={actual_teacher_patches}")
+    assert actual_teacher_patches == g * g, (
+        f"Teacher patch count mismatch: expected {g*g}, got {actual_teacher_patches}"
+    )
+
+    log.info(f"  Canvas tokens: expected={expected_canvas}, actual={actual_canvas}")
+    assert actual_canvas == expected_canvas, (
+        f"Canvas token count mismatch: expected {expected_canvas}, got {actual_canvas}"
+    )
+
+    # Validate token breakdown
+    log.info("")
+    log.info("  Token breakdown:")
+    log.info(f"    n_backbone_prefix (CLS + regs): {n_backbone_prefix}")
+    log.info(f"      = 1 CLS + {backbone.n_register_tokens} registers")
+    log.info(f"    n_extra_canvit (VPE + recurrent_cls): {n_extra_canvit}")
+    log.info(f"      = {1 if model.cfg.enable_vpe else 0} VPE + 1 recurrent_cls")
+    log.info(f"    Teacher tokens: {n_backbone_prefix} + {g*g} = {expected_teacher_tokens}")
+    log.info(f"    CanViT local:   {expected_teacher_tokens} + {n_extra_canvit} = {expected_canvit_local}")
+    log.info(f"    Canvas:         {model.cfg.n_canvas_registers} regs + {c*c} spatial = {expected_canvas}")
+    log.info("")
+    log.info("  All token counts validated!")
+    log.info("")
 
 
 def _print_tables(
@@ -158,6 +230,10 @@ def _print_tables(
     n_adapters = len(model.read_after_blocks)
     ffn_ratio = backbone.ffn_ratio
 
+    # CanViT adds tokens beyond backbone: VPE (if enabled) + recurrent_cls
+    # LocalTokens layout: [vpe?, recurrent_cls, ephemeral_cls, registers, patches]
+    n_extra_canvit_tokens = (1 if model.cfg.enable_vpe else 0) + 1  # VPE + recurrent_cls
+
     console.rule(f"[bold]{cfg.student}[/bold] (local={local_dim}, canvas={canvas_dim})")
 
     # Table 1: Cross-Attention FLOPs per Adapter
@@ -171,12 +247,13 @@ def _print_tables(
 
     for g in cfg.glimpse_grids:
         for c in cfg.canvas_grids:
-            n_local = n_backbone_prefix + g * g
+            # CanViT local stream includes VPE + recurrent_cls beyond backbone tokens
+            n_canvit_local = n_backbone_prefix + g * g + n_extra_canvit_tokens
             n_canvas = n_canvas_registers + c * c
             canvas_px = c * patch_size
 
-            can_total = flops.canvas_adapter(n_local, n_canvas, local_dim, canvas_dim)
-            reg_total = _regular_adapter_flops(n_local, n_canvas, local_dim, canvas_dim)
+            can_total = flops.canvas_adapter(n_canvit_local, n_canvas, local_dim, canvas_dim)
+            reg_total = _regular_adapter_flops(n_canvit_local, n_canvas, local_dim, canvas_dim)
 
             table.add_row(
                 f"{g}×{g}",
@@ -231,28 +308,36 @@ def _print_tables(
     table2.add_column("Savings", justify="right", style="green")
 
     for g in cfg.glimpse_grids:
-        n_local = n_backbone_prefix + g * g
         n_patches = g * g
+        # Teacher baseline: CLS + registers + patches
+        n_teacher_tokens = n_backbone_prefix + n_patches
+        # CanViT local stream: teacher tokens + VPE + recurrent_cls
+        n_canvit_local = n_teacher_tokens + n_extra_canvit_tokens
 
-        # Backbone: patch embed + blocks
+        # Teacher backbone baseline (for comparison)
         patch_emb = flops.patch_embed(n_patches, patch_size, local_dim)
-        blocks = n_blocks * flops.vit_block(n_local, local_dim, ffn_ratio)
-        backbone_flops = patch_emb + blocks
+        teacher_blocks = n_blocks * flops.vit_block(n_teacher_tokens, local_dim, ffn_ratio)
+        teacher_backbone_flops = patch_emb + teacher_blocks
+
+        # CanViT backbone (processes more tokens due to VPE + recurrent_cls)
+        canvit_blocks = n_blocks * flops.vit_block(n_canvit_local, local_dim, ffn_ratio)
+        canvit_backbone_flops = patch_emb + canvit_blocks
 
         for c in cfg.canvas_grids:
             n_canvas = n_canvas_registers + c * c
             n_canvas_patches = c * c
 
-            # Canvas attention (all adapters)
+            # Canvas attention (all adapters) - uses CanViT local token count
             adapters_flops = n_adapters * flops.canvas_adapter(
-                n_local, n_canvas, local_dim, canvas_dim
+                n_canvit_local, n_canvas, local_dim, canvas_dim
             )
 
             # Heads: policy (per glimpse) + scene (per glimpse, scales with canvas²)
             scene_flops = flops.scene_head(n_canvas_patches, canvas_dim, teacher_dim)
             heads_flops = policy_flops + scene_flops
 
-            total_no_heads = backbone_flops + adapters_flops
+            # CanViT totals (uses canvit_backbone_flops, not teacher_backbone_flops)
+            total_no_heads = canvit_backbone_flops + adapters_flops
             total_with_heads = total_no_heads + heads_flops
 
             # Baseline: ViT at canvas resolution
@@ -261,13 +346,14 @@ def _print_tables(
             canvas_blocks = n_blocks * flops.vit_block(canvas_n_tokens, local_dim, ffn_ratio)
             vit_at_canvas = canvas_patch_emb + canvas_blocks
 
+            # Compare CanViT total vs teacher backbone (not canvit backbone)
             table2.add_row(
                 f"{g}×{g}",
                 f"{c}×{c}",
                 "w/o Heads",
                 fmt(total_no_heads),
-                fmt(backbone_flops),
-                f"×{total_no_heads / backbone_flops:.2f}",
+                fmt(teacher_backbone_flops),
+                f"×{total_no_heads / teacher_backbone_flops:.2f}",
                 fmt(vit_at_canvas),
                 f"×{vit_at_canvas / total_no_heads:.1f}",
             )
@@ -277,7 +363,7 @@ def _print_tables(
                 "[cyan]w/ Heads[/cyan]",
                 f"[cyan]{fmt(total_with_heads)}[/cyan]",
                 "",
-                f"[cyan]×{total_with_heads / backbone_flops:.2f}[/cyan]",
+                f"[cyan]×{total_with_heads / teacher_backbone_flops:.2f}[/cyan]",
                 "",
                 f"[cyan]×{vit_at_canvas / total_with_heads:.1f}[/cyan]",
                 end_section=True,
