@@ -73,7 +73,6 @@ class Config:
 
     log_every: int = 20
     val_every: int = 500
-    ema_alpha: float = 0.1
 
     comet_project: str = "avp-ade20k-probe"
     comet_workspace: str = "m2b3-ava"
@@ -100,16 +99,32 @@ class Probe:
     head: ProbeHead
     optimizer: AdamW
     scheduler: SequentialLR
-    loss_ema: float = 0.0
-    grad_norm_ema: float = 0.0
-    best_mean_miou: float = 0.0  # mean across timesteps
+    best_mean_miou: float = 0.0
+    # Accumulators - NO .item() until log time
+    _loss_sum: Tensor | None = None
+    _grad_norm_sum: Tensor | None = None
+    _count: int = 0
 
-    def ema_update(self, loss: float, grad_norm: float, alpha: float) -> None:
-        if self.loss_ema == 0.0:
-            self.loss_ema, self.grad_norm_ema = loss, grad_norm
+    def accumulate(self, loss: Tensor, grad_norm: Tensor) -> None:
+        """Accumulate loss/grad_norm tensors. NO GPU SYNC."""
+        if self._loss_sum is None:
+            self._loss_sum = loss.detach().clone()
+            self._grad_norm_sum = grad_norm.detach().clone()
         else:
-            self.loss_ema = alpha * loss + (1 - alpha) * self.loss_ema
-            self.grad_norm_ema = alpha * grad_norm + (1 - alpha) * self.grad_norm_ema
+            self._loss_sum += loss.detach()
+            assert self._grad_norm_sum is not None
+            self._grad_norm_sum += grad_norm.detach()
+        self._count += 1
+
+    def get_and_reset_stats(self) -> tuple[float, float]:
+        """Get averaged stats and reset. SYNCS HERE (at log intervals only)."""
+        assert self._loss_sum is not None and self._grad_norm_sum is not None
+        avg_loss = (self._loss_sum / self._count).item()
+        avg_grad = (self._grad_norm_sum / self._count).item()
+        self._loss_sum = None
+        self._grad_norm_sum = None
+        self._count = 0
+        return avg_loss, avg_grad
 
 
 # Per-timestep features: {feature_type: [feat_t0, feat_t1, ...]}
@@ -381,10 +396,10 @@ def main(cfg: Config) -> None:
             loss = torch.stack(losses).mean()
             loss.backward()
 
-            grad_norm = nn.utils.clip_grad_norm_(probe.head.parameters(), cfg.grad_clip).item()
+            grad_norm = nn.utils.clip_grad_norm_(probe.head.parameters(), cfg.grad_clip)
             probe.optimizer.step()
             probe.scheduler.step()
-            probe.ema_update(loss.item(), grad_norm, cfg.ema_alpha)
+            probe.accumulate(loss, grad_norm)  # NO .item() - stays on GPU
 
             # Update train IoU metrics
             with torch.no_grad():
@@ -396,12 +411,13 @@ def main(cfg: Config) -> None:
         step += 1
         pbar.update(1)
 
-        # === Logging ===
+        # === Logging (GPU sync happens here) ===
         if step % cfg.log_every == 0:
             log_dict: dict[str, float] = {"lr": list(probes.values())[0].scheduler.get_last_lr()[0]}
             for name, p in probes.items():
-                log_dict[f"{name}/loss"] = p.loss_ema
-                log_dict[f"{name}/grad_norm"] = p.grad_norm_ema
+                avg_loss, avg_grad = p.get_and_reset_stats()
+                log_dict[f"{name}/loss"] = avg_loss
+                log_dict[f"{name}/grad_norm"] = avg_grad
 
             # Log train mIoU curves
             for feat_type in cfg.features:
