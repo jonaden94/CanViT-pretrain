@@ -356,6 +356,7 @@ def main(cfg: Config) -> None:
             for feat in cfg.features:
                 for m in val_iou[feat]:
                     m.reset()
+            any_improved = False
 
             with torch.no_grad():
                 for vi, vm in val_loader:
@@ -379,8 +380,9 @@ def main(cfg: Config) -> None:
 
                 if mean_miou > probes[feat_type].best_mean_miou:
                     probes[feat_type].best_mean_miou = mean_miou
+                    any_improved = True
 
-            if cfg.probe_ckpt_dir:
+            if any_improved and cfg.probe_ckpt_dir:
                 save_probes(cfg.probe_ckpt_dir / "best.pt", probes, step, cfg)
 
             pbar.set_postfix({f[:3]: f"{sum(val_iou[f][t].compute().item() for t in range(cfg.n_timesteps)) / cfg.n_timesteps:.3f}" for f in cfg.features})
