@@ -73,9 +73,11 @@ def clear_cache() -> None:
 
 def get_compile_kwargs(mode: str) -> dict:
     """Get torch.compile kwargs for a given mode."""
+    # Disable cudagraphs - conflicts with cached tensors in model
+    base = {"options": {"triton.cudagraphs": False}}
     if mode == "default":
-        return {}
-    return {"mode": mode}
+        return base
+    return {"mode": mode, **base}
 
 
 def create_fresh_model(device: torch.device, model_cfg: ActiveCanViTConfig):
@@ -90,8 +92,6 @@ def main(cfg: Config) -> None:
     device = torch.device(cfg.device)
     if device.type == "cuda":
         torch.set_float32_matmul_precision("high")
-        # Disable cudagraphs - conflicts with cached tensors in model
-        torch._inductor.config.triton.cudagraphs = False
         log.info(f"GPU: {torch.cuda.get_device_name()}")
 
     glimpse_px = cfg.glimpse_grid * cfg.patch_size
