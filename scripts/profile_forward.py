@@ -21,8 +21,6 @@ from typing import Callable
 
 import torch
 import torch._dynamo as dynamo
-import torch._inductor.config
-torch._inductor.config.triton.cudagraphs = False  # Avoid conflicts with persistent buffers
 import tyro
 
 from avp_vit import ActiveCanViT, ActiveCanViTConfig
