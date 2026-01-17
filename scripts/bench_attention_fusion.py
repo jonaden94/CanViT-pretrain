@@ -198,6 +198,12 @@ def main():
         except Exception as e:
             print(f"  reduce-overhead failed: {e}")
 
+        module = cls().to(device, dtype=torch.bfloat16).eval()
+        try:
+            results[f"{name}_autotune"] = bench(module, name, query, kv, "max-autotune")
+        except Exception as e:
+            print(f"  max-autotune failed: {e}")
+
     print("\n" + "="*60)
     print("SUMMARY")
     print("="*60)
