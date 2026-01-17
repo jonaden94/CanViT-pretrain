@@ -29,6 +29,8 @@ class Config:
 
     device: str = "cpu"
     """Device: 'cpu', 'cuda', 'mps'."""
+    dtype: str = "float32"
+    """Data type: 'float32' or 'bfloat16'."""
     batch: int = 64
     """Batch size."""
     n_heads: int = 16
@@ -164,6 +166,8 @@ def bench_time(
 
 def main(cfg: Config) -> None:
     device = torch.device(cfg.device)
+    dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[cfg.dtype]
+    bytes_per_elem = 4 if dtype == torch.float32 else 2
 
     # Device info
     if device.type == "cuda":
@@ -172,11 +176,11 @@ def main(cfg: Config) -> None:
 
     # Config
     log.info(f"device: {device}")
+    log.info(f"dtype: {cfg.dtype}")
     log.info(f"shape: [{cfg.batch}, {cfg.n_heads}, {cfg.n_spatial}, {cfg.head_dim}]")
     n_elements = cfg.batch * cfg.n_heads * cfg.n_spatial * cfg.head_dim
     log.info(f"n_elements: {n_elements}")
-    log.info(f"size_mb: {n_elements * 4 / 1e6:.1f}")
-    log.info(f"dtype: float32")
+    log.info(f"size_mb: {n_elements * bytes_per_elem / 1e6:.1f}")
     log.info(f"warmup: {cfg.warmup}")
     log.info(f"iters: {cfg.iters}")
     log.info(f"atol: {cfg.atol}")
@@ -184,9 +188,9 @@ def main(cfg: Config) -> None:
 
     # Create test tensors
     torch.manual_seed(42)
-    x = torch.randn(cfg.batch, cfg.n_heads, cfg.n_spatial, cfg.head_dim, device=device)
-    sin = torch.randn(cfg.batch, 1, cfg.n_spatial, cfg.head_dim, device=device)
-    cos = torch.randn(cfg.batch, 1, cfg.n_spatial, cfg.head_dim, device=device)
+    x = torch.randn(cfg.batch, cfg.n_heads, cfg.n_spatial, cfg.head_dim, device=device, dtype=dtype)
+    sin = torch.randn(cfg.batch, 1, cfg.n_spatial, cfg.head_dim, device=device, dtype=dtype)
+    cos = torch.randn(cfg.batch, 1, cfg.n_spatial, cfg.head_dim, device=device, dtype=dtype)
 
     # Compute reference
     reference = rope_apply_reference(x, sin, cos)
