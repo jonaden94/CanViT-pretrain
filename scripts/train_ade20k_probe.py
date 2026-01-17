@@ -187,6 +187,7 @@ def extract_features(
     glimpse_grid: int,
     glimpse_px: int,
     device: torch.device,
+    min_vp_scale: float,
 ) -> PerTimestepFeatures:
     """Extract per-timestep features. Returns {feat_type: [t0, t1, ...]}."""
     B = images.shape[0]
@@ -199,7 +200,7 @@ def extract_features(
     teacher_glimpse_feat = teacher.forward_norm_features(small).patches.view(B, glimpse_grid, glimpse_grid, -1)
 
     for t in range(n_timesteps):
-        vp = Viewpoint.full_scene(batch_size=B, device=device) if t == 0 else Viewpoint.random(batch_size=B, device=device, min_scale=0.1, max_scale=0.5)
+        vp = Viewpoint.full_scene(batch_size=B, device=device) if t == 0 else Viewpoint.random(batch_size=B, device=device, min_scale=min_vp_scale, max_scale=1.0)
         out = model.forward_step(image=images, state=state, viewpoint=vp, glimpse_size_px=glimpse_px)
         state = out.state
 
@@ -284,7 +285,7 @@ def main(cfg: Config) -> None:
     for p in teacher.parameters():
         p.requires_grad_(False)
 
-    # Grid sizes
+    # Grid sizes and viewpoint config from training checkpoint
     patch_size = model.backbone.patch_size_px
     canvas_grid = cfg.image_size // patch_size
     from avp_vit.train.config import Config as TrainConfig
@@ -292,7 +293,10 @@ def main(cfg: Config) -> None:
     train_cfg = list(train_hist.values())[-1] if train_hist else {}
     glimpse_grid = train_cfg.get("glimpse_grid_size", TrainConfig.glimpse_grid_size)
     glimpse_px = glimpse_grid * patch_size
+    min_vp_scale = train_cfg.get("min_viewpoint_scale", TrainConfig.min_viewpoint_scale)
     log.info(f"  Canvas: {canvas_grid}x{canvas_grid}, Glimpse: {glimpse_grid}x{glimpse_grid}")
+    log.info(f"  Viewpoint: t=0 full, t>0 random (min_scale={min_vp_scale}, max_scale=1.0)")
+    exp_params = {"glimpse_grid": glimpse_grid, "min_vp_scale": min_vp_scale, "canvas_grid": canvas_grid}
 
     dims: dict[FeatureType, int] = {
         "hidden": model.canvas_dim,
@@ -327,6 +331,7 @@ def main(cfg: Config) -> None:
     log.info(f"Initializing Comet: {cfg.comet_workspace}/{cfg.comet_project}")
     exp = comet_ml.Experiment(project_name=cfg.comet_project, workspace=cfg.comet_workspace)
     exp.log_parameters(asdict(cfg))
+    exp.log_parameters(exp_params)  # glimpse_grid, min_vp_scale, canvas_grid from ckpt
 
     log.info("=" * 60)
     log.info("Starting training")
@@ -356,7 +361,7 @@ def main(cfg: Config) -> None:
                 for vi, vm in val_loader:
                     vi, vm = vi.to(device), vm.to(device)
                     with amp_ctx:
-                        feats = extract_features(model, teacher, vi, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, device)
+                        feats = extract_features(model, teacher, vi, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, device, min_vp_scale)
                     for feat_type in cfg.features:
                         for t in range(cfg.n_timesteps):
                             logits = probes[feat_type].head(feats[feat_type][t].float())
@@ -385,14 +390,15 @@ def main(cfg: Config) -> None:
             p.head.train()
 
         with amp_ctx:
-            feats = extract_features(model, teacher, images, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, device)
+            feats = extract_features(model, teacher, images, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, device, min_vp_scale)
 
         for feat_type in cfg.features:
             probe = probes[feat_type]
             probe.optimizer.zero_grad()
 
-            # Loss averaged across timesteps, SAME probe weights
-            losses = [focal_loss(probe.head(feats[feat_type][t].float()), masks, cfg.focal_gamma) for t in range(cfg.n_timesteps)]
+            # Compute logits BEFORE optimizer step (for both loss and metrics)
+            logits_list = [probe.head(feats[feat_type][t].float()) for t in range(cfg.n_timesteps)]
+            losses = [focal_loss(logits, masks, cfg.focal_gamma) for logits in logits_list]
             loss = torch.stack(losses).mean()
             loss.backward()
 
@@ -401,11 +407,10 @@ def main(cfg: Config) -> None:
             probe.scheduler.step()
             probe.accumulate(loss, grad_norm)  # NO .item() - stays on GPU
 
-            # Update train IoU metrics
+            # Update train IoU metrics (using pre-update logits)
             with torch.no_grad():
-                for t in range(cfg.n_timesteps):
-                    logits = probe.head(feats[feat_type][t].float())
-                    preds = F.interpolate(logits, masks.shape[1:], mode="bilinear", align_corners=False).argmax(1)
+                for t, logits in enumerate(logits_list):
+                    preds = F.interpolate(logits.detach(), masks.shape[1:], mode="bilinear", align_corners=False).argmax(1)
                     train_iou[feat_type][t].update(preds, masks)
 
         step += 1
