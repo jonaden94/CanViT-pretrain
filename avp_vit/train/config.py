@@ -68,13 +68,17 @@ class Config:
     feature_base_dir: Path | None = None
     feature_image_root: Path | None = None  # Required with feature_base_dir
     # Run identification and checkpointing
-    run_name: str | None = None  # Auto-generated if None: YYYY-MM-DD_HH-MM
+    run_name: str | None = None
+    """Run name. Auto-generated from SLURM_ARRAY_JOB_ID or timestamp if None."""
     ckpt_dir: Path = Path("checkpoints")
-    resume_ckpt: Path | None = None  # Explicit checkpoint override (ignores run_name)
-    force_new_experiment: bool = False  # Force new Comet experiment instead of continuing
-    reset_policy: bool = False  # Reinitialize policy weights when resuming
-    reset_opt_and_sched: bool = False  # Reset optimizer and scheduler on resume
-    reset_normalizer: bool = False  # Re-warmup normalizer stats when resuming
+    """Directory for checkpoint storage. Run checkpoints go in {ckpt_dir}/{run_name}/."""
+    seed_ckpt: Path | None = None
+    """Seed model weights from external checkpoint. Starts fresh (new experiment, step=0).
+    Only used if no checkpoint exists in run_dir. For forking runs with different config."""
+    reset_policy: bool = False
+    """Reinitialize policy weights when loading any checkpoint."""
+    reset_normalizer: bool = False
+    """Re-warmup normalizer stats when loading any checkpoint."""
     # Training
     num_workers: int = 16
     crop_scale_min: float = 0.8
