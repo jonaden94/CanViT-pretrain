@@ -50,6 +50,7 @@ IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406])
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225])
 
 FeatureType = Literal["hidden", "predicted_norm", "teacher_glimpse"]
+STATIC_FEATURES: set[FeatureType] = {"teacher_glimpse"}
 
 
 @dataclass
@@ -346,13 +347,14 @@ def log_viz(
     """Log visualization: PCA of features, colored predictions, correctness heatmap."""
     n = min(cfg.viz_samples, images.shape[0])
     T = cfg.n_timesteps
-    n_feats = len(cfg.features)
 
-    # Columns: Image | GT | then for each feature: PCA_t0 | Pred_t0 | Corr_t0 | ... | PCA_tT | Pred_tT | Corr_tT
-    # For clarity, show only first and last timestep
-    t_show = [0, T - 1] if T > 1 else [0]
-    cols_per_feat = 3 * len(t_show)  # PCA, Pred, Corr per timestep
-    n_cols = 2 + n_feats * cols_per_feat
+    # Columns: Image | GT | then for each feature: PCA | Pred | Corr (per shown timestep)
+    # Recurrent: show t=0 and t=last; Static: only t=0
+    t_show_recurrent = [0, T - 1] if T > 1 else [0]
+    n_cols = 2  # Image + GT
+    for feat_type in cfg.features:
+        t_show = [0] if feat_type in STATIC_FEATURES else t_show_recurrent
+        n_cols += 3 * len(t_show)  # PCA, Pred, Corr per timestep
 
     fig, axes = plt.subplots(n, n_cols, figsize=(2.5 * n_cols, 2.5 * n))
     if n == 1:
@@ -379,6 +381,7 @@ def log_viz(
 
         # For each feature type
         for feat_type in cfg.features:
+            t_show = [0] if feat_type in STATIC_FEATURES else t_show_recurrent
             for t in t_show:
                 feat = feats[feat_type][t]  # [B, H, W, D]
                 H_feat, W_feat, D = feat.shape[1], feat.shape[2], feat.shape[3]
@@ -585,7 +588,13 @@ def main(cfg: Config) -> None:
                             min_vp_scale,
                         )
                     for feat_type in cfg.features:
-                        for t in range(cfg.n_timesteps):
+                        # Static features: only t=0 (all timesteps identical)
+                        t_range = (
+                            [0]
+                            if feat_type in STATIC_FEATURES
+                            else range(cfg.n_timesteps)
+                        )
+                        for t in t_range:
                             logits = probes[feat_type].head(feats[feat_type][t].float())
                             preds = logits.argmax(1)  # [B, Hl, Wl] - no upsample
                             vm_down = downsample_masks(
@@ -593,22 +602,27 @@ def main(cfg: Config) -> None:
                             )
                             val_iou[feat_type][t].update(preds, vm_down)
 
-            # Log per-timestep mIoU curves
+            # Log mIoU (per-timestep for recurrent, single for static)
             for feat_type in cfg.features:
-                mious = [
-                    val_iou[feat_type][t].compute().item()
-                    for t in range(cfg.n_timesteps)
-                ]
-                mean_miou = sum(mious) / len(mious)
-                for t, miou in enumerate(mious):
-                    exp.log_metric(f"{feat_type}/val_miou_t{t}", miou, step=step)
-                exp.log_metric(f"{feat_type}/val_miou_mean", mean_miou, step=step)
-                exp.log_curve(
-                    f"{feat_type}/val_miou_curve",
-                    x=list(range(cfg.n_timesteps)),
-                    y=mious,
-                    step=step,
-                )
+                if feat_type in STATIC_FEATURES:
+                    miou = val_iou[feat_type][0].compute().item()
+                    exp.log_metric(f"{feat_type}/val_miou", miou, step=step)
+                    mean_miou = miou
+                else:
+                    mious = [
+                        val_iou[feat_type][t].compute().item()
+                        for t in range(cfg.n_timesteps)
+                    ]
+                    mean_miou = sum(mious) / len(mious)
+                    for t, miou in enumerate(mious):
+                        exp.log_metric(f"{feat_type}/val_miou_t{t}", miou, step=step)
+                    exp.log_metric(f"{feat_type}/val_miou_mean", mean_miou, step=step)
+                    exp.log_curve(
+                        f"{feat_type}/val_miou_curve",
+                        x=list(range(cfg.n_timesteps)),
+                        y=mious,
+                        step=step,
+                    )
 
                 if mean_miou > probes[feat_type].best_mean_miou:
                     probes[feat_type].best_mean_miou = mean_miou
@@ -647,10 +661,9 @@ def main(cfg: Config) -> None:
             probe = probes[feat_type]
             probe.optimizer.zero_grad()
 
-            # Compute logits BEFORE optimizer step (for both loss and metrics)
-            logits_list = [
-                probe.head(feats[feat_type][t].float()) for t in range(cfg.n_timesteps)
-            ]
+            # Static features: only t=0 (all timesteps identical)
+            t_range = [0] if feat_type in STATIC_FEATURES else range(cfg.n_timesteps)
+            logits_list = [probe.head(feats[feat_type][t].float()) for t in t_range]
             losses = [
                 focal_loss(logits, masks, cfg.focal_gamma) for logits in logits_list
             ]
@@ -664,7 +677,7 @@ def main(cfg: Config) -> None:
 
             # Update train IoU metrics (using pre-update logits, at feature resolution)
             with torch.no_grad():
-                for t, logits in enumerate(logits_list):
+                for t, logits in zip(t_range, logits_list, strict=True):
                     preds = logits.detach().argmax(1)  # [B, Hl, Wl]
                     masks_down = downsample_masks(masks, preds.shape[1], preds.shape[2])
                     train_iou[feat_type][t].update(preds, masks_down)
@@ -682,24 +695,28 @@ def main(cfg: Config) -> None:
                 log_dict[f"{name}/loss"] = avg_loss
                 log_dict[f"{name}/grad_norm"] = avg_grad
 
-            # Log train mIoU curves
+            # Log train mIoU (per-timestep for recurrent, single for static)
             for feat_type in cfg.features:
-                mious = [
-                    train_iou[feat_type][t].compute().item()
-                    for t in range(cfg.n_timesteps)
-                ]
-                for t, miou in enumerate(mious):
-                    log_dict[f"{feat_type}/train_miou_t{t}"] = miou
-                log_dict[f"{feat_type}/train_miou_mean"] = sum(mious) / len(mious)
-                exp.log_curve(
-                    f"{feat_type}/train_miou_curve",
-                    x=list(range(cfg.n_timesteps)),
-                    y=mious,
-                    step=step,
-                )
-                # Reset for next interval
-                for m in train_iou[feat_type]:
-                    m.reset()
+                if feat_type in STATIC_FEATURES:
+                    miou = train_iou[feat_type][0].compute().item()
+                    log_dict[f"{feat_type}/train_miou"] = miou
+                    train_iou[feat_type][0].reset()
+                else:
+                    mious = [
+                        train_iou[feat_type][t].compute().item()
+                        for t in range(cfg.n_timesteps)
+                    ]
+                    for t, miou in enumerate(mious):
+                        log_dict[f"{feat_type}/train_miou_t{t}"] = miou
+                    log_dict[f"{feat_type}/train_miou_mean"] = sum(mious) / len(mious)
+                    exp.log_curve(
+                        f"{feat_type}/train_miou_curve",
+                        x=list(range(cfg.n_timesteps)),
+                        y=mious,
+                        step=step,
+                    )
+                    for m in train_iou[feat_type]:
+                        m.reset()
 
             exp.log_metrics(log_dict, step=step)
 
