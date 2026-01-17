@@ -5,10 +5,11 @@ performance investigation. It measures Teacher vs CanViT overhead with proper
 methodology for both throughput and latency scenarios.
 
 Usage:
-    uv run python scripts/bench.py                    # Throughput (BS=64)
-    uv run python scripts/bench.py --latency          # Latency (BS=1)
-    uv run python scripts/bench.py --no-compile       # Compare eager vs compiled
-    uv run python scripts/bench.py --time-budget-s 2  # Longer runs
+    uv run python scripts/bench.py                              # Throughput (BS=64)
+    uv run python scripts/bench.py --latency                    # Latency (BS=1)
+    uv run python scripts/bench.py --no-compile                 # Compare eager vs compiled
+    uv run python scripts/bench.py --time-budget-s 2            # Longer runs
+    uv run python scripts/bench.py --model.attention.use-ewa=False  # Ablate EWA
 
 Design Decisions:
 
@@ -64,7 +65,7 @@ Target platforms: CUDA (primary), CPU, MPS (nice-to-have, may behave oddly).
 import logging
 import statistics
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 from typing import Any, Callable
 
 import torch
@@ -77,6 +78,11 @@ from avp_vit import ActiveCanViT, ActiveCanViTConfig
 from avp_vit.train.config import Config as TrainConfig
 from canvit.hub import create_backbone
 from canvit.viewpoint import Viewpoint
+
+
+def _default_model_config() -> ActiveCanViTConfig:
+    """Default model config with teacher_dim=768 (ViT-B)."""
+    return ActiveCanViTConfig(teacher_dim=768)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger(__name__)
@@ -107,6 +113,9 @@ class BenchConfig:
     glimpse_grid: int | None = None
     canvas_grid: int | None = None
     teacher_model: str | None = None
+
+    # Model config - exposed for ablations (e.g., --model.attention.use-ewa=False)
+    model: ActiveCanViTConfig = field(default_factory=_default_model_config)
 
     # Bench-specific
     warmup_iters: int = 5
@@ -335,9 +344,23 @@ def main(cfg: BenchConfig) -> None:
 
     log.info("Creating CanViT...")
     backbone = create_backbone(cfg.teacher_model, pretrained=False)
-    model_cfg = ActiveCanViTConfig(teacher_dim=teacher.embed_dim)
-    model = ActiveCanViT(backbone=backbone, cfg=model_cfg, policy=None).to(device).eval()
-    log.info(f"  canvas_dim={model_cfg.canvas_dim}, read_after={model.read_after_blocks}")
+    # Update teacher_dim to match actual teacher (in case default 768 differs)
+    cfg.model.teacher_dim = teacher.embed_dim
+    model = ActiveCanViT(backbone=backbone, cfg=cfg.model, policy=None).to(device).eval()
+    log.info(f"  canvas_dim={cfg.model.canvas_dim}, read_after={model.read_after_blocks}")
+
+    # Log model config (highlight non-defaults)
+    log.info("")
+    log.info("Model config:")
+    default_cfg = _default_model_config()
+    default_cfg.teacher_dim = teacher.embed_dim  # Fair comparison
+    for f in fields(cfg.model):
+        val = getattr(cfg.model, f.name)
+        default_val = getattr(default_cfg, f.name)
+        if val != default_val:
+            log.info(f"  [OVERRIDE] {f.name} = {val} (default: {default_val})")
+        else:
+            log.info(f"  {f.name} = {val}")
 
     # Compile
     if not cfg.no_compile:
