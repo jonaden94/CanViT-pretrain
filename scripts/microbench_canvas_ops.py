@@ -32,7 +32,7 @@ def bench_layernorm():
     print("=" * 70)
 
     device = torch.device("cuda")
-    ln = nn.LayerNorm(CANVAS_DIM).to(device)
+    ln = nn.LayerNorm(CANVAS_DIM).to(device, dtype=torch.bfloat16)
     x = torch.randn(BATCH, CANVAS_TOKENS, CANVAS_DIM, device=device, dtype=torch.bfloat16)
 
     # Warmup
@@ -63,7 +63,7 @@ def bench_layernorm_compiled():
     print("=" * 70)
 
     device = torch.device("cuda")
-    ln = nn.LayerNorm(CANVAS_DIM).to(device)
+    ln = nn.LayerNorm(CANVAS_DIM).to(device, dtype=torch.bfloat16)
     ln = torch.compile(ln)
     x = torch.randn(BATCH, CANVAS_TOKENS, CANVAS_DIM, device=device, dtype=torch.bfloat16)
 
