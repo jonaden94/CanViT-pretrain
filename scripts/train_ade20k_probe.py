@@ -378,8 +378,9 @@ def main(cfg: Config) -> None:
                     for feat_type in cfg.features:
                         for t in range(cfg.n_timesteps):
                             logits = probes[feat_type].head(feats[feat_type][t].float())
-                            preds = F.interpolate(logits, vm.shape[1:], mode="bilinear", align_corners=False).argmax(1)
-                            val_iou[feat_type][t].update(preds, vm)
+                            preds = logits.argmax(1)  # [B, Hl, Wl] - no upsample
+                            vm_down = downsample_masks(vm, preds.shape[1], preds.shape[2])
+                            val_iou[feat_type][t].update(preds, vm_down)
 
             # Log per-timestep mIoU curves
             for feat_type in cfg.features:
@@ -421,11 +422,12 @@ def main(cfg: Config) -> None:
             probe.scheduler.step()
             probe.accumulate(loss, grad_norm)  # NO .item() - stays on GPU
 
-            # Update train IoU metrics (using pre-update logits)
+            # Update train IoU metrics (using pre-update logits, at feature resolution)
             with torch.no_grad():
                 for t, logits in enumerate(logits_list):
-                    preds = F.interpolate(logits.detach(), masks.shape[1:], mode="bilinear", align_corners=False).argmax(1)
-                    train_iou[feat_type][t].update(preds, masks)
+                    preds = logits.detach().argmax(1)  # [B, Hl, Wl]
+                    masks_down = downsample_masks(masks, preds.shape[1], preds.shape[2])
+                    train_iou[feat_type][t].update(preds, masks_down)
 
         step += 1
         pbar.update(1)
