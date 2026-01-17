@@ -70,8 +70,8 @@ def main():
     print("Compilation done.")
     print()
 
-    # Create inputs
-    scene = torch.randn(BATCH, 3, 518, 518, device=device)  # Full scene for sampling
+    # Create inputs - scene size = canvas_grid * patch_size = 32 * 16 = 512
+    scene = torch.randn(BATCH, 3, 512, 512, device=device)
     viewpoint = Viewpoint(
         centers=torch.zeros(BATCH, 2, device=device),
         scales=torch.ones(BATCH, device=device),
@@ -119,8 +119,8 @@ def main():
             torch.cuda.synchronize()
 
     teacher_total_cuda = sum(
-        e.cuda_time_total for e in prof_teacher.key_averages()
-        if e.cuda_time_total > 0
+        e.self_cuda_time_total for e in prof_teacher.key_averages()
+        if e.self_cuda_time_total > 0
     )
     print(f"Teacher total CUDA time: {teacher_total_cuda/1000:.1f} ms ({N_PROFILE} iters)")
     print(f"Teacher per-iter: {teacher_total_cuda/1000/N_PROFILE:.2f} ms")
@@ -147,8 +147,8 @@ def main():
             torch.cuda.synchronize()
 
     canvit_total_cuda = sum(
-        e.cuda_time_total for e in prof_canvit.key_averages()
-        if e.cuda_time_total > 0
+        e.self_cuda_time_total for e in prof_canvit.key_averages()
+        if e.self_cuda_time_total > 0
     )
     print(f"CanViT total CUDA time: {canvit_total_cuda/1000:.1f} ms ({N_PROFILE} iters)")
     print(f"CanViT per-iter: {canvit_total_cuda/1000/N_PROFILE:.2f} ms")
@@ -169,10 +169,18 @@ def main():
     # TOP KERNELS
     # =========================================================================
     print("=" * 70)
+    print("TOP 30 TEACHER CUDA KERNELS")
+    print("=" * 70)
+    print(prof_teacher.key_averages().table(
+        sort_by="self_cuda_time_total",
+        row_limit=30,
+    ))
+
+    print("=" * 70)
     print("TOP 30 CANVIT CUDA KERNELS")
     print("=" * 70)
     print(prof_canvit.key_averages().table(
-        sort_by="cuda_time_total",
+        sort_by="self_cuda_time_total",
         row_limit=30,
     ))
 
@@ -200,7 +208,7 @@ def main():
     }
 
     for evt in prof_canvit.key_averages():
-        if evt.cuda_time_total == 0:
+        if evt.self_cuda_time_total == 0:
             continue
         name = evt.key.lower()
         if "layer_norm" in name or "layernorm" in name:
@@ -215,11 +223,11 @@ def main():
             categories["Other"].append(evt)
 
     for cat, evts in categories.items():
-        cat_time = sum(e.cuda_time_total for e in evts)
+        cat_time = sum(e.self_cuda_time_total for e in evts)
         pct = 100 * cat_time / canvit_total_cuda if canvit_total_cuda > 0 else 0
         print(f"{cat:20s}: {cat_time/1000:8.1f} ms  ({pct:5.1f}%)")
-        for e in sorted(evts, key=lambda x: x.cuda_time_total, reverse=True)[:3]:
-            print(f"    {e.key[:55]:55s} {e.cuda_time_total/1000:6.1f} ms")
+        for e in sorted(evts, key=lambda x: x.self_cuda_time_total, reverse=True)[:3]:
+            print(f"    {e.key[:55]:55s} {e.self_cuda_time_total/1000:6.1f} ms")
 
 
 if __name__ == "__main__":
