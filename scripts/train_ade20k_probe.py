@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Train ADE20K segmentation probes on AVP features.
 
-Recurrent probes: ONE probe per feature type, trained on features AVERAGED across timesteps.
-Static probes (baselines): teacher_full, teacher_glimpse.
+ONE probe per feature type with SHARED weights across timesteps (anytime decoding).
+Training: loss averaged across timesteps, single backward pass.
+Eval: mIoU computed per timestep → logged as curves.
 
-Logs mIoU to compare feature quality.
+Same policy (t=0 full, t>0 random) in train and val.
 """
 
 import logging
@@ -18,7 +19,6 @@ from typing import Literal, TypedDict
 import albumentations as A
 import comet_ml
 import dacite
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
@@ -36,7 +36,7 @@ from tqdm import tqdm
 
 from avp_vit import ActiveCanViT, ActiveCanViTConfig
 from avp_vit.checkpoint import load as load_ckpt
-from avp_vit.train.viewpoint import Viewpoint  # Use this, NOT canvit.viewpoint - has safe-box sampling
+from avp_vit.train.viewpoint import Viewpoint
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ IGNORE_LABEL = 255
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406])
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225])
 
-FeatureType = Literal["hidden", "predicted_norm", "teacher_full", "teacher_glimpse"]
+FeatureType = Literal["hidden", "predicted_norm", "teacher_glimpse"]
 
 
 @dataclass
@@ -73,7 +73,6 @@ class Config:
 
     log_every: int = 20
     val_every: int = 500
-    viz_every: int = 1000
     ema_alpha: float = 0.1
 
     comet_project: str = "avp-ade20k-probe"
@@ -92,7 +91,6 @@ class ProbeHead(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         assert x.ndim == 4, f"Expected [B,H,W,D], got {x.shape}"
-        assert x.shape[-1] == self.embed_dim, f"Expected D={self.embed_dim}, got {x.shape[-1]}"
         return self.linear(self.ln(x)).permute(0, 3, 1, 2)
 
 
@@ -104,9 +102,9 @@ class Probe:
     scheduler: SequentialLR
     loss_ema: float = 0.0
     grad_norm_ema: float = 0.0
-    best_miou: float = 0.0
+    best_mean_miou: float = 0.0  # mean across timesteps
 
-    def update(self, loss: float, grad_norm: float, alpha: float) -> None:
+    def ema_update(self, loss: float, grad_norm: float, alpha: float) -> None:
         if self.loss_ema == 0.0:
             self.loss_ema, self.grad_norm_ema = loss, grad_norm
         else:
@@ -114,58 +112,27 @@ class Probe:
             self.grad_norm_ema = alpha * grad_norm + (1 - alpha) * self.grad_norm_ema
 
 
-@dataclass
-class Features:
-    """Extracted features. All are single tensors [B, H, W, D].
-
-    Recurrent features (hidden, predicted_norm) are AVERAGED across timesteps.
-    This is the correct approach: ONE probe trained on averaged features.
-    """
-    hidden: Tensor           # canvas hidden state, averaged across timesteps
-    predicted_norm: Tensor   # predicted teacher features, averaged across timesteps
-    teacher_full: Tensor     # teacher features on full image (baseline)
-    teacher_glimpse: Tensor  # teacher features on small image (baseline)
-
-    def get(self, feat_type: FeatureType) -> Tensor:
-        if feat_type == "hidden":
-            return self.hidden
-        elif feat_type == "predicted_norm":
-            return self.predicted_norm
-        elif feat_type == "teacher_full":
-            return self.teacher_full
-        elif feat_type == "teacher_glimpse":
-            return self.teacher_glimpse
-        raise ValueError(f"Unknown feature type: {feat_type}")
+# Per-timestep features: {feature_type: [feat_t0, feat_t1, ...]}
+PerTimestepFeatures = dict[FeatureType, list[Tensor]]
 
 
 def downsample_masks(masks: Tensor, target_h: int, target_w: int) -> Tensor:
-    """Downsample masks to target resolution using nearest neighbor.
-
-    Workaround for PyTorch INT_MAX limit on bilinear interpolation output size.
-    With batch=64, classes=150, size=512: 64*150*512*512 > INT_MAX.
-    Downsampling masks is slightly coarser but avoids the limit.
-
-    TODO: Revert to upsampling logits if PyTorch removes this limit.
-    """
+    """Downsample masks using nearest neighbor (INT_MAX workaround)."""
     if masks.shape[1:] == (target_h, target_w):
         return masks
-    return F.interpolate(
-        masks.unsqueeze(1).float(), (target_h, target_w), mode="nearest"
-    ).squeeze(1).long()
+    return F.interpolate(masks.unsqueeze(1).float(), (target_h, target_w), mode="nearest").squeeze(1).long()
 
 
 def focal_loss(logits: Tensor, masks: Tensor, gamma: float) -> Tensor:
-    """Pixel-wise focal loss. Downsamples masks to logits resolution (INT_MAX workaround)."""
+    """Focal loss. Downsamples masks to logits resolution."""
     B, C, Hl, Wl = logits.shape
     masks = downsample_masks(masks, Hl, Wl)
-    log_probs = F.log_softmax(logits, dim=1)  # [B, C, Hl, Wl]
+    log_probs = F.log_softmax(logits, dim=1)
     probs = log_probs.exp()
-
-    valid = masks != IGNORE_LABEL  # [B, Hl, Wl]
-    targets = masks.clamp(0, C - 1).long()  # [B, Hl, Wl]
-
-    log_p = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)  # [B, Hl, Wl]
-    p = probs.gather(1, targets.unsqueeze(1)).squeeze(1)  # [B, Hl, Wl]
+    valid = masks != IGNORE_LABEL
+    targets = masks.clamp(0, C - 1)
+    log_p = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+    p = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
     return -((1 - p) ** gamma * log_p * valid).sum() / valid.sum().clamp(min=1)
 
 
@@ -177,9 +144,8 @@ class ADE20kDataset(Dataset[tuple[Tensor, Tensor]]):
         img_dir, ann_dir = root / "images" / split, root / "annotations" / split
         self.imgs = sorted(img_dir.glob("*.jpg"))
         self.anns = [ann_dir / (p.stem + ".png") for p in self.imgs]
-        assert len(self.imgs) > 0, f"No images found in {img_dir}"
-        assert len(self.imgs) == len(self.anns)
-        log.info(f"ADE20k {split}: {len(self)} images from {root}")
+        assert len(self.imgs) > 0, f"No images in {img_dir}"
+        log.info(f"ADE20k {split}: {len(self)} images")
 
     def __len__(self) -> int:
         return len(self.imgs)
@@ -205,143 +171,28 @@ def extract_features(
     canvas_grid: int,
     glimpse_grid: int,
     glimpse_px: int,
-    teacher_dim: int,
     device: torch.device,
-) -> Features:
-    """Extract features from model and teacher.
-
-    Recurrent features are AVERAGED across all timesteps - this is the correct
-    approach for probe training (ONE probe on averaged features, not N probes).
-
-    IMPORTANT: Uses Viewpoint.random() for proper safe-box-area sampling.
-    DO NOT use raw torch.rand() - viewpoints can go out of bounds!
-    """
-    B, C, H, W = images.shape
-    assert C == 3 and H == W, f"Expected square RGB images, got {images.shape}"
-
-    hidden_sum = torch.zeros(B, canvas_grid, canvas_grid, model.canvas_dim, device=device)
-    predicted_sum = torch.zeros(B, canvas_grid, canvas_grid, teacher_dim, device=device)
+) -> PerTimestepFeatures:
+    """Extract per-timestep features. Returns {feat_type: [t0, t1, ...]}."""
+    B = images.shape[0]
+    feats: PerTimestepFeatures = {"hidden": [], "predicted_norm": [], "teacher_glimpse": []}
     state = model.init_state(batch_size=B, canvas_grid_size=canvas_grid)
 
-    for t in range(n_timesteps):
-        # t=0: full scene view. t>0: random viewpoints with PROPER safe-box sampling.
-        if t == 0:
-            vp = Viewpoint.full_scene(batch_size=B, device=device)
-        else:
-            # MUST use Viewpoint.random() - ensures |center| + scale <= 1
-            # DO NOT use raw torch.rand() - viewpoints can go out of bounds!
-            vp = Viewpoint.random(batch_size=B, device=device, min_scale=0.1, max_scale=0.5)
+    # Teacher glimpse baseline (static, same at all timesteps)
+    sz = glimpse_grid * teacher.patch_size_px
+    small = F.interpolate(images, (sz, sz), mode="bilinear", align_corners=False)
+    teacher_glimpse_feat = teacher.forward_norm_features(small).patches.view(B, glimpse_grid, glimpse_grid, -1)
 
+    for t in range(n_timesteps):
+        vp = Viewpoint.full_scene(batch_size=B, device=device) if t == 0 else Viewpoint.random(batch_size=B, device=device, min_scale=0.1, max_scale=0.5)
         out = model.forward_step(image=images, state=state, viewpoint=vp, glimpse_size_px=glimpse_px)
         state = out.state
 
-        hidden_sum += model.get_spatial(state.canvas).view(B, canvas_grid, canvas_grid, -1)
-        predicted_sum += model.predict_teacher_scene(state.canvas).view(B, canvas_grid, canvas_grid, -1)
+        feats["hidden"].append(model.get_spatial(state.canvas).view(B, canvas_grid, canvas_grid, -1))
+        feats["predicted_norm"].append(model.predict_teacher_scene(state.canvas).view(B, canvas_grid, canvas_grid, -1))
+        feats["teacher_glimpse"].append(teacher_glimpse_feat)  # same each timestep (baseline)
 
-    # Average across timesteps
-    hidden_avg = hidden_sum / n_timesteps
-    predicted_avg = predicted_sum / n_timesteps
-
-    # Teacher baselines (no recurrence)
-    teacher_full = teacher.forward_norm_features(images).patches.view(B, canvas_grid, canvas_grid, -1)
-    sz = glimpse_grid * teacher.patch_size_px
-    small = F.interpolate(images, (sz, sz), mode="bilinear", align_corners=False)
-    teacher_glimpse = teacher.forward_norm_features(small).patches.view(B, glimpse_grid, glimpse_grid, -1)
-
-    return Features(hidden_avg, predicted_avg, teacher_full, teacher_glimpse)
-
-
-def upsample_preds(logits: Tensor, target_size: int) -> Tensor:
-    """Upsample logits to mask resolution, then argmax."""
-    return F.interpolate(logits, (target_size, target_size), mode="bilinear", align_corners=False).argmax(1)
-
-
-def train_probe(probe: Probe, feat: Tensor, masks: Tensor, *, grad_clip: float, ema_alpha: float, focal_gamma: float) -> None:
-    """Single probe training step."""
-    probe.head.train()
-    probe.optimizer.zero_grad()
-    loss = focal_loss(probe.head(feat.detach().float()), masks, gamma=focal_gamma)
-    loss.backward()
-    grad_norm = nn.utils.clip_grad_norm_(probe.head.parameters(), grad_clip).item()
-    probe.optimizer.step()
-    probe.scheduler.step()
-    probe.update(loss.item(), grad_norm, ema_alpha)
-
-
-def eval_probe(probe: Probe, feat: Tensor, masks: Tensor, iou_metric: MulticlassJaccardIndex) -> None:
-    """Single probe evaluation step."""
-    preds = upsample_preds(probe.head(feat.float()), masks.shape[1])
-    iou_metric.update(preds, masks)
-
-
-def _viz_colorize(mask: np.ndarray, palette: np.ndarray) -> np.ndarray:
-    """Map class indices to RGB. IGNORE_LABEL → black."""
-    return palette[np.where(mask == IGNORE_LABEL, NUM_CLASSES, mask)]
-
-
-def _viz_denorm(img: Tensor) -> np.ndarray:
-    """Undo ImageNet normalization, return uint8 HWC."""
-    assert img.ndim == 3, f"Expected CHW, got {img.shape}"
-    mean = IMAGENET_MEAN.view(3, 1, 1).to(img.device)
-    std = IMAGENET_STD.view(3, 1, 1).to(img.device)
-    img = img * std + mean
-    return (img.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-
-
-def log_viz(
-    exp: comet_ml.Experiment,
-    step: int,
-    probes: dict[str, Probe],
-    feats: Features,
-    images: Tensor,
-    masks: Tensor,
-    cfg: Config,
-) -> None:
-    """Log segmentation visualization to Comet (n=4 samples max)."""
-    B, C, H, W = images.shape
-    assert masks.shape == (B, H, W), f"Mask shape mismatch: {masks.shape}"
-
-    n = min(4, B)
-    mask_size = H
-
-    # Slice BEFORE expensive ops - only process what we'll visualize
-    images = images[:n]
-    masks = masks[:n]
-
-    # Palette: class_idx → RGB, with extra slot for ignore label
-    palette = np.random.RandomState(42).randint(0, 255, (NUM_CLASSES + 1, 3), dtype=np.uint8)
-    palette[NUM_CLASSES] = 0  # ignore → black
-
-    # Get predictions for each feature type
-    preds: dict[str, np.ndarray] = {}
-    for feat_type in cfg.features:
-        feat = feats.get(feat_type)[:n]  # slice features too
-        logits = probes[feat_type].head(feat.float())
-        pred = upsample_preds(logits, mask_size).cpu().numpy()
-        assert pred.shape == (n, H, W), f"Pred shape: {pred.shape}"
-        preds[feat_type] = pred
-
-    # Build figure: [image | GT | pred_1 | pred_2 | ...]
-    n_cols = 2 + len(preds)
-    fig, axes = plt.subplots(n, n_cols, figsize=(2.5 * n_cols, 2.5 * n))
-    axes = np.atleast_2d(axes)
-
-    masks_np = masks.cpu().numpy()
-    for i in range(n):
-        ax_row = axes[i]
-        ax_row[0].imshow(_viz_denorm(images[i]))
-        ax_row[0].set_title("Image")
-        ax_row[1].imshow(_viz_colorize(masks_np[i], palette))
-        ax_row[1].set_title("GT")
-        for j, (name, pred) in enumerate(preds.items()):
-            ax_row[2 + j].imshow(_viz_colorize(pred[i], palette))
-            ax_row[2 + j].set_title(name[:8])
-        for ax in ax_row:
-            ax.axis("off")
-
-    plt.tight_layout()
-    exp.log_figure(figure_name=f"predictions_{step}", figure=fig, step=step)
-    plt.close(fig)
+    return feats
 
 
 def make_probe(name: str, dim: int, cfg: Config, device: torch.device) -> Probe:
@@ -354,9 +205,8 @@ def make_probe(name: str, dim: int, cfg: Config, device: torch.device) -> Probe:
 
 
 class ProbeCheckpoint(TypedDict):
-    """Checkpoint for probe heads."""
     probe_state_dicts: dict[str, dict[str, Tensor]]
-    best_mious: dict[str, float]
+    best_mean_mious: dict[str, float]
     step: int
     config: dict
     avp_ckpt: str
@@ -364,10 +214,9 @@ class ProbeCheckpoint(TypedDict):
 
 
 def save_probes(path: Path, probes: dict[str, Probe], step: int, cfg: Config) -> None:
-    """Save all probe heads atomically."""
     data: ProbeCheckpoint = {
-        "probe_state_dicts": {name: p.head.state_dict() for name, p in probes.items()},
-        "best_mious": {name: p.best_miou for name, p in probes.items()},
+        "probe_state_dicts": {n: p.head.state_dict() for n, p in probes.items()},
+        "best_mean_mious": {n: p.best_mean_miou for n, p in probes.items()},
         "step": step,
         "config": asdict(cfg),
         "avp_ckpt": str(cfg.avp_ckpt),
@@ -379,8 +228,7 @@ def save_probes(path: Path, probes: dict[str, Probe], step: int, cfg: Config) ->
         os.close(fd)
         torch.save(data, tmp)
         Path(tmp).rename(path)
-        size_mb = path.stat().st_size / (1024 * 1024)
-        log.info(f"Saved probes: {path} ({size_mb:.1f} MB, step={step})")
+        log.info(f"Saved probes: {path} ({path.stat().st_size / 1e6:.1f} MB, step={step})")
     except Exception:
         Path(tmp).unlink(missing_ok=True)
         raise
@@ -391,12 +239,11 @@ def main(cfg: Config) -> None:
     device = torch.device(cfg.device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
     log.info("=" * 60)
-    log.info("ADE20K Probe Training")
+    log.info("ADE20K Probe Training (anytime decoding)")
     log.info("=" * 60)
     log.info(f"Device: {device}, AMP: {cfg.amp}")
     log.info(f"AVP checkpoint: {cfg.avp_ckpt}")
-    log.info(f"Features: {cfg.features}")
-    log.info(f"Timesteps: {cfg.n_timesteps}")
+    log.info(f"Features: {cfg.features}, Timesteps: {cfg.n_timesteps}")
     log.info(f"Batch size: {cfg.batch_size}, Max steps: {cfg.max_steps}")
 
     amp_ctx = torch.autocast(device_type=device.type, dtype=torch.bfloat16) if cfg.amp else torch.autocast(device_type=device.type, enabled=False)
@@ -407,16 +254,11 @@ def main(cfg: Config) -> None:
     model_cfg = dacite.from_dict(ActiveCanViTConfig, {**ckpt["model_config"], "teacher_dim": ckpt["teacher_dim"]})
     bb = create_backbone(ckpt["backbone"], pretrained=False)
     model = ActiveCanViT(backbone=bb, cfg=model_cfg, policy=None)
-    missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=False)
-    if missing:
-        log.warning(f"  Missing keys: {missing}")
-    if unexpected:
-        log.info(f"  Unexpected keys (ignored): {unexpected}")
+    model.load_state_dict(ckpt["state_dict"], strict=False)
     model = model.to(device).eval()
     for p in model.parameters():
         p.requires_grad_(False)
-    avp_params = sum(p.numel() for p in model.parameters())
-    log.info(f"  Backbone: {ckpt['backbone']}, AVP params: {avp_params:,}")
+    log.info(f"  Backbone: {ckpt['backbone']}, params: {sum(p.numel() for p in model.parameters()):,}")
 
     # Load teacher
     log.info("Loading teacher...")
@@ -426,49 +268,36 @@ def main(cfg: Config) -> None:
     teacher = teacher.to(device).eval()
     for p in teacher.parameters():
         p.requires_grad_(False)
-    log.info(f"  Teacher embed_dim: {teacher.embed_dim}, patch_size: {teacher.patch_size_px}")
 
-    # Compute grid sizes
+    # Grid sizes
     patch_size = model.backbone.patch_size_px
-    assert teacher.patch_size_px == patch_size, f"Teacher/model patch size mismatch: {teacher.patch_size_px} vs {patch_size}"
-    assert cfg.image_size % patch_size == 0, f"image_size {cfg.image_size} not divisible by patch_size {patch_size}"
-
-    # glimpse_grid_size is in TRAINING config (not model config)
+    canvas_grid = cfg.image_size // patch_size
     from avp_vit.train.config import Config as TrainConfig
     train_hist = ckpt.get("training_config_history") or {}
     train_cfg = list(train_hist.values())[-1] if train_hist else {}
-    if "glimpse_grid_size" in train_cfg:
-        glimpse_grid = train_cfg["glimpse_grid_size"]
-    else:
-        # FALLBACK: old checkpoint without training_config_history
-        glimpse_grid = TrainConfig.glimpse_grid_size
-        log.warning(f"glimpse_grid_size not in checkpoint, using default: {glimpse_grid}")
-
-    canvas_grid = cfg.image_size // patch_size
+    glimpse_grid = train_cfg.get("glimpse_grid_size", TrainConfig.glimpse_grid_size)
     glimpse_px = glimpse_grid * patch_size
-    log.info(f"  Canvas grid: {canvas_grid}x{canvas_grid}, Glimpse grid: {glimpse_grid}x{glimpse_grid}, Patch: {patch_size}px")
+    log.info(f"  Canvas: {canvas_grid}x{canvas_grid}, Glimpse: {glimpse_grid}x{glimpse_grid}")
 
     dims: dict[FeatureType, int] = {
         "hidden": model.canvas_dim,
         "predicted_norm": ckpt["teacher_dim"],
-        "teacher_full": teacher.embed_dim,
         "teacher_glimpse": teacher.embed_dim,
     }
 
-    # Create probes - ONE probe per feature type
-    # Recurrent features (hidden, predicted_norm) are averaged across timesteps in extract_features()
+    # Create probes - ONE per feature type, shared weights across timesteps
     log.info("Creating probes...")
-    probes: dict[str, Probe] = {}
-    for feat in cfg.features:
-        probes[feat] = make_probe(feat, dims[feat], cfg, device)
+    probes: dict[str, Probe] = {feat: make_probe(feat, dims[feat], cfg, device) for feat in cfg.features}
+    log.info(f"  {len(probes)} probes: {list(probes.keys())}")
 
-    probe_params = sum(sum(p.numel() for p in probe.head.parameters()) for probe in probes.values())
-    log.info(f"  {len(probes)} probes, {probe_params:,} trainable params total")
-    log.info(f"  Probe names: {list(probes.keys())}")
-
-    # Create IoU metrics ONCE here - NOT in validation loop (avoids GPU sync on .to(device))
-    iou_metrics: dict[str, MulticlassJaccardIndex] = {
-        feat: MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(device)
+    # Per-timestep IoU metrics for val
+    val_iou: dict[str, list[MulticlassJaccardIndex]] = {
+        feat: [MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(device) for _ in range(cfg.n_timesteps)]
+        for feat in cfg.features
+    }
+    # Per-timestep IoU metrics for train
+    train_iou: dict[str, list[MulticlassJaccardIndex]] = {
+        feat: [MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(device) for _ in range(cfg.n_timesteps)]
         for feat in cfg.features
     }
 
@@ -483,11 +312,9 @@ def main(cfg: Config) -> None:
     log.info(f"Initializing Comet: {cfg.comet_workspace}/{cfg.comet_project}")
     exp = comet_ml.Experiment(project_name=cfg.comet_project, workspace=cfg.comet_workspace)
     exp.log_parameters(asdict(cfg))
-    exp.log_parameter("avp_params", avp_params)
-    exp.log_parameter("probe_params", probe_params)
 
     log.info("=" * 60)
-    log.info("Starting training loop")
+    log.info("Starting training")
     log.info("=" * 60)
 
     step = 0
@@ -502,65 +329,99 @@ def main(cfg: Config) -> None:
             images, masks = next(train_iter)
         images, masks = images.to(device), masks.to(device)
 
-        # Validation
+        # === Validation ===
         if step % cfg.val_every == 0:
             for p in probes.values():
                 p.head.eval()
-            # Reset metrics (already on device - NO .to(device) here, that causes GPU sync!)
-            for m in iou_metrics.values():
-                m.reset()
+            for feat in cfg.features:
+                for m in val_iou[feat]:
+                    m.reset()
 
             with torch.no_grad():
                 for vi, vm in val_loader:
                     vi, vm = vi.to(device), vm.to(device)
                     with amp_ctx:
-                        feats = extract_features(model, teacher, vi, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, ckpt["teacher_dim"], device)
+                        feats = extract_features(model, teacher, vi, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, device)
                     for feat_type in cfg.features:
-                        eval_probe(probes[feat_type], feats.get(feat_type), vm, iou_metrics[feat_type])
+                        for t in range(cfg.n_timesteps):
+                            logits = probes[feat_type].head(feats[feat_type][t].float())
+                            preds = F.interpolate(logits, vm.shape[1:], mode="bilinear", align_corners=False).argmax(1)
+                            val_iou[feat_type][t].update(preds, vm)
 
-            any_improved = False
-            for name, iou in iou_metrics.items():
-                miou = iou.compute().item()
-                exp.log_metric(f"{name}/val_miou", miou, step=step)
-                if miou > probes[name].best_miou:
-                    probes[name].best_miou = miou
-                    any_improved = True
+            # Log per-timestep mIoU curves
+            for feat_type in cfg.features:
+                mious = [val_iou[feat_type][t].compute().item() for t in range(cfg.n_timesteps)]
+                mean_miou = sum(mious) / len(mious)
+                for t, miou in enumerate(mious):
+                    exp.log_metric(f"{feat_type}/val_miou_t{t}", miou, step=step)
+                exp.log_metric(f"{feat_type}/val_miou_mean", mean_miou, step=step)
+                exp.log_curve(f"{feat_type}/val_miou_curve", x=list(range(cfg.n_timesteps)), y=mious, step=step)
 
-            if any_improved and cfg.probe_ckpt_dir:
+                if mean_miou > probes[feat_type].best_mean_miou:
+                    probes[feat_type].best_mean_miou = mean_miou
+
+            if cfg.probe_ckpt_dir:
                 save_probes(cfg.probe_ckpt_dir / "best.pt", probes, step, cfg)
 
-            postfix = {feat[:3]: f"{iou_metrics[feat].compute().item():.3f}" for feat in cfg.features}
-            pbar.set_postfix(postfix)
+            pbar.set_postfix({f[:3]: f"{sum(val_iou[f][t].compute().item() for t in range(cfg.n_timesteps)) / cfg.n_timesteps:.3f}" for f in cfg.features})
 
-        # Visualization
-        if step % cfg.viz_every == 0:
-            with torch.no_grad(), amp_ctx:
-                viz_feats = extract_features(model, teacher, images, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, ckpt["teacher_dim"], device)
-            log_viz(exp, step, probes, viz_feats, images, masks, cfg)
+        # === Training step ===
+        for p in probes.values():
+            p.head.train()
 
-        # Train step
         with amp_ctx:
-            feats = extract_features(model, teacher, images, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, ckpt["teacher_dim"], device)
+            feats = extract_features(model, teacher, images, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, device)
 
         for feat_type in cfg.features:
-            train_probe(probes[feat_type], feats.get(feat_type), masks, grad_clip=cfg.grad_clip, ema_alpha=cfg.ema_alpha, focal_gamma=cfg.focal_gamma)
+            probe = probes[feat_type]
+            probe.optimizer.zero_grad()
+
+            # Loss averaged across timesteps, SAME probe weights
+            losses = [focal_loss(probe.head(feats[feat_type][t].float()), masks, cfg.focal_gamma) for t in range(cfg.n_timesteps)]
+            loss = torch.stack(losses).mean()
+            loss.backward()
+
+            grad_norm = nn.utils.clip_grad_norm_(probe.head.parameters(), cfg.grad_clip).item()
+            probe.optimizer.step()
+            probe.scheduler.step()
+            probe.ema_update(loss.item(), grad_norm, cfg.ema_alpha)
+
+            # Update train IoU metrics
+            with torch.no_grad():
+                for t in range(cfg.n_timesteps):
+                    logits = probe.head(feats[feat_type][t].float())
+                    preds = F.interpolate(logits, masks.shape[1:], mode="bilinear", align_corners=False).argmax(1)
+                    train_iou[feat_type][t].update(preds, masks)
 
         step += 1
         pbar.update(1)
 
+        # === Logging ===
         if step % cfg.log_every == 0:
             log_dict: dict[str, float] = {"lr": list(probes.values())[0].scheduler.get_last_lr()[0]}
             for name, p in probes.items():
                 log_dict[f"{name}/loss"] = p.loss_ema
                 log_dict[f"{name}/grad_norm"] = p.grad_norm_ema
+
+            # Log train mIoU curves
+            for feat_type in cfg.features:
+                mious = [train_iou[feat_type][t].compute().item() for t in range(cfg.n_timesteps)]
+                for t, miou in enumerate(mious):
+                    log_dict[f"{feat_type}/train_miou_t{t}"] = miou
+                log_dict[f"{feat_type}/train_miou_mean"] = sum(mious) / len(mious)
+                exp.log_curve(f"{feat_type}/train_miou_curve", x=list(range(cfg.n_timesteps)), y=mious, step=step)
+                # Reset for next interval
+                for m in train_iou[feat_type]:
+                    m.reset()
+
             exp.log_metrics(log_dict, step=step)
 
     pbar.close()
     log.info("=" * 60)
-    log.info("Training complete. Best mIoU:")
+    log.info("Training complete. Best mean mIoU:")
     for name, p in probes.items():
-        log.info(f"  {name}: {p.best_miou:.4f}")
-        exp.log_metric(f"best/{name}", p.best_miou)
+        log.info(f"  {name}: {p.best_mean_miou:.4f}")
+        exp.log_metric(f"best/{name}", p.best_mean_miou)
     log.info("=" * 60)
 
 
