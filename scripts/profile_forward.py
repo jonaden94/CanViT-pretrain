@@ -55,10 +55,12 @@ def sync(device: torch.device) -> None:
 def bench(fn: Callable, warmup: int, iters: int, device: torch.device) -> float:
     """Benchmark with proper sync. Returns ms/iter."""
     for _ in range(warmup):
+        torch.compiler.cudagraph_mark_step_begin()
         fn()
     sync(device)
     t0 = time.perf_counter()
     for _ in range(iters):
+        torch.compiler.cudagraph_mark_step_begin()
         fn()
     sync(device)
     return (time.perf_counter() - t0) / iters * 1000
@@ -231,6 +233,7 @@ def main(cfg: Config) -> None:
         log.info(f"  Mode: {mode} (warming up...)")
         with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
             for _ in range(cfg.warmup):
+                torch.compiler.cudagraph_mark_step_begin()
                 full_fn()
         sync(device)
 
@@ -310,6 +313,7 @@ def main(cfg: Config) -> None:
         # Warmup
         with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
             for _ in range(cfg.warmup):
+                torch.compiler.cudagraph_mark_step_begin()
                 prof_fn()
         sync(device)
 
@@ -320,6 +324,7 @@ def main(cfg: Config) -> None:
         ) as prof:
             with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
                 for _ in range(3):
+                    torch.compiler.cudagraph_mark_step_begin()
                     prof_fn()
 
         log.info("  Top 15 CUDA kernels by time:")
