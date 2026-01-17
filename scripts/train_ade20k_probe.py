@@ -258,6 +258,20 @@ def eval_probe(probe: Probe, feat: Tensor, masks: Tensor, iou_metric: Multiclass
     iou_metric.update(preds, masks)
 
 
+def _viz_colorize(mask: np.ndarray, palette: np.ndarray) -> np.ndarray:
+    """Map class indices to RGB. IGNORE_LABEL → black."""
+    return palette[np.where(mask == IGNORE_LABEL, NUM_CLASSES, mask)]
+
+
+def _viz_denorm(img: Tensor) -> np.ndarray:
+    """Undo ImageNet normalization, return uint8 HWC."""
+    assert img.ndim == 3, f"Expected CHW, got {img.shape}"
+    mean = IMAGENET_MEAN.view(3, 1, 1).to(img.device)
+    std = IMAGENET_STD.view(3, 1, 1).to(img.device)
+    img = img * std + mean
+    return (img.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+
+
 def log_viz(
     exp: comet_ml.Experiment,
     step: int,
@@ -267,42 +281,46 @@ def log_viz(
     masks: Tensor,
     cfg: Config,
 ) -> None:
-    """Log segmentation visualization to Comet."""
-    n = min(4, images.shape[0])
+    """Log segmentation visualization to Comet (n=4 samples max)."""
+    B, C, H, W = images.shape
+    assert masks.shape == (B, H, W), f"Mask shape mismatch: {masks.shape}"
+
+    n = min(4, B)
+    mask_size = H
+
+    # Slice BEFORE expensive ops - only process what we'll visualize
+    images = images[:n]
+    masks = masks[:n]
+
+    # Palette: class_idx → RGB, with extra slot for ignore label
     palette = np.random.RandomState(42).randint(0, 255, (NUM_CLASSES + 1, 3), dtype=np.uint8)
-    palette[NUM_CLASSES] = 0
+    palette[NUM_CLASSES] = 0  # ignore → black
 
-    def colorize(m: np.ndarray) -> np.ndarray:
-        return palette[np.where(m == IGNORE_LABEL, NUM_CLASSES, m)]
-
-    def denorm(t: Tensor) -> np.ndarray:
-        t = t * IMAGENET_STD.view(3, 1, 1).to(t.device) + IMAGENET_MEAN.view(3, 1, 1).to(t.device)
-        return (t.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-
+    # Get predictions for each feature type
     preds: dict[str, np.ndarray] = {}
     for feat_type in cfg.features:
-        feat = feats.get(feat_type)
-        pred = upsample_preds(probes[feat_type].head(feat.float()), masks.shape[1])[:n].cpu().numpy()
+        feat = feats.get(feat_type)[:n]  # slice features too
+        logits = probes[feat_type].head(feat.float())
+        pred = upsample_preds(logits, mask_size).cpu().numpy()
+        assert pred.shape == (n, H, W), f"Pred shape: {pred.shape}"
         preds[feat_type] = pred
 
-    cols = 2 + len(preds)
-    fig, axes = plt.subplots(n, cols, figsize=(2.5 * cols, 2.5 * n))
-    if n == 1:
-        axes = axes[np.newaxis, :]
+    # Build figure: [image | GT | pred_1 | pred_2 | ...]
+    n_cols = 2 + len(preds)
+    fig, axes = plt.subplots(n, n_cols, figsize=(2.5 * n_cols, 2.5 * n))
+    axes = np.atleast_2d(axes)
 
+    masks_np = masks.cpu().numpy()
     for i in range(n):
-        col = 0
-        axes[i, col].imshow(denorm(images[i]))
-        axes[i, col].set_title("Image")
-        col += 1
-        axes[i, col].imshow(colorize(masks[i].cpu().numpy()))
-        axes[i, col].set_title("GT")
-        col += 1
-        for name, pred in preds.items():
-            axes[i, col].imshow(colorize(pred[i]))
-            axes[i, col].set_title(name[:8])
-            col += 1
-        for ax in axes[i]:
+        ax_row = axes[i]
+        ax_row[0].imshow(_viz_denorm(images[i]))
+        ax_row[0].set_title("Image")
+        ax_row[1].imshow(_viz_colorize(masks_np[i], palette))
+        ax_row[1].set_title("GT")
+        for j, (name, pred) in enumerate(preds.items()):
+            ax_row[2 + j].imshow(_viz_colorize(pred[i], palette))
+            ax_row[2 + j].set_title(name[:8])
+        for ax in ax_row:
             ax.axis("off")
 
     plt.tight_layout()
