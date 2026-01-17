@@ -56,7 +56,9 @@ class Config:
     ade20k_root: Path = Path("/datasets/ADE20k/ADEChallengeData2016")
     teacher_ckpt: Path | None = None
 
-    features: list[FeatureType] = field(default_factory=lambda: ["hidden", "predicted_norm", "teacher_glimpse"])
+    features: list[FeatureType] = field(
+        default_factory=lambda: ["hidden", "predicted_norm", "teacher_glimpse"]
+    )
     n_timesteps: int = 5
 
     image_size: int = 512
@@ -136,7 +138,11 @@ def downsample_masks(masks: Tensor, target_h: int, target_w: int) -> Tensor:
     """Downsample masks using nearest neighbor (INT_MAX workaround)."""
     if masks.shape[1:] == (target_h, target_w):
         return masks
-    return F.interpolate(masks.unsqueeze(1).float(), (target_h, target_w), mode="nearest").squeeze(1).long()
+    return (
+        F.interpolate(masks.unsqueeze(1).float(), (target_h, target_w), mode="nearest")
+        .squeeze(1)
+        .long()
+    )
 
 
 def focal_loss(logits: Tensor, masks: Tensor, gamma: float) -> Tensor:
@@ -153,23 +159,39 @@ def focal_loss(logits: Tensor, masks: Tensor, gamma: float) -> Tensor:
 
 
 class ADE20kDataset(Dataset[tuple[Tensor, Tensor]]):
-    def __init__(self, root: Path, split: str, size: int, augment: bool = False) -> None:
+    def __init__(
+        self, root: Path, split: str, size: int, augment: bool = False
+    ) -> None:
         self.size = size
         self.load_size = size * 2 if augment else size
-        self.transform = A.Compose([A.HorizontalFlip(p=0.5), A.RandomCrop(size, size)]) if augment else None
+        self.transform = (
+            A.Compose([A.HorizontalFlip(p=0.5), A.RandomCrop(size, size)])
+            if augment
+            else None
+        )
         img_dir = root / "images" / split
         ann_dir = root / "annotations" / split
         self.imgs = sorted(img_dir.glob("*.jpg"))
         self.anns = [ann_dir / (p.stem + ".png") for p in self.imgs]
-        assert len(self.imgs) > 0, f"No images in {img_dir.resolve()} (root={root.resolve()})"
+        assert len(self.imgs) > 0, (
+            f"No images in {img_dir.resolve()} (root={root.resolve()})"
+        )
         log.info(f"ADE20k {split}: {len(self)} images")
 
     def __len__(self) -> int:
         return len(self.imgs)
 
     def __getitem__(self, i: int) -> tuple[Tensor, Tensor]:
-        img = np.array(Image.open(self.imgs[i]).convert("RGB").resize((self.load_size, self.load_size), Image.Resampling.BILINEAR))
-        mask = np.array(Image.open(self.anns[i]).resize((self.load_size, self.load_size), Image.Resampling.NEAREST))
+        img = np.array(
+            Image.open(self.imgs[i])
+            .convert("RGB")
+            .resize((self.load_size, self.load_size), Image.Resampling.BILINEAR)
+        )
+        mask = np.array(
+            Image.open(self.anns[i]).resize(
+                (self.load_size, self.load_size), Image.Resampling.NEAREST
+            )
+        )
         if self.transform:
             out = self.transform(image=img, mask=mask)
             img, mask = out["image"], out["mask"]
@@ -195,30 +217,49 @@ def extract_features(
     B, C, H, W = images.shape
     assert C == 3 and H == W, f"Expected square RGB images, got {images.shape}"
 
-    feats: PerTimestepFeatures = {"hidden": [], "predicted_norm": [], "teacher_glimpse": []}
+    feats: PerTimestepFeatures = {
+        "hidden": [],
+        "predicted_norm": [],
+        "teacher_glimpse": [],
+    }
     state = model.init_state(batch_size=B, canvas_grid_size=canvas_grid)
 
     # Teacher glimpse baseline (static, same at all timesteps)
     sz = glimpse_grid * teacher.patch_size_px
     small = F.interpolate(images, size=(sz, sz), mode="bilinear", align_corners=False)
-    teacher_glimpse_feat = teacher.forward_norm_features(small).patches.view(B, glimpse_grid, glimpse_grid, -1)
-    assert teacher_glimpse_feat.shape == (B, glimpse_grid, glimpse_grid, teacher.embed_dim)
+    teacher_glimpse_feat = teacher.forward_norm_features(small).patches.view(
+        B, glimpse_grid, glimpse_grid, -1
+    )
+    assert teacher_glimpse_feat.shape == (
+        B,
+        glimpse_grid,
+        glimpse_grid,
+        teacher.embed_dim,
+    )
 
     for t in range(n_timesteps):
         if t == 0:
             vp = Viewpoint.full_scene(batch_size=B, device=device)
         else:
-            vp = Viewpoint.random(batch_size=B, device=device, min_scale=min_vp_scale, max_scale=1.0)
+            vp = Viewpoint.random(
+                batch_size=B, device=device, min_scale=min_vp_scale, max_scale=1.0
+            )
 
-        out = model.forward_step(image=images, state=state, viewpoint=vp, glimpse_size_px=glimpse_px)
+        out = model.forward_step(
+            image=images, state=state, viewpoint=vp, glimpse_size_px=glimpse_px
+        )
         state = out.state
 
         hidden = model.get_spatial(state.canvas).view(B, canvas_grid, canvas_grid, -1)
-        predicted = model.predict_teacher_scene(state.canvas).view(B, canvas_grid, canvas_grid, -1)
+        predicted = model.predict_teacher_scene(state.canvas).view(
+            B, canvas_grid, canvas_grid, -1
+        )
 
         feats["hidden"].append(hidden)
         feats["predicted_norm"].append(predicted)
-        feats["teacher_glimpse"].append(teacher_glimpse_feat)  # same each timestep (baseline)
+        feats["teacher_glimpse"].append(
+            teacher_glimpse_feat
+        )  # same each timestep (baseline)
 
     return feats
 
@@ -256,7 +297,9 @@ def save_probes(path: Path, probes: dict[str, Probe], step: int, cfg: Config) ->
         os.close(fd)
         torch.save(data, tmp)
         Path(tmp).rename(path)
-        log.info(f"Saved probes: {path} ({path.stat().st_size / 1e6:.1f} MB, step={step})")
+        log.info(
+            f"Saved probes: {path} ({path.stat().st_size / 1e6:.1f} MB, step={step})"
+        )
     except Exception:
         Path(tmp).unlink(missing_ok=True)
         raise
@@ -264,7 +307,9 @@ def save_probes(path: Path, probes: dict[str, Probe], step: int, cfg: Config) ->
 
 def main(cfg: Config) -> None:
     torch.set_float32_matmul_precision("high")
-    device = torch.device(cfg.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    device = torch.device(
+        cfg.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    )
 
     log.info("=" * 60)
     log.info("ADE20K Probe Training (anytime decoding)")
@@ -274,24 +319,34 @@ def main(cfg: Config) -> None:
     log.info(f"Features: {cfg.features}, Timesteps: {cfg.n_timesteps}")
     log.info(f"Batch size: {cfg.batch_size}, Max steps: {cfg.max_steps}")
 
-    amp_ctx = torch.autocast(device_type=device.type, dtype=torch.bfloat16) if cfg.amp else torch.autocast(device_type=device.type, enabled=False)
+    amp_ctx = (
+        torch.autocast(device_type=device.type, dtype=torch.bfloat16)
+        if cfg.amp
+        else torch.autocast(device_type=device.type, enabled=False)
+    )
 
     # Load AVP model
     log.info("Loading AVP model...")
     ckpt = load_ckpt(cfg.avp_ckpt, device)
-    model_cfg = dacite.from_dict(ActiveCanViTConfig, {**ckpt["model_config"], "teacher_dim": ckpt["teacher_dim"]})
+    model_cfg = dacite.from_dict(
+        ActiveCanViTConfig, {**ckpt["model_config"], "teacher_dim": ckpt["teacher_dim"]}
+    )
     bb = create_backbone(ckpt["backbone"], pretrained=False)
     model = ActiveCanViT(backbone=bb, cfg=model_cfg, policy=None)
     model.load_state_dict(ckpt["state_dict"], strict=False)
     model = model.to(device).eval()
     for p in model.parameters():
         p.requires_grad_(False)
-    log.info(f"  Backbone: {ckpt['backbone']}, params: {sum(p.numel() for p in model.parameters()):,}")
+    log.info(
+        f"  Backbone: {ckpt['backbone']}, params: {sum(p.numel() for p in model.parameters()):,}"
+    )
 
     # Load teacher
     log.info("Loading teacher...")
     weights = str(cfg.teacher_ckpt) if cfg.teacher_ckpt else None
-    teacher = create_backbone(ckpt["backbone"], pretrained=weights is None, weights=weights)
+    teacher = create_backbone(
+        ckpt["backbone"], pretrained=weights is None, weights=weights
+    )
     assert isinstance(teacher, DINOv3Backbone)
     teacher = teacher.to(device).eval()
     for p in teacher.parameters():
@@ -299,16 +354,26 @@ def main(cfg: Config) -> None:
 
     # Grid sizes and viewpoint config from training checkpoint
     patch_size = model.backbone.patch_size_px
-    assert cfg.image_size % patch_size == 0, f"image_size {cfg.image_size} not divisible by patch_size {patch_size}"
+    assert cfg.image_size % patch_size == 0, (
+        f"image_size {cfg.image_size} not divisible by patch_size {patch_size}"
+    )
     canvas_grid = cfg.image_size // patch_size
     train_hist = ckpt.get("training_config_history") or {}
     train_cfg = list(train_hist.values())[-1] if train_hist else {}
     glimpse_grid = train_cfg.get("glimpse_grid_size", TrainConfig.glimpse_grid_size)
     glimpse_px = glimpse_grid * patch_size
     min_vp_scale = train_cfg.get("min_viewpoint_scale", TrainConfig.min_viewpoint_scale)
-    log.info(f"  Canvas: {canvas_grid}x{canvas_grid}, Glimpse: {glimpse_grid}x{glimpse_grid}")
-    log.info(f"  Viewpoint: t=0 full, t>0 random (min_scale={min_vp_scale}, max_scale=1.0)")
-    exp_params = {"glimpse_grid": glimpse_grid, "min_vp_scale": min_vp_scale, "canvas_grid": canvas_grid}
+    log.info(
+        f"  Canvas: {canvas_grid}x{canvas_grid}, Glimpse: {glimpse_grid}x{glimpse_grid}"
+    )
+    log.info(
+        f"  Viewpoint: t=0 full, t>0 random (min_scale={min_vp_scale}, max_scale=1.0)"
+    )
+    exp_params = {
+        "glimpse_grid": glimpse_grid,
+        "min_vp_scale": min_vp_scale,
+        "canvas_grid": canvas_grid,
+    }
 
     dims: dict[FeatureType, int] = {
         "hidden": model.canvas_dim,
@@ -318,17 +383,29 @@ def main(cfg: Config) -> None:
 
     # Create probes - ONE per feature type, shared weights across timesteps
     log.info("Creating probes...")
-    probes: dict[str, Probe] = {feat: make_probe(feat, dims[feat], cfg, device) for feat in cfg.features}
+    probes: dict[str, Probe] = {
+        feat: make_probe(feat, dims[feat], cfg, device) for feat in cfg.features
+    }
     log.info(f"  {len(probes)} probes: {list(probes.keys())}")
 
     # Per-timestep IoU metrics for val
     val_iou: dict[str, list[MulticlassJaccardIndex]] = {
-        feat: [MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(device) for _ in range(cfg.n_timesteps)]
+        feat: [
+            MulticlassJaccardIndex(
+                NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro"
+            ).to(device)
+            for _ in range(cfg.n_timesteps)
+        ]
         for feat in cfg.features
     }
     # Per-timestep IoU metrics for train
     train_iou: dict[str, list[MulticlassJaccardIndex]] = {
-        feat: [MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(device) for _ in range(cfg.n_timesteps)]
+        feat: [
+            MulticlassJaccardIndex(
+                NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro"
+            ).to(device)
+            for _ in range(cfg.n_timesteps)
+        ]
         for feat in cfg.features
     }
 
@@ -336,12 +413,23 @@ def main(cfg: Config) -> None:
     log.info("Loading datasets...")
     train_ds = ADE20kDataset(cfg.ade20k_root, "training", cfg.image_size, augment=True)
     val_ds = ADE20kDataset(cfg.ade20k_root, "validation", cfg.image_size)
-    train_loader = DataLoader(train_ds, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True, drop_last=True)
-    val_loader = DataLoader(val_ds, cfg.eval_batch_size, num_workers=cfg.num_workers, pin_memory=True)
+    train_loader = DataLoader(
+        train_ds,
+        cfg.batch_size,
+        shuffle=True,
+        num_workers=cfg.num_workers,
+        pin_memory=True,
+        drop_last=True,
+    )
+    val_loader = DataLoader(
+        val_ds, cfg.eval_batch_size, num_workers=cfg.num_workers, pin_memory=True
+    )
 
     # Comet
     log.info(f"Initializing Comet: {cfg.comet_workspace}/{cfg.comet_project}")
-    exp = comet_ml.Experiment(project_name=cfg.comet_project, workspace=cfg.comet_workspace)
+    exp = comet_ml.Experiment(
+        project_name=cfg.comet_project, workspace=cfg.comet_workspace
+    )
     exp.log_parameters(asdict(cfg))
     exp.log_parameters(exp_params)  # glimpse_grid, min_vp_scale, canvas_grid from ckpt
 
@@ -374,22 +462,42 @@ def main(cfg: Config) -> None:
                 for vi, vm in val_loader:
                     vi, vm = vi.to(device), vm.to(device)
                     with amp_ctx:
-                        feats = extract_features(model, teacher, vi, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, device, min_vp_scale)
+                        feats = extract_features(
+                            model,
+                            teacher,
+                            vi,
+                            cfg.n_timesteps,
+                            canvas_grid,
+                            glimpse_grid,
+                            glimpse_px,
+                            device,
+                            min_vp_scale,
+                        )
                     for feat_type in cfg.features:
                         for t in range(cfg.n_timesteps):
                             logits = probes[feat_type].head(feats[feat_type][t].float())
                             preds = logits.argmax(1)  # [B, Hl, Wl] - no upsample
-                            vm_down = downsample_masks(vm, preds.shape[1], preds.shape[2])
+                            vm_down = downsample_masks(
+                                vm, preds.shape[1], preds.shape[2]
+                            )
                             val_iou[feat_type][t].update(preds, vm_down)
 
             # Log per-timestep mIoU curves
             for feat_type in cfg.features:
-                mious = [val_iou[feat_type][t].compute().item() for t in range(cfg.n_timesteps)]
+                mious = [
+                    val_iou[feat_type][t].compute().item()
+                    for t in range(cfg.n_timesteps)
+                ]
                 mean_miou = sum(mious) / len(mious)
                 for t, miou in enumerate(mious):
                     exp.log_metric(f"{feat_type}/val_miou_t{t}", miou, step=step)
                 exp.log_metric(f"{feat_type}/val_miou_mean", mean_miou, step=step)
-                exp.log_curve(f"{feat_type}/val_miou_curve", x=list(range(cfg.n_timesteps)), y=mious, step=step)
+                exp.log_curve(
+                    f"{feat_type}/val_miou_curve",
+                    x=list(range(cfg.n_timesteps)),
+                    y=mious,
+                    step=step,
+                )
 
                 if mean_miou > probes[feat_type].best_mean_miou:
                     probes[feat_type].best_mean_miou = mean_miou
@@ -398,22 +506,43 @@ def main(cfg: Config) -> None:
             if any_improved and cfg.probe_ckpt_dir:
                 save_probes(cfg.probe_ckpt_dir / "best.pt", probes, step, cfg)
 
-            pbar.set_postfix({f[:3]: f"{sum(val_iou[f][t].compute().item() for t in range(cfg.n_timesteps)) / cfg.n_timesteps:.3f}" for f in cfg.features})
+            pbar.set_postfix(
+                {
+                    f[
+                        :3
+                    ]: f"{sum(val_iou[f][t].compute().item() for t in range(cfg.n_timesteps)) / cfg.n_timesteps:.3f}"
+                    for f in cfg.features
+                }
+            )
 
         # === Training step ===
         for p in probes.values():
             p.head.train()
 
         with amp_ctx:
-            feats = extract_features(model, teacher, images, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, device, min_vp_scale)
+            feats = extract_features(
+                model,
+                teacher,
+                images,
+                cfg.n_timesteps,
+                canvas_grid,
+                glimpse_grid,
+                glimpse_px,
+                device,
+                min_vp_scale,
+            )
 
         for feat_type in cfg.features:
             probe = probes[feat_type]
             probe.optimizer.zero_grad()
 
             # Compute logits BEFORE optimizer step (for both loss and metrics)
-            logits_list = [probe.head(feats[feat_type][t].float()) for t in range(cfg.n_timesteps)]
-            losses = [focal_loss(logits, masks, cfg.focal_gamma) for logits in logits_list]
+            logits_list = [
+                probe.head(feats[feat_type][t].float()) for t in range(cfg.n_timesteps)
+            ]
+            losses = [
+                focal_loss(logits, masks, cfg.focal_gamma) for logits in logits_list
+            ]
             loss = torch.stack(losses).mean()
             loss.backward()
 
@@ -434,7 +563,9 @@ def main(cfg: Config) -> None:
 
         # === Logging (GPU sync happens here) ===
         if step % cfg.log_every == 0:
-            log_dict: dict[str, float] = {"lr": list(probes.values())[0].scheduler.get_last_lr()[0]}
+            log_dict: dict[str, float] = {
+                "lr": list(probes.values())[0].scheduler.get_last_lr()[0]
+            }
             for name, p in probes.items():
                 avg_loss, avg_grad = p.get_and_reset_stats()
                 log_dict[f"{name}/loss"] = avg_loss
@@ -442,11 +573,19 @@ def main(cfg: Config) -> None:
 
             # Log train mIoU curves
             for feat_type in cfg.features:
-                mious = [train_iou[feat_type][t].compute().item() for t in range(cfg.n_timesteps)]
+                mious = [
+                    train_iou[feat_type][t].compute().item()
+                    for t in range(cfg.n_timesteps)
+                ]
                 for t, miou in enumerate(mious):
                     log_dict[f"{feat_type}/train_miou_t{t}"] = miou
                 log_dict[f"{feat_type}/train_miou_mean"] = sum(mious) / len(mious)
-                exp.log_curve(f"{feat_type}/train_miou_curve", x=list(range(cfg.n_timesteps)), y=mious, step=step)
+                exp.log_curve(
+                    f"{feat_type}/train_miou_curve",
+                    x=list(range(cfg.n_timesteps)),
+                    y=mious,
+                    step=step,
+                )
                 # Reset for next interval
                 for m in train_iou[feat_type]:
                     m.reset()
