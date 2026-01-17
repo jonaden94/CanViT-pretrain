@@ -292,6 +292,8 @@ def make_probe(name: str, dim: int, cfg: Config, device: torch.device) -> Probe:
 
 class ProbeCheckpoint(TypedDict):
     probe_state_dicts: dict[str, dict[str, Tensor]]
+    optimizer_state_dicts: dict[str, dict]
+    scheduler_state_dicts: dict[str, dict]
     best_mean_mious: dict[str, float]
     step: int
     config: dict
@@ -302,6 +304,12 @@ class ProbeCheckpoint(TypedDict):
 def save_probes(path: Path, probes: dict[str, Probe], step: int, cfg: Config) -> None:
     data: ProbeCheckpoint = {
         "probe_state_dicts": {n: p.head.state_dict() for n, p in probes.items()},
+        "optimizer_state_dicts": {
+            n: p.optimizer.state_dict() for n, p in probes.items()
+        },
+        "scheduler_state_dicts": {
+            n: p.scheduler.state_dict() for n, p in probes.items()
+        },
         "best_mean_mious": {n: p.best_mean_miou for n, p in probes.items()},
         "step": step,
         "config": asdict(cfg),
@@ -514,17 +522,46 @@ def main(cfg: Config) -> None:
     }
     log.info(f"  {len(probes)} probes: {list(probes.keys())}")
 
-    # Resume from checkpoint (weights only, LR restarts)
+    # Resume from checkpoint (weights + optimizer/scheduler if available)
+    start_step = 0
     if cfg.resume_from:
         log.info(f"Resuming from {cfg.resume_from}")
-        ckpt_data = torch.load(cfg.resume_from, map_location=device, weights_only=True)
+        ckpt_data = torch.load(cfg.resume_from, map_location=device, weights_only=False)
+        start_step = ckpt_data.get("step", 0)
+        log.info(f"  Checkpoint step: {start_step}")
         for name, probe in probes.items():
-            if name in ckpt_data["probe_state_dicts"]:
-                probe.head.load_state_dict(ckpt_data["probe_state_dicts"][name])
-                probe.best_mean_miou = ckpt_data["best_mean_mious"].get(name, 0.0)
-                log.info(f"  Loaded {name} (best mIoU: {probe.best_mean_miou:.4f})")
-            else:
+            if name not in ckpt_data["probe_state_dicts"]:
                 log.warning(f"  {name} not in checkpoint, starting fresh")
+                continue
+            probe.head.load_state_dict(ckpt_data["probe_state_dicts"][name])
+            probe.best_mean_miou = ckpt_data["best_mean_mious"].get(name, 0.0)
+            # Try loading optimizer state
+            if (
+                "optimizer_state_dicts" in ckpt_data
+                and name in ckpt_data["optimizer_state_dicts"]
+            ):
+                try:
+                    probe.optimizer.load_state_dict(
+                        ckpt_data["optimizer_state_dicts"][name]
+                    )
+                except Exception as e:
+                    log.warning(f"  {name} optimizer state mismatch, resetting: {e}")
+            else:
+                log.warning(f"  {name} no optimizer state in checkpoint")
+            # Try loading scheduler state
+            if (
+                "scheduler_state_dicts" in ckpt_data
+                and name in ckpt_data["scheduler_state_dicts"]
+            ):
+                try:
+                    probe.scheduler.load_state_dict(
+                        ckpt_data["scheduler_state_dicts"][name]
+                    )
+                except Exception as e:
+                    log.warning(f"  {name} scheduler state mismatch, resetting: {e}")
+            else:
+                log.warning(f"  {name} no scheduler state in checkpoint")
+            log.info(f"  Loaded {name} (best mIoU: {probe.best_mean_miou:.4f})")
 
     # Per-timestep IoU metrics for val
     val_iou: dict[str, list[MulticlassJaccardIndex]] = {
@@ -572,12 +609,12 @@ def main(cfg: Config) -> None:
     exp.log_parameters(exp_params)  # glimpse_grid, min_vp_scale, canvas_grid from ckpt
 
     log.info("=" * 60)
-    log.info("Starting training")
+    log.info(f"Starting training from step {start_step}")
     log.info("=" * 60)
 
-    step = 0
+    step = start_step
     train_iter = iter(train_loader)
-    pbar = tqdm(total=cfg.max_steps, desc="Training")
+    pbar = tqdm(total=cfg.max_steps, initial=start_step, desc="Training")
 
     while step < cfg.max_steps:
         try:
