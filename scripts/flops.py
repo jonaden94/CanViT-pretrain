@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import tyro
-from canvit import flops
+import canvit_flops as flops
 from canvit import create_backbone
 from rich.console import Console
 from rich.table import Table
