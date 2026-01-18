@@ -44,6 +44,7 @@ export FEATURES_DIR=~/projects/def-skrishna/dinov3_dense_features
 
 export DINOV3_VITB16_CKPT="$CHECKPOINTS_DIR/dinov3/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth"
 # export DINOV3_VITL16_CKPT="$CHECKPOINTS_DIR/dinov3/dinov3_vitl16_pretrain_....pth"
+export CANVIT_FLAGSHIP_CKPT="$CHECKPOINTS_DIR/CanViT-flagship.pt"
 
 # ==============================================================================
 # COMET

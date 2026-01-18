@@ -6,13 +6,13 @@ Usage:
 """
 
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
 import tyro
 from torch import Tensor
-from ytch.device import get_sensible_device
 from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 from tqdm import tqdm
@@ -28,21 +28,28 @@ from avp_vit.train.transforms import val_transform
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.probe import load_probe
 from avp_vit.train.viewpoint import make_eval_viewpoints
+from ytch.device import get_sensible_device
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
 
+def _default_val_dir() -> Path | None:
+    if v := os.environ.get("IN1K_VAL_DIR"):
+        return Path(v)
+    return None
+
+
 @dataclass
 class Config:
-    val_dir: Path
     checkpoint: Path
+    val_dir: Path | None = field(default_factory=_default_val_dir)
     batch_size: int = 64
     num_workers: int = 8
     device: torch.device = field(default_factory=get_sensible_device)
     canvas_grid: int = 32
     glimpse_grid: int = 8
-    n_viewpoints: int = 5
+    n_viewpoints: int = 10
     no_teacher: bool = False
 
 
@@ -98,6 +105,8 @@ def run_trajectory(
 
 @torch.inference_mode()
 def validate(cfg: Config) -> dict[str, float]:
+    if cfg.val_dir is None:
+        raise ValueError("--val-dir required (or set IN1K_VAL_DIR env var)")
     device = cfg.device
     log.info(f"Device: {device}")
 
