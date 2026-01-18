@@ -6,7 +6,6 @@ import signal
 import subprocess
 import traceback
 from datetime import datetime, timezone
-from collections.abc import Callable
 from contextlib import nullcontext
 from pathlib import Path
 from typing import NamedTuple
@@ -46,7 +45,7 @@ from .model import compile_model, compile_teacher, create_model, load_student_ba
 from .norm import PositionAwareNorm  # noqa: E402
 from .probe import load_probe  # noqa: E402
 from .scheduler import warmup_constant_scheduler  # noqa: E402
-from .step import TeacherTargets, training_step  # noqa: E402
+from .step import training_step  # noqa: E402
 from .viz import log_figure, plot_multistep_pca, validate  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -351,7 +350,6 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         n_tokens=1, embed_dim=teacher.embed_dim, grid_size=1,
     ).to(cfg.device)
 
-    any_glimpse_loss = cfg.enable_glimpse_patches_loss or cfg.enable_glimpse_cls_loss
 
     norm_loaded = False
     if ckpt_data is not None and not cfg.reset_normalizer:
@@ -395,16 +393,6 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         norm_patches = scene_norm(raw_patches)
         norm_cls = cls_norm(raw_cls.unsqueeze(1)).squeeze(1)
         return TrainBatch(images, labels, norm_patches, norm_cls, raw_patches, raw_cls)
-
-    # Glimpse targets: raw features (cosine similarity loss, no normalization)
-    if any_glimpse_loss:
-        def _compute_glimpse_targets(glimpse: Tensor) -> TeacherTargets:
-            with torch.no_grad():
-                feats = compute_raw_targets(glimpse, glimpse_size_px)
-            return TeacherTargets(patches=feats.patches, cls=feats.cls)
-        compute_glimpse_targets_fn: Callable[[Tensor], TeacherTargets] | None = _compute_glimpse_targets
-    else:
-        compute_glimpse_targets_fn = None
 
     # Step semantics: step S = model state after S gradient updates
     # step=0: before any gradient (initial model)
@@ -506,11 +494,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 raw_cls_target=batch.raw_cls_target,
                 scene_denorm=scene_norm.denormalize,
                 cls_denorm=cls_norm.denormalize,
-                compute_glimpse_targets=compute_glimpse_targets_fn,
                 enable_scene_patches_loss=cfg.enable_scene_patches_loss,
                 enable_scene_cls_loss=cfg.enable_scene_cls_loss,
-                enable_glimpse_patches_loss=cfg.enable_glimpse_patches_loss,
-                enable_glimpse_cls_loss=cfg.enable_glimpse_cls_loss,
                 scene_loss_type=cfg.scene_loss_type,
                 glimpse_size_px=glimpse_size_px,
                 canvas_grid_size=G,
@@ -542,10 +527,6 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                     ema.update(f"{prefix}/scene_patches_loss", m.scene_patches_loss)
                 if cfg.enable_scene_cls_loss:
                     ema.update(f"{prefix}/scene_cls_loss", m.scene_cls_loss)
-                if cfg.enable_glimpse_patches_loss:
-                    ema.update(f"{prefix}/glimpse_patches_loss", m.glimpse_patches_loss)
-                if cfg.enable_glimpse_cls_loss:
-                    ema.update(f"{prefix}/glimpse_cls_loss", m.glimpse_cls_loss)
                 ema.update(f"{prefix}/scene_cos_raw", m.scene_cos_raw)
                 ema.update(f"{prefix}/scene_cos_norm", m.scene_cos_norm)
                 ema.update(f"{prefix}/cls_cos_raw", m.cls_cos_raw)

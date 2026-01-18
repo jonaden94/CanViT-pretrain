@@ -69,7 +69,7 @@ ActiveCanViT (canvit/model/active/base.py)
   → forward_step, forward_reduce
 
 ActiveCanViTForReconstructivePretraining (canvit/model/active/pretraining/base.py)
-  → predict_teacher_scene, predict_scene_teacher_cls, predict_glimpse_*
+  → predict_teacher_scene, predict_scene_teacher_cls
 ```
 
 **RecurrentState** (passed between timesteps):

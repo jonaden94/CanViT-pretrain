@@ -20,19 +20,11 @@ from .viz.sample import VizSampleData, extract_sample0_viz
 from .viz.image import imagenet_denormalize
 
 
-class TeacherTargets(NamedTuple):
-    """Teacher features (patches + CLS). May be normalized or raw depending on use."""
-    patches: Tensor
-    cls: Tensor
-
-
 class LossOutput(NamedTuple):
     """Output from compute_loss - individual losses + combined mean."""
 
     scene_patches_loss: Tensor
     scene_cls_loss: Tensor
-    glimpse_patches_loss: Tensor
-    glimpse_cls_loss: Tensor
     combined: Tensor  # sum of active losses
     scene_pred: Tensor  # for cosine similarity metrics
     cls_pred: Tensor
@@ -44,8 +36,6 @@ class BranchMetrics(NamedTuple):
     loss: Tensor
     scene_patches_loss: Tensor
     scene_cls_loss: Tensor
-    glimpse_patches_loss: Tensor
-    glimpse_cls_loss: Tensor
     scene_cos_raw: Tensor
     scene_cos_norm: Tensor
     cls_cos_raw: Tensor
@@ -84,8 +74,6 @@ class ChunkState:
     total_combined_loss: Tensor  # detached
     total_scene_patches_loss: Tensor
     total_scene_cls_loss: Tensor
-    total_glimpse_patches_loss: Tensor
-    total_glimpse_cls_loss: Tensor
     n_steps: int
     scene_pred: Tensor
     cls_pred: Tensor
@@ -101,11 +89,8 @@ def training_step(
     raw_cls_target: Tensor,
     scene_denorm: Callable[[Tensor], Tensor],
     cls_denorm: Callable[[Tensor], Tensor],
-    compute_glimpse_targets: Callable[[Tensor], TeacherTargets] | None,
     enable_scene_patches_loss: bool,
     enable_scene_cls_loss: bool,
-    enable_glimpse_patches_loss: bool,
-    enable_glimpse_cls_loss: bool,
     scene_loss_type: LossType,
     glimpse_size_px: int,
     canvas_grid_size: int,
@@ -193,42 +178,23 @@ def training_step(
 
         scene_patches_loss = torch.zeros((), device=device)
         scene_cls_loss = torch.zeros((), device=device)
-        glimpse_patches_loss = torch.zeros((), device=device)
-        glimpse_cls_loss = torch.zeros((), device=device)
 
         if enable_scene_patches_loss:
             scene_patches_loss = reconstruction_loss(scene_pred, scene_target, scene_loss_type)
         if enable_scene_cls_loss:
             scene_cls_loss = reconstruction_loss(cls_pred, cls_target, scene_loss_type)
 
-        if compute_glimpse_targets is not None:
-            glimpse_targets = compute_glimpse_targets(out.glimpse)
-            if enable_glimpse_patches_loss:
-                glimpse_patches_pred = model.predict_glimpse_teacher_patches(out.local_patches)
-                cos_sim = F.cosine_similarity(glimpse_patches_pred, glimpse_targets.patches, dim=-1)
-                glimpse_patches_loss = 1 - cos_sim.mean()
-            if enable_glimpse_cls_loss:
-                glimpse_cls_pred = model.predict_glimpse_teacher_cls(out.ephemeral_cls)
-                cos_sim = F.cosine_similarity(glimpse_cls_pred, glimpse_targets.cls, dim=-1)
-                glimpse_cls_loss = 1 - cos_sim.mean()
-
         active: list[Tensor] = []
         if enable_scene_patches_loss:
             active.append(scene_patches_loss)
         if enable_scene_cls_loss:
             active.append(scene_cls_loss)
-        if enable_glimpse_patches_loss:
-            active.append(glimpse_patches_loss)
-        if enable_glimpse_cls_loss:
-            active.append(glimpse_cls_loss)
         assert len(active) > 0, "At least one loss must be enabled"
         combined = torch.stack(active).sum()
 
         return LossOutput(
             scene_patches_loss=scene_patches_loss,
             scene_cls_loss=scene_cls_loss,
-            glimpse_patches_loss=glimpse_patches_loss,
-            glimpse_cls_loss=glimpse_cls_loss,
             combined=combined,
             scene_pred=scene_pred,
             cls_pred=cls_pred,
@@ -270,8 +236,6 @@ def training_step(
             total_combined_loss=L.combined.detach().float(),
             total_scene_patches_loss=L.scene_patches_loss.detach().float(),
             total_scene_cls_loss=L.scene_cls_loss.detach().float(),
-            total_glimpse_patches_loss=L.glimpse_patches_loss.detach().float(),
-            total_glimpse_cls_loss=L.glimpse_cls_loss.detach().float(),
             n_steps=1,
             scene_pred=L.scene_pred,
             cls_pred=L.cls_pred,
@@ -297,8 +261,6 @@ def training_step(
             chunk.total_combined_loss = chunk.total_combined_loss + L.combined.detach().float()
             chunk.total_scene_patches_loss = chunk.total_scene_patches_loss + L.scene_patches_loss.detach().float()
             chunk.total_scene_cls_loss = chunk.total_scene_cls_loss + L.scene_cls_loss.detach().float()
-            chunk.total_glimpse_patches_loss = chunk.total_glimpse_patches_loss + L.glimpse_patches_loss.detach().float()
-            chunk.total_glimpse_cls_loss = chunk.total_glimpse_cls_loss + L.glimpse_cls_loss.detach().float()
             chunk.scene_pred, chunk.cls_pred = L.scene_pred, L.cls_pred
             chunk.n_steps += 1
 
@@ -330,8 +292,6 @@ def training_step(
             loss=chunk.total_combined_loss / n,
             scene_patches_loss=chunk.total_scene_patches_loss / n,
             scene_cls_loss=chunk.total_scene_cls_loss / n,
-            glimpse_patches_loss=chunk.total_glimpse_patches_loss / n,
-            glimpse_cls_loss=chunk.total_glimpse_cls_loss / n,
             scene_cos_raw=F.cosine_similarity(scene_pred_raw, raw_scene_target, dim=-1).mean(),
             scene_cos_norm=F.cosine_similarity(chunk.scene_pred, scene_target, dim=-1).mean(),
             cls_cos_raw=F.cosine_similarity(cls_pred_raw, raw_cls_target, dim=-1).mean(),
@@ -355,8 +315,6 @@ def training_step(
             loss=torch.stack([m.loss for m in metrics]).mean(),
             scene_patches_loss=torch.stack([m.scene_patches_loss for m in metrics]).mean(),
             scene_cls_loss=torch.stack([m.scene_cls_loss for m in metrics]).mean(),
-            glimpse_patches_loss=torch.stack([m.glimpse_patches_loss for m in metrics]).mean(),
-            glimpse_cls_loss=torch.stack([m.glimpse_cls_loss for m in metrics]).mean(),
             scene_cos_raw=torch.stack([m.scene_cos_raw for m in metrics]).mean(),
             scene_cos_norm=torch.stack([m.scene_cos_norm for m in metrics]).mean(),
             cls_cos_raw=torch.stack([m.cls_cos_raw for m in metrics]).mean(),
