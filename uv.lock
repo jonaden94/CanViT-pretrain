@@ -154,7 +154,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "albumentations", specifier = ">=2.0.8" },
-    { name = "canvit", git = "ssh://git@github.com/m2b3/CanViT.git?branch=careful-simplifications" },
+    { name = "canvit", git = "ssh://git@github.com/m2b3/CanViT.git?branch=main" },
     { name = "comet-ml", specifier = ">=3.55.0" },
     { name = "dacite", specifier = ">=1.9.2" },
     { name = "dinov3", git = "https://github.com/yberreby/dinov3.git" },
@@ -220,7 +220,7 @@ wheels = [
 [[package]]
 name = "canvit"
 version = "0.1.0"
-source = { git = "ssh://git@github.com/m2b3/CanViT.git?branch=careful-simplifications#2fe58463f539b4c2b2110b61ac345f7014ce1a21" }
+source = { git = "ssh://git@github.com/m2b3/CanViT.git?branch=main#82a5b180235c9c0ae93095e7c9429d88bd4379f0" }
 dependencies = [
     { name = "dinov3" },
     { name = "matplotlib" },
