@@ -8,8 +8,8 @@ import comet_ml
 import numpy as np
 import torch
 import torch.nn.functional as F
+from canvit import CanViTOutput, RecurrentState, sample_at_viewpoint
 from canvit.backbone.dinov3 import DINOv3Backbone, NormFeatures
-from canvit.model.active.base import GlimpseOutput
 from canvit.policy import PolicyHead
 from canvit.viewpoint import Viewpoint as CanvitViewpoint
 from torch import Tensor
@@ -18,7 +18,7 @@ from dinov3_probes import DINOv3LinearClassificationHead
 
 from ytch.correctness import assert_shape
 
-from avp_vit import ActiveCanViT, RecurrentState
+from avp_vit import CanViTForPretraining
 from ..norm import PositionAwareNorm
 from ..probe import (
     compute_in1k_top1,
@@ -152,7 +152,7 @@ def _log_policy_viz(
     exp: comet_ml.CometExperiment,
     step: int,
     prefix: str,
-    model: "ActiveCanViT",
+    model: "CanViTForPretraining",
     images: Tensor,
     canvas_grid_size: int,
     glimpse_size_px: int,
@@ -166,12 +166,8 @@ def _log_policy_viz(
 
     # Full scene context
     vp_full = Viewpoint.full_scene(batch_size=B, device=images.device)
-    out_full = model.forward_step(
-        image=images,
-        state=state_init,
-        viewpoint=vp_full,
-        glimpse_size_px=glimpse_size_px,
-    )
+    glimpse_full = sample_at_viewpoint(spatial=images, viewpoint=vp_full, glimpse_size_px=glimpse_size_px)
+    out_full = model.forward(glimpse=glimpse_full, state=state_init, viewpoint=vp_full)
     assert out_full.vpe is not None
     preds_full = model.policy(out_full.vpe)
 
@@ -179,12 +175,8 @@ def _log_policy_viz(
     vp_rand = Viewpoint.random(
         batch_size=B, device=images.device, min_scale=min_viewpoint_scale
     )
-    out_rand = model.forward_step(
-        image=images,
-        state=state_init,
-        viewpoint=vp_rand,
-        glimpse_size_px=glimpse_size_px,
-    )
+    glimpse_rand = sample_at_viewpoint(spatial=images, viewpoint=vp_rand, glimpse_size_px=glimpse_size_px)
+    out_rand = model.forward(glimpse=glimpse_rand, state=state_init, viewpoint=vp_rand)
     assert out_rand.vpe is not None
     preds_rand = model.policy(out_rand.vpe)
 
@@ -200,7 +192,7 @@ def _log_policy_viz(
 
 def _validate_policy_rollout(
     *,
-    model: "ActiveCanViT",
+    model: "CanViTForPretraining",
     images: Tensor,
     canvas_grid_size: int,
     glimpse_size_px: int,
@@ -236,16 +228,12 @@ def _validate_policy_rollout(
     for t in range(n_steps):
         viewpoints.append(vp)
 
-        out = model.forward_step(
-            image=images,
-            state=state,
-            viewpoint=vp,
-            glimpse_size_px=glimpse_size_px,
-        )
+        glimpse = sample_at_viewpoint(spatial=images, viewpoint=vp, glimpse_size_px=glimpse_size_px)
+        out = model.forward(glimpse=glimpse, state=state, viewpoint=vp)
         state = out.state
 
         # Compute IN1K accuracy
-        predicted_cls = model.predict_scene_teacher_cls(state.recurrent_cls, state.canvas)
+        predicted_cls = model.predict_scene_teacher_cls(state.recurrent_cls)
         cls_raw = cls_normalizer.denormalize(predicted_cls)
         logits = probe(cls_raw)
         accs.append(compute_in1k_top1(logits, labels))
@@ -253,7 +241,7 @@ def _validate_policy_rollout(
         # Collect viz sample
         if collect_viz:
             predicted_scene = model.predict_teacher_scene(state.canvas)
-            viz_samples.append(extract_sample0_viz(out, predicted_scene, model))
+            viz_samples.append(extract_sample0_viz(out, glimpse, predicted_scene, model))
 
         # Policy predicts next viewpoint (except at last step)
         if t < n_steps - 1:
@@ -318,7 +306,7 @@ def validate(
     *,
     exp: comet_ml.CometExperiment,
     step: int,
-    model: ActiveCanViT,
+    model: CanViTForPretraining,
     compute_raw_targets: Callable[[Tensor, int], "NormFeatures"],
     scene_normalizer: PositionAwareNorm,
     cls_normalizer: PositionAwareNorm,
@@ -393,11 +381,11 @@ def validate(
                 return acc
 
             def step_fn(
-                acc: ValAccumulator, out: GlimpseOutput, _vp: CanvitViewpoint
+                acc: ValAccumulator, out: CanViTOutput, _vp: CanvitViewpoint, glimpse: Tensor
             ) -> ValAccumulator:
                 predicted_scene = model.predict_teacher_scene(out.state.canvas)
                 predicted_cls = (
-                    model.predict_scene_teacher_cls(out.state.recurrent_cls, out.state.canvas) if has_cls else None
+                    model.predict_scene_teacher_cls(out.state.recurrent_cls) if has_cls else None
                 )
 
                 # Cosine similarity: both raw (stable across runs) and normalized
@@ -425,7 +413,7 @@ def validate(
                             )
 
                 if log_pca:
-                    acc.viz_samples.append(extract_sample0_viz(out, predicted_scene, model))
+                    acc.viz_samples.append(extract_sample0_viz(out, glimpse, predicted_scene, model))
 
                 return acc
 

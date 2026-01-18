@@ -6,8 +6,7 @@ from pathlib import Path
 import torch
 from ytch.device import get_sensible_device
 
-from avp_vit import ActiveCanViTConfig
-from .loss import LossType
+from avp_vit import CanViTForPretrainingConfig
 
 
 @dataclass
@@ -20,8 +19,8 @@ class Config:
     student_ckpt: Path | None = None  # None = random init
     # Model config (PretrainingConfig via alias)
     # teacher_dim placeholder - overridden by create_model based on actual teacher
-    model: ActiveCanViTConfig = field(
-        default_factory=lambda: ActiveCanViTConfig(teacher_dim=768)
+    model: CanViTForPretrainingConfig = field(
+        default_factory=lambda: CanViTForPretrainingConfig(teacher_dim=768)
     )
     # Glimpse/canvas sizes (runtime, not in model config)
     glimpse_grid_size: int = 8  # tokens per glimpse side
@@ -49,9 +48,6 @@ class Config:
     enable_policy: bool = False  # Enable policy branch (t=1 POLICY viewpoint type)
     enable_scene_patches_loss: bool = True  # Scene (canvas) patch reconstruction loss
     enable_scene_cls_loss: bool = True  # Scene (global) CLS reconstruction loss
-    enable_glimpse_patches_loss: bool = False  # Glimpse patch reconstruction loss
-    enable_glimpse_cls_loss: bool = False  # Glimpse CLS reconstruction loss
-    scene_loss_type: LossType = LossType.MSE  # MSE or COSINE for scene losses
     ema_alpha: float = 0.1  # EMA smoothing for metrics
     grad_clip: float = 1.0
     policy_grad_clip: float = 1.0  # Separate clip for policy (applied first)
@@ -68,13 +64,17 @@ class Config:
     feature_base_dir: Path | None = None
     feature_image_root: Path | None = None  # Required with feature_base_dir
     # Run identification and checkpointing
-    run_name: str | None = None  # Auto-generated if None: YYYY-MM-DD_HH-MM
+    run_name: str | None = None
+    """Run name. Auto-generated from SLURM_ARRAY_JOB_ID or timestamp if None."""
     ckpt_dir: Path = Path("checkpoints")
-    resume_ckpt: Path | None = None  # Explicit checkpoint override (ignores run_name)
-    force_new_experiment: bool = False  # Force new Comet experiment instead of continuing
-    reset_policy: bool = False  # Reinitialize policy weights when resuming
-    reset_opt_and_sched: bool = False  # Reset optimizer and scheduler on resume
-    reset_normalizer: bool = False  # Re-warmup normalizer stats when resuming
+    """Directory for checkpoint storage. Run checkpoints go in {ckpt_dir}/{run_name}/."""
+    seed_ckpt: Path | None = None
+    """Seed model weights from external checkpoint. Starts fresh (new experiment, step=0).
+    Only used if no checkpoint exists in run_dir. For forking runs with different config."""
+    reset_policy: bool = False
+    """Reinitialize policy weights when loading any checkpoint."""
+    reset_normalizer: bool = False
+    """Re-warmup normalizer stats when loading any checkpoint."""
     # Training
     num_workers: int = 16
     crop_scale_min: float = 0.8

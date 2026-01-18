@@ -1,29 +1,32 @@
 #!/usr/bin/env python3
-"""Train ADE20K segmentation probes on AVP and/or teacher features.
+"""Train ADE20K segmentation probes on AVP features.
 
-Frozen probes: backbone frozen, only probe head trained.
-Finetune probes: backbone gradients enabled (separate model copy).
+ONE probe per feature type with SHARED weights across timesteps (anytime decoding).
+Training: loss averaged across timesteps, single backward pass.
+Eval: mIoU computed per timestep → logged as curves.
 
-All probes enabled by default. Single-pass validation for efficiency.
+Same policy (t=0 full, t>0 random) in train and val.
 """
 
 import logging
-from contextlib import nullcontext
+import os
+import tempfile
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict
 
 import albumentations as A
 import comet_ml
 import dacite
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tyro
 from canvit.backbone.dinov3 import DINOv3Backbone
-from canvit.hub import create_backbone
-from canvit.viewpoint import Viewpoint
+from canvit import create_backbone
 from PIL import Image
 from torch import Tensor
 from torch.optim import AdamW
@@ -32,53 +35,38 @@ from torch.utils.data import DataLoader, Dataset
 from torchmetrics.classification import MulticlassJaccardIndex
 from tqdm import tqdm
 
-from avp_vit import ActiveCanViT, ActiveCanViTConfig
+from avp_vit import CanViTForPretraining, CanViTForPretrainingConfig
 from avp_vit.checkpoint import load as load_ckpt
-from avp_vit.train.norm import PositionAwareNorm
+from avp_vit.train.config import Config as TrainConfig
+from avp_vit.train.viewpoint import Viewpoint
+from canvit.viewpoint import sample_at_viewpoint
+from avp_vit.train.viz import fit_pca, pca_rgb, imagenet_denormalize
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-# === Constants ===
 NUM_CLASSES = 150
 IGNORE_LABEL = 255
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406])
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225])
 
-FeatureType = Literal[
-    "hidden", "predicted_norm", "predicted_denorm", "teacher_full", "teacher_glimpse"
-]
-ABBREV = {
-    "hidden": "hid",
-    "predicted_norm": "prd_n",
-    "predicted_denorm": "prd_d",
-    "teacher_full": "tch_f",
-    "teacher_glimpse": "tch_g",
-}
+FeatureType = Literal["hidden", "predicted_norm", "teacher_glimpse"]
+STATIC_FEATURES: set[FeatureType] = {"teacher_glimpse"}
 
 
-# === Config ===
 @dataclass
 class Config:
     avp_ckpt: Path
     ade20k_root: Path = Path("/datasets/ADE20k/ADEChallengeData2016")
+    teacher_ckpt: Path | None = None
 
-    # Which feature types to train probes on
-    frozen_features: list[FeatureType] = field(
-        default_factory=lambda: [
-            "hidden",
-            "predicted_norm",
-            "predicted_denorm",
-            "teacher_full",
-            "teacher_glimpse",
-        ]
+    features: list[FeatureType] = field(
+        default_factory=lambda: ["hidden", "predicted_norm", "teacher_glimpse"]
     )
-    finetune_features: list[FeatureType] = field(default_factory=lambda: ["hidden"])
+    n_timesteps: int = 5
 
     image_size: int = 512
-    batch_size: int = 128
+    batch_size: int = 64
     eval_batch_size: int = 32
     num_workers: int = 4
 
@@ -86,134 +74,127 @@ class Config:
     min_lr: float = 1e-7
     weight_decay: float = 1e-4
     warmup_ratio: float = 0.1
-    max_steps: int = 20_000
+    max_steps: int = 5000
     grad_clip: float = 1.0
+    focal_gamma: float = 2.0
 
-    log_every: int = 10
-    val_every: int = 200
-    boundary_width: int = 3  # pixels from class boundary for boundary mIoU
+    log_every: int = 20
+    val_every: int = 500
+    viz_every: int = 500
+    viz_samples: int = 4
 
     comet_project: str = "avp-ade20k-probe"
     comet_workspace: str = "m2b3-ava"
     device: str | None = None
     amp: bool = True
-    resume_ckpt: Path | None = None  # resume from combined checkpoint
-
-
-# === Loss ===
-FOCAL_GAMMA = 2.0
-
-
-def get_boundary_mask(masks: Tensor, width: int, ignore_label: int = IGNORE_LABEL) -> Tensor:
-    """Bool tensor: True for pixels within `width` of class boundary. Fully vectorized."""
-    B, H, W = masks.shape
-    valid = (masks != ignore_label).unsqueeze(1).float()  # (B, 1, H, W)
-    m = masks.unsqueeze(1).float()  # (B, 1, H, W)
-
-    # Pad and unfold to get 3x3 neighborhoods
-    m_padded = F.pad(m, (1, 1, 1, 1), mode='replicate')
-    valid_padded = F.pad(valid, (1, 1, 1, 1), mode='constant', value=0)
-
-    # (B, 9, H, W) - 3x3 patches centered at each pixel
-    patches = F.unfold(m_padded, 3).view(B, 9, H, W)
-    valid_patches = F.unfold(valid_padded, 3).view(B, 9, H, W)
-
-    center = patches[:, 4:5]  # center of 3x3
-    center_valid = valid_patches[:, 4:5]
-
-    # Edge: any valid neighbor differs from valid center
-    differs = (patches != center) & (valid_patches > 0) & (center_valid > 0)
-    edges = differs.any(dim=1, keepdim=True).float()  # (B, 1, H, W)
-
-    # Dilate by `width`
-    if width > 0:
-        kernel = 2 * width + 1
-        edges = F.max_pool2d(edges, kernel, stride=1, padding=width)
-
-    return (edges.squeeze(1) > 0) & (valid.squeeze(1) > 0)
-
-
-def implicit_upsample_focal(logits: Tensor, masks: Tensor, scale: int) -> Tensor:
-    """Focal loss with implicit nearest-neighbor upsampling. ~95x memory reduction."""
-    B, C, h, w = logits.shape
-    log_probs = F.log_softmax(logits, dim=1).permute(0, 2, 3, 1).reshape(-1, C)
-    probs = log_probs.exp()
-    mask_patches = (
-        masks.reshape(B, h, scale, w, scale)
-        .permute(0, 1, 3, 2, 4)
-        .reshape(-1, scale * scale)
-    )
-    valid = mask_patches != IGNORE_LABEL
-    targets = mask_patches.clamp(0, C - 1).long()
-    log_p = log_probs.gather(1, targets)
-    p = probs.gather(1, targets)
-    focal_weight = (1 - p) ** FOCAL_GAMMA
-    return -(focal_weight * log_p * valid).sum() / valid.sum().clamp(min=1)
-
-
-# === Probe head ===
-def save_checkpoint(
-    path: str | Path,
-    step: int,
-    probes: list["Probe"],
-    ft_model: "ActiveCanViT | None",
-) -> None:
-    """Save combined checkpoint with all probe states."""
-    path = Path(path)
-    probe_states = {}
-    for p in probes:
-        probe_states[p.name] = {
-            "head": p.head.state_dict(),
-            "optimizer": p.optimizer.state_dict(),
-            "scheduler": p.scheduler.state_dict(),
-            "best_miou": p.best_miou,
-        }
-    save_dict: dict[str, object] = {"step": step, "probes": probe_states}
-    if ft_model is not None:
-        save_dict["ft_model"] = ft_model.state_dict()
-    torch.save(save_dict, path)
-    log.info(f"Saved checkpoint to {path} (step {step}, {path.stat().st_size / 1e6:.1f}MB)")
+    probe_ckpt_dir: Path | None = None
+    resume_from: Path | None = None  # Load probe weights (restarts LR schedule)
 
 
 class ProbeHead(nn.Module):
-    """LN + linear."""
-
     def __init__(self, embed_dim: int) -> None:
         super().__init__()
+        self.embed_dim = embed_dim
         self.ln = nn.LayerNorm(embed_dim)
         self.linear = nn.Linear(embed_dim, NUM_CLASSES)
 
     def forward(self, x: Tensor) -> Tensor:
-        # x: (B, H, W, D) -> (B, C, H, W)
+        assert x.ndim == 4, f"Expected [B,H,W,D], got {x.shape}"
         return self.linear(self.ln(x)).permute(0, 3, 1, 2)
 
 
-# === Dataset ===
-def make_train_transform(size: int) -> A.Compose:
-    """Random crop + flip. Images are loaded at 2x size, cropped to target."""
-    return A.Compose(
-        [
-            A.HorizontalFlip(p=0.5),
-            A.RandomCrop(size, size),
-        ]
+@dataclass
+class Probe:
+    name: str
+    head: ProbeHead
+    optimizer: AdamW
+    scheduler: SequentialLR
+    best_mean_miou: float = 0.0
+    # Accumulators - NO .item() until log time
+    _loss_sum: Tensor | None = None
+    _grad_norm_sum: Tensor | None = None
+    _count: int = 0
+
+    def accumulate(self, loss: Tensor, grad_norm: Tensor) -> None:
+        """Accumulate loss/grad_norm tensors. NO GPU SYNC."""
+        if self._loss_sum is None:
+            self._loss_sum = loss.detach().clone()
+            self._grad_norm_sum = grad_norm.detach().clone()
+        else:
+            self._loss_sum += loss.detach()
+            assert self._grad_norm_sum is not None
+            self._grad_norm_sum += grad_norm.detach()
+        self._count += 1
+
+    def get_and_reset_stats(self) -> tuple[float, float]:
+        """Get averaged stats and reset. SYNCS HERE (at log intervals only)."""
+        assert self._loss_sum is not None and self._grad_norm_sum is not None
+        avg_loss = (self._loss_sum / self._count).item()
+        avg_grad = (self._grad_norm_sum / self._count).item()
+        self._loss_sum = None
+        self._grad_norm_sum = None
+        self._count = 0
+        return avg_loss, avg_grad
+
+
+# Per-timestep features: {feature_type: [feat_t0, feat_t1, ...]}
+PerTimestepFeatures = dict[FeatureType, list[Tensor]]
+
+
+def upsample_preds(preds: Tensor, target_h: int, target_w: int) -> Tensor:
+    """Upsample predictions (post-argmax) to mask resolution for fair mIoU."""
+    if preds.shape[1:] == (target_h, target_w):
+        return preds
+    return (
+        F.interpolate(preds.unsqueeze(1).float(), (target_h, target_w), mode="nearest")
+        .squeeze(1)
+        .long()
     )
 
 
-class ADE20kDataset(Dataset):
+def downsample_masks(masks: Tensor, target_h: int, target_w: int) -> Tensor:
+    """Downsample masks using nearest neighbor (for focal loss only)."""
+    if masks.shape[1:] == (target_h, target_w):
+        return masks
+    return (
+        F.interpolate(masks.unsqueeze(1).float(), (target_h, target_w), mode="nearest")
+        .squeeze(1)
+        .long()
+    )
+
+
+def focal_loss(logits: Tensor, masks: Tensor, gamma: float) -> Tensor:
+    """Focal loss. Downsamples masks to logits resolution."""
+    B, C, Hl, Wl = logits.shape
+    masks = downsample_masks(masks, Hl, Wl)
+    log_probs = F.log_softmax(logits, dim=1)
+    probs = log_probs.exp()
+    valid = masks != IGNORE_LABEL
+    targets = masks.clamp(0, C - 1)
+    log_p = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+    p = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+    return -((1 - p) ** gamma * log_p * valid).sum() / valid.sum().clamp(min=1)
+
+
+class ADE20kDataset(Dataset[tuple[Tensor, Tensor]]):
     def __init__(
         self, root: Path, split: str, size: int, augment: bool = False
     ) -> None:
         self.size = size
-        # Load at 2x for training (random crop = zoom in only), 1x for val
         self.load_size = size * 2 if augment else size
-        self.transform = make_train_transform(size) if augment else None
+        self.transform = (
+            A.Compose([A.HorizontalFlip(p=0.5), A.RandomCrop(size, size)])
+            if augment
+            else None
+        )
         img_dir = root / "images" / split
         ann_dir = root / "annotations" / split
         self.imgs = sorted(img_dir.glob("*.jpg"))
         self.anns = [ann_dir / (p.stem + ".png") for p in self.imgs]
-        log.info(
-            f"ADE20k {split}: {len(self)} images, load@{self.load_size} -> {size}, augment={augment}"
+        assert len(self.imgs) > 0, (
+            f"No images in {img_dir.resolve()} (root={root.resolve()})"
         )
+        log.info(f"ADE20k {split}: {len(self)} images")
 
     def __len__(self) -> int:
         return len(self.imgs)
@@ -229,554 +210,384 @@ class ADE20kDataset(Dataset):
                 (self.load_size, self.load_size), Image.Resampling.NEAREST
             )
         )
-
         if self.transform:
             out = self.transform(image=img, mask=mask)
             img, mask = out["image"], out["mask"]
-
         img_t = torch.from_numpy(img).float().permute(2, 0, 1) / 255.0
         img_t = (img_t - IMAGENET_MEAN.view(3, 1, 1)) / IMAGENET_STD.view(3, 1, 1)
-
         mask_t = torch.from_numpy(mask.astype(np.int64))
-        # Remap: 0 (background) and 255 (padding) → IGNORE_LABEL, classes 1-150 → 0-149
-        valid_class = (mask_t >= 1) & (mask_t <= 150)
-        mask_t = torch.where(valid_class, mask_t - 1, IGNORE_LABEL)
-        return img_t, mask_t
+        valid = (mask_t >= 1) & (mask_t <= 150)
+        return img_t, torch.where(valid, mask_t - 1, IGNORE_LABEL)
 
 
-# === Probe state ===
-@dataclass
-class Probe:
-    name: str
-    feature: FeatureType
-    finetune: bool
-    head: ProbeHead
-    optimizer: AdamW
-    scheduler: SequentialLR
-    loss_sum: Tensor | None = None
-    loss_count: int = 0
-    best_miou: float = 0.0
+def extract_features(
+    model: CanViTForPretraining,
+    teacher: DINOv3Backbone,
+    images: Tensor,
+    n_timesteps: int,
+    canvas_grid: int,
+    glimpse_grid: int,
+    glimpse_px: int,
+    device: torch.device,
+    min_vp_scale: float,
+) -> PerTimestepFeatures:
+    """Extract per-timestep features. Returns {feat_type: [t0, t1, ...]}."""
+    B, C, H, W = images.shape
+    assert C == 3 and H == W, f"Expected square RGB images, got {images.shape}"
 
-    def accumulate_loss(self, loss: Tensor) -> None:
-        if self.loss_sum is None:
-            self.loss_sum = loss.detach()
+    feats: PerTimestepFeatures = {
+        "hidden": [],
+        "predicted_norm": [],
+        "teacher_glimpse": [],
+    }
+    state = model.init_state(batch_size=B, canvas_grid_size=canvas_grid)
+
+    # Teacher glimpse baseline (static, same at all timesteps)
+    sz = glimpse_grid * teacher.patch_size_px
+    small = F.interpolate(images, size=(sz, sz), mode="bilinear", align_corners=False)
+    teacher_glimpse_feat = teacher.forward_norm_features(small).patches.view(
+        B, glimpse_grid, glimpse_grid, -1
+    )
+    assert teacher_glimpse_feat.shape == (
+        B,
+        glimpse_grid,
+        glimpse_grid,
+        teacher.embed_dim,
+    )
+
+    for t in range(n_timesteps):
+        if t == 0:
+            vp = Viewpoint.full_scene(batch_size=B, device=device)
         else:
-            self.loss_sum = self.loss_sum + loss.detach()
-        self.loss_count += 1
-
-    def get_and_reset_loss(self) -> float | None:
-        if self.loss_count == 0 or self.loss_sum is None:
-            return None
-        avg = (self.loss_sum / self.loss_count).item()
-        self.loss_sum = None
-        self.loss_count = 0
-        return avg
-
-
-# === Feature extraction ===
-class FeatureExtractor:
-    def __init__(
-        self,
-        model: ActiveCanViT,
-        scene_norm: PositionAwareNorm | None,
-        teacher: DINOv3Backbone | None,
-        canvas_grid: int,
-        glimpse_grid: int,
-        glimpse_px: int,
-        teacher_patch_size: int,
-        device: torch.device,
-    ):
-        self.model = model
-        self.scene_norm = scene_norm
-        self.teacher = teacher
-        self.canvas_grid = canvas_grid
-        self.glimpse_grid = glimpse_grid
-        self.glimpse_px = glimpse_px
-        self.teacher_patch_size = teacher_patch_size
-        self.device = device
-
-    def extract(
-        self, images: Tensor, features: set[FeatureType], with_grad: bool
-    ) -> dict[FeatureType, Tensor]:
-        B = images.shape[0]
-        result: dict[FeatureType, Tensor] = {}
-        ctx = torch.enable_grad() if with_grad else torch.no_grad()
-
-        avp_features = {"hidden", "predicted_norm", "predicted_denorm"}
-        if features & avp_features:
-            with ctx:
-                state = self.model.init_state(
-                    batch_size=B, canvas_grid_size=self.canvas_grid
-                )
-                vp = Viewpoint(
-                    torch.zeros(B, 2, device=self.device),
-                    torch.ones(B, device=self.device),
-                )
-                out = self.model.forward_step(
-                    image=images,
-                    state=state,
-                    viewpoint=vp,
-                    glimpse_size_px=self.glimpse_px,
-                )
-
-                if "hidden" in features:
-                    result["hidden"] = self.model.get_spatial(out.state.canvas).view(
-                        B, self.canvas_grid, self.canvas_grid, -1
-                    )
-                if "predicted_norm" in features or "predicted_denorm" in features:
-                    pred = self.model.predict_teacher_scene(out.state.canvas)
-                    if "predicted_norm" in features:
-                        result["predicted_norm"] = pred.view(
-                            B, self.canvas_grid, self.canvas_grid, -1
-                        )
-                    if "predicted_denorm" in features:
-                        denorm = (
-                            self.scene_norm.denormalize(pred)
-                            if self.scene_norm
-                            else pred
-                        )
-                        result["predicted_denorm"] = denorm.view(
-                            B, self.canvas_grid, self.canvas_grid, -1
-                        )
-
-        if self.teacher is not None:
-            with (
-                torch.no_grad()
-            ):  # not inference_mode - tensors must be usable by probe heads
-                if "teacher_full" in features:
-                    feats = self.teacher.forward_norm_features(images)
-                    result["teacher_full"] = feats.patches.view(
-                        B, self.canvas_grid, self.canvas_grid, -1
-                    )
-                if "teacher_glimpse" in features:
-                    sz = self.glimpse_grid * self.teacher_patch_size
-                    small = F.interpolate(
-                        images, (sz, sz), mode="bilinear", align_corners=False
-                    )
-                    feats = self.teacher.forward_norm_features(small)
-                    result["teacher_glimpse"] = feats.patches.view(
-                        B, self.glimpse_grid, self.glimpse_grid, -1
-                    )
-
-        return result
-
-
-# === Training ===
-class ProbeTrainer:
-    def __init__(
-        self,
-        probes: list[Probe],
-        frozen_ext: FeatureExtractor,
-        ft_ext: FeatureExtractor | None,
-        ft_model: ActiveCanViT | None,
-        device: torch.device,
-        grad_clip: float,
-        amp_ctx: torch.autocast | nullcontext,
-        boundary_width: int = 3,
-    ):
-        self.probes = probes
-        self.frozen_ext = frozen_ext
-        self.ft_ext = ft_ext
-        self.ft_model = ft_model
-        self.device = device
-        self.grad_clip = grad_clip
-        self.amp_ctx = amp_ctx
-        self.boundary_width = boundary_width
-        self.frozen_probes = [p for p in probes if not p.finetune]
-        self.ft_probes = [p for p in probes if p.finetune]
-
-    def train_step(self, images: Tensor, masks: Tensor) -> dict[str, Tensor]:
-        H_mask = masks.shape[1]
-        grad_norms: dict[str, Tensor] = {}
-
-        # Frozen probes
-        frozen_features: set[FeatureType] = {p.feature for p in self.frozen_probes}
-        if frozen_features:
-            with self.amp_ctx:
-                feats = self.frozen_ext.extract(images, frozen_features, with_grad=False)
-            for p in self.frozen_probes:
-                feat = feats[p.feature]
-                scale = H_mask // feat.shape[1]
-                p.head.train()
-                p.optimizer.zero_grad()
-                with self.amp_ctx:
-                    loss = implicit_upsample_focal(p.head(feat.detach()), masks, scale)
-                loss.backward()
-                grad_norms[p.name] = nn.utils.clip_grad_norm_(
-                    p.head.parameters(), self.grad_clip
-                ).detach()
-                p.optimizer.step()
-                p.scheduler.step()
-                p.accumulate_loss(loss)
-
-        # Finetune probes
-        if self.ft_ext is not None and self.ft_model is not None:
-            for p in self.ft_probes:
-                p.head.train()
-                p.optimizer.zero_grad()
-                with self.amp_ctx:
-                    feat = self.ft_ext.extract(images, {p.feature}, with_grad=True)[
-                        p.feature
-                    ]
-                    scale = H_mask // feat.shape[1]
-                    loss = implicit_upsample_focal(p.head(feat), masks, scale)
-                loss.backward()
-                params = list(self.ft_model.parameters()) + list(p.head.parameters())
-                grad_norms[p.name] = nn.utils.clip_grad_norm_(
-                    params, self.grad_clip
-                ).detach()
-                p.optimizer.step()
-                p.scheduler.step()
-                p.accumulate_loss(loss)
-
-        return grad_norms
-
-    @torch.no_grad()
-    def validate(self, loader: DataLoader) -> dict[str, float]:
-        for p in self.probes:
-            p.head.eval()
-
-        ious = {
-            p.name: MulticlassJaccardIndex(
-                NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro"
-            ).to(self.device)
-            for p in self.probes
-        }
-        boundary_ious = {
-            p.name: MulticlassJaccardIndex(
-                NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro"
-            ).to(self.device)
-            for p in self.probes
-        }
-        losses = {p.name: 0.0 for p in self.probes}
-
-        # Cross-eval: teacher_full probe on predicted features
-        teacher_full_probe = next(
-            (p for p in self.probes if p.name == "teacher_full"), None
-        )
-        cross_features: list[FeatureType] = (
-            ["predicted_norm", "predicted_denorm"] if teacher_full_probe else []
-        )
-        cross_ious = {
-            f: MulticlassJaccardIndex(
-                NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro"
-            ).to(self.device)
-            for f in cross_features
-        }
-        cross_boundary_ious = {
-            f: MulticlassJaccardIndex(
-                NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro"
-            ).to(self.device)
-            for f in cross_features
-        }
-        cross_losses = {f: 0.0 for f in cross_features}
-
-        # Precompute feature sets (avoid recomputing per batch)
-        frozen_feature_set: set[FeatureType] = {
-            *(p.feature for p in self.frozen_probes),
-            *cross_features,
-        }
-        ft_feature_set: set[FeatureType] = {p.feature for p in self.ft_probes}
-
-        n = 0
-        for images, masks in loader:
-            images, masks = images.to(self.device), masks.to(self.device)
-            B, H_mask = images.shape[0], masks.shape[1]
-
-            # Boundary mask for this batch (torch.where avoids clone + indexed assign)
-            boundary = get_boundary_mask(masks, self.boundary_width)
-            masks_boundary = torch.where(boundary, masks, IGNORE_LABEL)
-
-            with self.amp_ctx:
-                frozen_feats = (
-                    self.frozen_ext.extract(images, frozen_feature_set, with_grad=False)
-                    if frozen_feature_set
-                    else {}
-                )
-
-                ft_feats: dict[FeatureType, Tensor] = {}
-                if self.ft_ext is not None and ft_feature_set:
-                    ft_feats = self.ft_ext.extract(images, ft_feature_set, with_grad=False)
-
-                for p in self.probes:
-                    feat = (
-                        ft_feats.get(p.feature)
-                        if p.finetune
-                        else frozen_feats.get(p.feature)
-                    )
-                    if feat is None:
-                        continue
-                    scale = H_mask // feat.shape[1]
-                    logits = p.head(feat)
-                    losses[p.name] += implicit_upsample_focal(logits, masks, scale).item() * B
-                    preds = (
-                        logits.argmax(1)
-                        .repeat_interleave(scale, 1)
-                        .repeat_interleave(scale, 2)
-                    )
-                    ious[p.name].update(preds, masks)
-                    boundary_ious[p.name].update(preds, masks_boundary)
-
-                # Cross-eval: apply teacher_full probe to predicted features
-                if teacher_full_probe:
-                    for f in cross_features:
-                        feat = frozen_feats.get(f)
-                        if feat is None:
-                            continue
-                        scale = H_mask // feat.shape[1]
-                        logits = teacher_full_probe.head(feat)
-                        cross_losses[f] += (
-                            implicit_upsample_focal(logits, masks, scale).item() * B
-                        )
-                        preds = (
-                            logits.argmax(1)
-                            .repeat_interleave(scale, 1)
-                            .repeat_interleave(scale, 2)
-                        )
-                        cross_ious[f].update(preds, masks)
-                        cross_boundary_ious[f].update(preds, masks_boundary)
-
-            n += B
-
-        result = {f"{name}/val_loss": losses[name] / n for name in losses}
-        result |= {f"{name}/val_miou": ious[name].compute().item() for name in ious}
-        result |= {f"{name}/val_boundary_miou": boundary_ious[name].compute().item() for name in boundary_ious}
-        for f in cross_features:
-            result[f"cross/tch_full_on_{ABBREV[f]}/val_loss"] = cross_losses[f] / n
-            result[f"cross/tch_full_on_{ABBREV[f]}/val_miou"] = (
-                cross_ious[f].compute().item()
+            vp = Viewpoint.random(
+                batch_size=B, device=device, min_scale=min_vp_scale, max_scale=1.0
             )
-            result[f"cross/tch_full_on_{ABBREV[f]}/val_boundary_miou"] = (
-                cross_boundary_ious[f].compute().item()
-            )
-        return result
+
+        glimpse = sample_at_viewpoint(spatial=images, viewpoint=vp, glimpse_size_px=glimpse_px)
+        out = model.forward(glimpse=glimpse, state=state, viewpoint=vp)
+        state = out.state
+
+        hidden = model.get_spatial(state.canvas).view(B, canvas_grid, canvas_grid, -1)
+        predicted = model.predict_teacher_scene(state.canvas).view(
+            B, canvas_grid, canvas_grid, -1
+        )
+
+        feats["hidden"].append(hidden)
+        feats["predicted_norm"].append(predicted)
+        feats["teacher_glimpse"].append(
+            teacher_glimpse_feat
+        )  # same each timestep (baseline)
+
+    return feats
 
 
-# === Visualization ===
+def make_probe(name: str, dim: int, cfg: Config, device: torch.device) -> Probe:
+    warmup_steps = int(cfg.warmup_ratio * cfg.max_steps)
+    head = ProbeHead(dim).to(device)
+    opt = AdamW(head.parameters(), lr=cfg.peak_lr, weight_decay=cfg.weight_decay)
+    warmup = LinearLR(opt, cfg.min_lr / cfg.peak_lr, 1.0, max(1, warmup_steps))
+    cosine = CosineAnnealingLR(opt, cfg.max_steps - warmup_steps, eta_min=cfg.min_lr)
+    return Probe(name, head, opt, SequentialLR(opt, [warmup, cosine], [warmup_steps]))
+
+
+class ProbeCheckpoint(TypedDict):
+    probe_state_dicts: dict[str, dict[str, Tensor]]
+    optimizer_state_dicts: dict[str, dict]
+    scheduler_state_dicts: dict[str, dict]
+    best_mean_mious: dict[str, float]
+    step: int
+    config: dict
+    avp_ckpt: str
+    timestamp: str
+
+
+def save_probes(path: Path, probes: dict[str, Probe], step: int, cfg: Config) -> None:
+    data: ProbeCheckpoint = {
+        "probe_state_dicts": {n: p.head.state_dict() for n, p in probes.items()},
+        "optimizer_state_dicts": {
+            n: p.optimizer.state_dict() for n, p in probes.items()
+        },
+        "scheduler_state_dicts": {
+            n: p.scheduler.state_dict() for n, p in probes.items()
+        },
+        "best_mean_mious": {n: p.best_mean_miou for n, p in probes.items()},
+        "step": step,
+        "config": asdict(cfg),
+        "avp_ckpt": str(cfg.avp_ckpt),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(suffix=".pt.tmp", dir=path.parent)
+    try:
+        os.close(fd)
+        torch.save(data, tmp)
+        Path(tmp).rename(path)
+        log.info(
+            f"Saved probes: {path} ({path.stat().st_size / 1e6:.1f} MB, step={step})"
+        )
+    except Exception:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+# Fixed ADE20K color palette (deterministic)
+_ADE20K_PALETTE = np.random.RandomState(42).randint(
+    0, 255, (NUM_CLASSES + 1, 3), dtype=np.uint8
+)
+_ADE20K_PALETTE[NUM_CLASSES] = 0  # ignored → black
+
+
+def _colorize_mask(mask: np.ndarray) -> np.ndarray:
+    """Map class indices to RGB colors. Ignored pixels → black."""
+    return _ADE20K_PALETTE[np.where(mask == IGNORE_LABEL, NUM_CLASSES, mask)]
+
+
+def _correctness_map(pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
+    """Create correctness heatmap: green=correct, red=wrong, black=ignored."""
+    H, W = pred.shape
+    out = np.zeros((H, W, 3), dtype=np.uint8)
+    ignored = gt == IGNORE_LABEL
+    correct = (pred == gt) & ~ignored
+    wrong = (pred != gt) & ~ignored
+    out[correct] = [0, 200, 0]  # green
+    out[wrong] = [200, 0, 0]  # red
+    out[ignored] = [0, 0, 0]  # black
+    return out
+
+
 def log_viz(
     exp: comet_ml.Experiment,
     step: int,
-    trainer: ProbeTrainer,
+    probes: dict[str, Probe],
+    feats: PerTimestepFeatures,
     images: Tensor,
     masks: Tensor,
-    n_samples: int = 4,
+    cfg: Config,
 ) -> None:
-    import matplotlib.pyplot as plt
+    """Log visualization: PCA of features, colored predictions, correctness heatmap."""
+    n = min(cfg.viz_samples, images.shape[0])
+    T = cfg.n_timesteps
 
-    n = min(n_samples, images.shape[0])
-    H_mask = masks.shape[1]
+    # Columns: Image | GT | then for each feature: PCA | Pred | Corr (per shown timestep)
+    # Recurrent: show t=0 and t=last; Static: only t=0
+    t_show_recurrent = [0, T - 1] if T > 1 else [0]
+    n_cols = 2  # Image + GT
+    for feat_type in cfg.features:
+        t_show = [0] if feat_type in STATIC_FEATURES else t_show_recurrent
+        n_cols += 3 * len(t_show)  # PCA, Pred, Corr per timestep
 
-    # Get all logits
-    frozen_feats = trainer.frozen_ext.extract(
-        images, {p.feature for p in trainer.frozen_probes}, False
-    )
-    ft_feats = (
-        trainer.ft_ext.extract(images, {p.feature for p in trainer.ft_probes}, False)
-        if trainer.ft_ext
-        else {}
-    )
-
-    logits_dict = {}
-    for p in trainer.probes:
-        feat = ft_feats.get(p.feature) if p.finetune else frozen_feats.get(p.feature)
-        if feat is not None:
-            p.head.eval()
-            with torch.no_grad():
-                logits_dict[p.name] = p.head(feat)
-
-    # Plot
-    n_probes = len(logits_dict)
-    fig, axes = plt.subplots(n, 2 + n_probes, figsize=(2.5 * (2 + n_probes), 2.5 * n))
+    fig, axes = plt.subplots(n, n_cols, figsize=(2.5 * n_cols, 2.5 * n))
     if n == 1:
         axes = axes[np.newaxis, :]
 
-    palette = np.random.RandomState(42).randint(
-        0, 255, (NUM_CLASSES + 1, 3), dtype=np.uint8
-    )
-    palette[NUM_CLASSES] = 0
-
-    def colorize(m: np.ndarray) -> np.ndarray:
-        return palette[np.where(m == IGNORE_LABEL, NUM_CLASSES, m)]
-
-    def denorm(t: Tensor) -> np.ndarray:
-        t = t * IMAGENET_STD.view(3, 1, 1).to(t.device) + IMAGENET_MEAN.view(
-            3, 1, 1
-        ).to(t.device)
-        return (t.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+    # Denormalize images for display
+    imgs_np = [imagenet_denormalize(images[i]).cpu().numpy() for i in range(n)]
+    masks_np = masks[:n].cpu().numpy()
 
     for i in range(n):
-        axes[i, 0].imshow(denorm(images[i]))
-        axes[i, 0].set_title("Image")
-        axes[i, 1].imshow(colorize(masks[i].cpu().numpy()))
-        axes[i, 1].set_title("GT")
+        col = 0
 
-        for j, (name, logits) in enumerate(logits_dict.items()):
-            scale = H_mask // logits.shape[2]
-            pred = (
-                logits[i]
-                .argmax(0)
-                .repeat_interleave(scale, 0)
-                .repeat_interleave(scale, 1)
-                .cpu()
-                .numpy()
-            )
-            axes[i, 2 + j].imshow(colorize(pred))
-            abbrev = ABBREV.get(name.replace("ft_", ""), name[:6])
-            axes[i, 2 + j].set_title(
-                f"{'ft_' if name.startswith('ft_') else ''}{abbrev}"
-            )
+        # Image
+        axes[i, col].imshow(imgs_np[i])
+        axes[i, col].set_title("Image" if i == 0 else "")
+        axes[i, col].axis("off")
+        col += 1
 
-        for ax in axes[i]:
-            ax.axis("off")
+        # Ground truth
+        axes[i, col].imshow(_colorize_mask(masks_np[i]))
+        axes[i, col].set_title("GT" if i == 0 else "")
+        axes[i, col].axis("off")
+        col += 1
+
+        # For each feature type
+        for feat_type in cfg.features:
+            t_show = [0] if feat_type in STATIC_FEATURES else t_show_recurrent
+            for t in t_show:
+                feat = feats[feat_type][t]  # [B, H, W, D]
+                H_feat, W_feat, D = feat.shape[1], feat.shape[2], feat.shape[3]
+                feat_np = feat[i].cpu().float().numpy().reshape(-1, D)
+
+                # PCA visualization
+                pca = fit_pca(feat_np)
+                pca_img = pca_rgb(pca, feat_np, H_feat, W_feat)
+                axes[i, col].imshow(pca_img)
+                axes[i, col].set_title(f"{feat_type[:6]} PCA t{t}" if i == 0 else "")
+                axes[i, col].axis("off")
+                col += 1
+
+                # Prediction (colored by class)
+                with torch.no_grad():
+                    logits = probes[feat_type].head(feat[i : i + 1].float())
+                    pred = logits[0].argmax(0).cpu().numpy()  # [H, W]
+                axes[i, col].imshow(_colorize_mask(pred))
+                axes[i, col].set_title(f"Pred t{t}" if i == 0 else "")
+                axes[i, col].axis("off")
+                col += 1
+
+                # Correctness heatmap (at mask resolution for fair comparison)
+                pred_up = upsample_preds(
+                    torch.from_numpy(pred).unsqueeze(0), masks.shape[1], masks.shape[2]
+                )[0].numpy()
+                corr_img = _correctness_map(pred_up, masks_np[i])
+                axes[i, col].imshow(corr_img)
+                axes[i, col].set_title(f"Corr t{t}" if i == 0 else "")
+                axes[i, col].axis("off")
+                col += 1
 
     plt.tight_layout()
-    exp.log_figure(figure_name=f"predictions_{step}", figure=fig, step=step)
+    exp.log_figure(figure_name=f"viz_{step}", figure=fig, step=step)
     plt.close(fig)
 
 
-# === Main ===
 def main(cfg: Config) -> None:
     torch.set_float32_matmul_precision("high")
     device = torch.device(
         cfg.device or ("cuda" if torch.cuda.is_available() else "cpu")
     )
-    log.info(f"Device: {device}")
+
+    log.info("=" * 60)
+    log.info("ADE20K Probe Training (anytime decoding)")
+    log.info("=" * 60)
+    log.info(f"Device: {device}, AMP: {cfg.amp}")
+    log.info(f"AVP checkpoint: {cfg.avp_ckpt}")
+    log.info(f"Features: {cfg.features}, Timesteps: {cfg.n_timesteps}")
+    log.info(f"Batch size: {cfg.batch_size}, Max steps: {cfg.max_steps}")
 
     amp_ctx = (
         torch.autocast(device_type=device.type, dtype=torch.bfloat16)
-        if cfg.amp else nullcontext()
+        if cfg.amp
+        else torch.autocast(device_type=device.type, enabled=False)
     )
-    log.info(f"AMP: {'bfloat16' if cfg.amp else 'disabled'}")
 
-    # Load checkpoint
+    # Load AVP model
+    log.info("Loading AVP model...")
     ckpt = load_ckpt(cfg.avp_ckpt, device)
-    backbone_name = ckpt["backbone"]
     model_cfg = dacite.from_dict(
-        ActiveCanViTConfig, {**ckpt["model_config"], "teacher_dim": ckpt["teacher_dim"]}
+        CanViTForPretrainingConfig, {**ckpt["model_config"], "teacher_dim": ckpt["teacher_dim"]}
+    )
+    bb = create_backbone(ckpt["backbone"], pretrained=False)
+    model = CanViTForPretraining(backbone=bb, cfg=model_cfg, policy=None)
+    model.load_state_dict(ckpt["state_dict"], strict=False)
+    model = model.to(device).eval()
+    for p in model.parameters():
+        p.requires_grad_(False)
+    log.info(
+        f"  Backbone: {ckpt['backbone']}, params: {sum(p.numel() for p in model.parameters()):,}"
     )
 
-    def make_model(trainable: bool = False) -> ActiveCanViT:
-        bb = create_backbone(backbone_name, pretrained=False)
-        # No policy needed for t=0 full-view probing
-        m = ActiveCanViT(backbone=bb, cfg=model_cfg, policy=None)
-        m.load_state_dict(ckpt["state_dict"], strict=False)
-        m = m.to(device)
-        if trainable:
-            m.train()
-        else:
-            m.eval()
-            for p in m.parameters():
-                p.requires_grad_(False)
-        return m
+    # Load teacher
+    log.info("Loading teacher...")
+    weights = str(cfg.teacher_ckpt) if cfg.teacher_ckpt else None
+    teacher = create_backbone(
+        ckpt["backbone"], pretrained=weights is None, weights=weights
+    )
+    assert isinstance(teacher, DINOv3Backbone)
+    teacher = teacher.to(device).eval()
+    for p in teacher.parameters():
+        p.requires_grad_(False)
 
-    frozen_model = make_model(trainable=False)
-    ft_model = make_model(trainable=True) if cfg.finetune_features else None
-
-    # Scene norm
-    scene_norm = None
-    if (ns := ckpt.get("scene_norm_state")) is not None:
-        n, d = ns["mean"].shape
-        scene_norm = PositionAwareNorm(n, d, int(n**0.5))
-        scene_norm.load_state_dict(ns)
-        scene_norm = scene_norm.eval().to(device)
-
-    # Teacher
-    need_teacher = bool(set(cfg.frozen_features) & {"teacher_full", "teacher_glimpse"})
-    teacher = None
-    if need_teacher:
-        teacher = create_backbone(backbone_name, pretrained=True)
-        assert isinstance(teacher, DINOv3Backbone)
-        teacher = teacher.to(device).eval()
-        for p in teacher.parameters():
-            p.requires_grad_(False)
-
-    # Dimensions
-    patch_size = frozen_model.backbone.patch_size_px
-    teacher_patch_size = teacher.patch_size_px if teacher else patch_size
+    # Grid sizes and viewpoint config from training checkpoint
+    patch_size = model.backbone.patch_size_px
+    assert cfg.image_size % patch_size == 0, (
+        f"image_size {cfg.image_size} not divisible by patch_size {patch_size}"
+    )
     canvas_grid = cfg.image_size // patch_size
-    glimpse_grid = ckpt["model_config"].get("glimpse_grid_size", 8)
+    train_hist = ckpt.get("training_config_history") or {}
+    train_cfg = list(train_hist.values())[-1] if train_hist else {}
+    glimpse_grid = train_cfg.get("glimpse_grid_size", TrainConfig.glimpse_grid_size)
     glimpse_px = glimpse_grid * patch_size
-    hidden_dim = frozen_model.canvas_dim
-    teacher_dim = ckpt["teacher_dim"]
-
-    def get_dim(f: FeatureType) -> int:
-        if f == "hidden":
-            return hidden_dim
-        if f in ("predicted_norm", "predicted_denorm"):
-            return teacher_dim
-        return teacher.embed_dim if teacher else teacher_dim
-
-    # Extractors (ft_ext has no teacher - finetune only supports AVP features)
-    frozen_ext = FeatureExtractor(
-        frozen_model,
-        scene_norm,
-        teacher,
-        canvas_grid,
-        glimpse_grid,
-        glimpse_px,
-        teacher_patch_size,
-        device,
+    min_vp_scale = train_cfg.get("min_viewpoint_scale", TrainConfig.min_viewpoint_scale)
+    log.info(
+        f"  Canvas: {canvas_grid}x{canvas_grid}, Glimpse: {glimpse_grid}x{glimpse_grid}"
     )
-    ft_ext = (
-        FeatureExtractor(
-            ft_model,
-            scene_norm,
-            None,
-            canvas_grid,
-            glimpse_grid,
-            glimpse_px,
-            teacher_patch_size,
-            device,
-        )
-        if ft_model
-        else None
+    log.info(
+        f"  Viewpoint: t=0 full, t>0 random (min_scale={min_vp_scale}, max_scale=1.0)"
     )
+    exp_params = {
+        "glimpse_grid": glimpse_grid,
+        "min_vp_scale": min_vp_scale,
+        "canvas_grid": canvas_grid,
+    }
 
-    # Create probes
-    peak_lr = cfg.peak_lr
-    warmup_steps = int(cfg.warmup_ratio * cfg.max_steps)
+    dims: dict[FeatureType, int] = {
+        "hidden": model.canvas_dim,
+        "predicted_norm": ckpt["teacher_dim"],
+        "teacher_glimpse": teacher.embed_dim,
+    }
 
-    def make_probe(name: str, feature: FeatureType, finetune: bool) -> Probe:
-        head = ProbeHead(get_dim(feature)).to(device)
-        if finetune and ft_model is not None:
-            params = list(ft_model.parameters()) + list(head.parameters())
-        else:
-            params = list(head.parameters())
-        opt = AdamW(params, lr=peak_lr, weight_decay=cfg.weight_decay)
-        warmup = LinearLR(opt, cfg.min_lr / peak_lr, 1.0, max(1, warmup_steps))
-        cosine = CosineAnnealingLR(
-            opt, cfg.max_steps - warmup_steps, eta_min=cfg.min_lr
-        )
-        sched = SequentialLR(opt, [warmup, cosine], [warmup_steps])
-        return Probe(name, feature, finetune, head, opt, sched)
+    # Create probes - ONE per feature type, shared weights across timesteps
+    log.info("Creating probes...")
+    probes: dict[str, Probe] = {
+        feat: make_probe(feat, dims[feat], cfg, device) for feat in cfg.features
+    }
+    log.info(f"  {len(probes)} probes: {list(probes.keys())}")
 
-    probes = [make_probe(f, f, False) for f in cfg.frozen_features]
-    probes += [make_probe(f"ft_{f}", f, True) for f in cfg.finetune_features]
-
-    # Resume from checkpoint
+    # Resume from checkpoint (weights + optimizer/scheduler if available)
     start_step = 0
-    if cfg.resume_ckpt is not None:
-        resume = torch.load(cfg.resume_ckpt, map_location=device, weights_only=False)
-        start_step = resume["step"]
-        for p in probes:
-            state = resume["probes"][p.name]
-            p.head.load_state_dict(state["head"])
-            p.optimizer.load_state_dict(state["optimizer"])
-            p.scheduler.load_state_dict(state["scheduler"])
-            p.best_miou = state["best_miou"]
-            log.info(f"Resumed {p.name}: best_miou={p.best_miou:.4f}")
-        if ft_model is not None and "ft_model" in resume:
-            ft_model.load_state_dict(resume["ft_model"])
-            log.info("Resumed ft_model weights")
-        log.info(f"Resuming from step {start_step}")
+    if cfg.resume_from:
+        log.info(f"Resuming from {cfg.resume_from}")
+        ckpt_data = torch.load(cfg.resume_from, map_location=device, weights_only=False)
+        start_step = ckpt_data.get("step", 0)
+        log.info(f"  Checkpoint step: {start_step}")
+        for name, probe in probes.items():
+            if name not in ckpt_data["probe_state_dicts"]:
+                log.warning(f"  {name} not in checkpoint, starting fresh")
+                continue
+            probe.head.load_state_dict(ckpt_data["probe_state_dicts"][name])
+            probe.best_mean_miou = ckpt_data["best_mean_mious"].get(name, 0.0)
+            # Try loading optimizer state
+            if (
+                "optimizer_state_dicts" in ckpt_data
+                and name in ckpt_data["optimizer_state_dicts"]
+            ):
+                try:
+                    probe.optimizer.load_state_dict(
+                        ckpt_data["optimizer_state_dicts"][name]
+                    )
+                except Exception as e:
+                    log.warning(f"  {name} optimizer state mismatch, resetting: {e}")
+            else:
+                log.warning(f"  {name} no optimizer state in checkpoint")
+            # Try loading scheduler state
+            if (
+                "scheduler_state_dicts" in ckpt_data
+                and name in ckpt_data["scheduler_state_dicts"]
+            ):
+                try:
+                    probe.scheduler.load_state_dict(
+                        ckpt_data["scheduler_state_dicts"][name]
+                    )
+                except Exception as e:
+                    log.warning(f"  {name} scheduler state mismatch, resetting: {e}")
+            else:
+                log.warning(f"  {name} no scheduler state in checkpoint")
+            log.info(f"  Loaded {name} (best mIoU: {probe.best_mean_miou:.4f})")
 
-    trainer = ProbeTrainer(probes, frozen_ext, ft_ext, ft_model, device, cfg.grad_clip, amp_ctx, cfg.boundary_width)
-
-    log.info(f"Probes: {[p.name for p in probes]}")
+    # Per-timestep IoU metrics for val
+    val_iou: dict[str, list[MulticlassJaccardIndex]] = {
+        feat: [
+            MulticlassJaccardIndex(
+                NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro"
+            ).to(device)
+            for _ in range(cfg.n_timesteps)
+        ]
+        for feat in cfg.features
+    }
+    # Per-timestep IoU metrics for train
+    train_iou: dict[str, list[MulticlassJaccardIndex]] = {
+        feat: [
+            MulticlassJaccardIndex(
+                NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro"
+            ).to(device)
+            for _ in range(cfg.n_timesteps)
+        ]
+        for feat in cfg.features
+    }
 
     # Data
+    log.info("Loading datasets...")
     train_ds = ADE20kDataset(cfg.ade20k_root, "training", cfg.image_size, augment=True)
-    val_ds = ADE20kDataset(cfg.ade20k_root, "validation", cfg.image_size, augment=False)
+    val_ds = ADE20kDataset(cfg.ade20k_root, "validation", cfg.image_size)
     train_loader = DataLoader(
         train_ds,
         cfg.batch_size,
@@ -790,26 +601,20 @@ def main(cfg: Config) -> None:
     )
 
     # Comet
+    log.info(f"Initializing Comet: {cfg.comet_workspace}/{cfg.comet_project}")
     exp = comet_ml.Experiment(
         project_name=cfg.comet_project, workspace=cfg.comet_workspace
     )
     exp.log_parameters(asdict(cfg))
-    exp.log_parameters(
-        {
-            "peak_lr": peak_lr,
-            "warmup_steps": warmup_steps,
-            "canvas_grid": canvas_grid,
-            "hidden_dim": hidden_dim,
-            "teacher_dim": teacher_dim,
-            "backbone": backbone_name,
-        }
-    )
+    exp.log_parameters(exp_params)  # glimpse_grid, min_vp_scale, canvas_grid from ckpt
 
-    # Training loop
+    log.info("=" * 60)
+    log.info(f"Starting training from step {start_step}")
+    log.info("=" * 60)
+
     step = start_step
     train_iter = iter(train_loader)
     pbar = tqdm(total=cfg.max_steps, initial=start_step, desc="Training")
-    ckpt_path = Path(f"probe_ckpt_{exp.id}.pt")
 
     while step < cfg.max_steps:
         try:
@@ -817,68 +622,177 @@ def main(cfg: Config) -> None:
         except StopIteration:
             train_iter = iter(train_loader)
             images, masks = next(train_iter)
+        images, masks = images.to(device), masks.to(device)
 
-        images, masks = (
-            images.to(device, non_blocking=True),
-            masks.to(device, non_blocking=True),
-        )
-
-        # Validate before training (step 0 = baseline)
+        # === Validation ===
         if step % cfg.val_every == 0:
-            metrics = trainer.validate(val_loader)
-            exp.log_metrics(metrics, step=step)
-            if step == 0:
-                for k, v in metrics.items():
-                    log.info(f"  {k}: {v:.4f}")
+            for p in probes.values():
+                p.head.eval()
+            for feat in cfg.features:
+                for m in val_iou[feat]:
+                    m.reset()
+            any_improved = False
 
-            # Track best, save checkpoints
-            postfix = {}
-            for p in probes:
-                miou = metrics[f"{p.name}/val_miou"]
-                if miou > p.best_miou:
-                    p.best_miou = miou
-                    ckpt_path = f"probe_{p.name}_best_{exp.id}.pt"
-                    save_dict = {"head": p.head.state_dict()}
-                    if p.finetune and ft_model:
-                        save_dict["backbone"] = ft_model.state_dict()
-                    torch.save(save_dict, ckpt_path)
-                    log.info(f"Step {step}: new best {p.name} mIoU: {miou:.4f}")
-                key = (
-                    f"ft_{ABBREV[p.feature]}"
-                    if p.finetune
-                    else ABBREV.get(p.name, p.name[:6])
-                )
-                postfix[key] = f"{miou:.3f}"
-            pbar.set_postfix(postfix)
+            with torch.no_grad():
+                for vi, vm in val_loader:
+                    vi, vm = vi.to(device), vm.to(device)
+                    with amp_ctx:
+                        feats = extract_features(
+                            model,
+                            teacher,
+                            vi,
+                            cfg.n_timesteps,
+                            canvas_grid,
+                            glimpse_grid,
+                            glimpse_px,
+                            device,
+                            min_vp_scale,
+                        )
+                    for feat_type in cfg.features:
+                        # Static features: only t=0 (all timesteps identical)
+                        t_range = (
+                            [0]
+                            if feat_type in STATIC_FEATURES
+                            else range(cfg.n_timesteps)
+                        )
+                        for t in t_range:
+                            logits = probes[feat_type].head(feats[feat_type][t].float())
+                            preds = logits.argmax(1)  # [B, Hl, Wl]
+                            preds_up = upsample_preds(preds, vm.shape[1], vm.shape[2])
+                            val_iou[feat_type][t].update(preds_up, vm)
 
-            # Save combined checkpoint
-            save_checkpoint(ckpt_path, step, probes, ft_model)
+            # Log mIoU (per-timestep for recurrent, single for static)
+            for feat_type in cfg.features:
+                if feat_type in STATIC_FEATURES:
+                    miou = val_iou[feat_type][0].compute().item()
+                    exp.log_metric(f"{feat_type}/val_miou", miou, step=step)
+                    mean_miou = miou
+                else:
+                    mious = [
+                        val_iou[feat_type][t].compute().item()
+                        for t in range(cfg.n_timesteps)
+                    ]
+                    mean_miou = sum(mious) / len(mious)
+                    for t, miou in enumerate(mious):
+                        exp.log_metric(f"{feat_type}/val_miou_t{t}", miou, step=step)
+                    exp.log_metric(f"{feat_type}/val_miou_mean", mean_miou, step=step)
+                    exp.log_curve(
+                        f"{feat_type}/val_miou_curve",
+                        x=list(range(cfg.n_timesteps)),
+                        y=mious,
+                        step=step,
+                    )
 
-            # Viz
-            log_viz(exp, step, trainer, images, masks)
+                if mean_miou > probes[feat_type].best_mean_miou:
+                    probes[feat_type].best_mean_miou = mean_miou
+                    any_improved = True
 
-        # Train
-        grad_norms = trainer.train_step(images, masks)
+            if any_improved and cfg.probe_ckpt_dir:
+                save_probes(cfg.probe_ckpt_dir / "best.pt", probes, step, cfg)
+
+            pbar.set_postfix(
+                {
+                    f[
+                        :3
+                    ]: f"{sum(val_iou[f][t].compute().item() for t in range(cfg.n_timesteps)) / cfg.n_timesteps:.3f}"
+                    for f in cfg.features
+                }
+            )
+
+        # === Training step ===
+        for p in probes.values():
+            p.head.train()
+
+        with amp_ctx:
+            feats = extract_features(
+                model,
+                teacher,
+                images,
+                cfg.n_timesteps,
+                canvas_grid,
+                glimpse_grid,
+                glimpse_px,
+                device,
+                min_vp_scale,
+            )
+
+        for feat_type in cfg.features:
+            probe = probes[feat_type]
+            probe.optimizer.zero_grad()
+
+            # Static features: only t=0 (all timesteps identical)
+            t_range = [0] if feat_type in STATIC_FEATURES else range(cfg.n_timesteps)
+            logits_list = [probe.head(feats[feat_type][t].float()) for t in t_range]
+            losses = [
+                focal_loss(logits, masks, cfg.focal_gamma) for logits in logits_list
+            ]
+            loss = torch.stack(losses).mean()
+            loss.backward()
+
+            grad_norm = nn.utils.clip_grad_norm_(probe.head.parameters(), cfg.grad_clip)
+            probe.optimizer.step()
+            probe.scheduler.step()
+            probe.accumulate(loss, grad_norm)  # NO .item() - stays on GPU
+
+            # Update train IoU metrics (using pre-update logits, upsampled to mask res)
+            with torch.no_grad():
+                for t, logits in zip(t_range, logits_list, strict=True):
+                    preds = logits.detach().argmax(1)  # [B, Hl, Wl]
+                    preds_up = upsample_preds(preds, masks.shape[1], masks.shape[2])
+                    train_iou[feat_type][t].update(preds_up, masks)
 
         step += 1
         pbar.update(1)
 
-        # Log
+        # === Logging (GPU sync happens here) ===
         if step % cfg.log_every == 0:
-            log_dict = {"lr": probes[0].scheduler.get_last_lr()[0]}
-            for p in probes:
-                if (loss := p.get_and_reset_loss()) is not None:
-                    log_dict[f"{p.name}/train_loss"] = loss
-                if p.name in grad_norms:
-                    log_dict[f"{p.name}/grad_norm"] = grad_norms[p.name].item()
+            log_dict: dict[str, float] = {
+                "lr": list(probes.values())[0].scheduler.get_last_lr()[0]
+            }
+            for name, p in probes.items():
+                avg_loss, avg_grad = p.get_and_reset_stats()
+                log_dict[f"{name}/loss"] = avg_loss
+                log_dict[f"{name}/grad_norm"] = avg_grad
+
+            # Log train mIoU (per-timestep for recurrent, single for static)
+            for feat_type in cfg.features:
+                if feat_type in STATIC_FEATURES:
+                    miou = train_iou[feat_type][0].compute().item()
+                    log_dict[f"{feat_type}/train_miou"] = miou
+                    train_iou[feat_type][0].reset()
+                else:
+                    mious = [
+                        train_iou[feat_type][t].compute().item()
+                        for t in range(cfg.n_timesteps)
+                    ]
+                    for t, miou in enumerate(mious):
+                        log_dict[f"{feat_type}/train_miou_t{t}"] = miou
+                    log_dict[f"{feat_type}/train_miou_mean"] = sum(mious) / len(mious)
+                    exp.log_curve(
+                        f"{feat_type}/train_miou_curve",
+                        x=list(range(cfg.n_timesteps)),
+                        y=mious,
+                        step=step,
+                    )
+                    for m in train_iou[feat_type]:
+                        m.reset()
+
             exp.log_metrics(log_dict, step=step)
+
+        # === Visualization ===
+        if step % cfg.viz_every == 0:
+            for p in probes.values():
+                p.head.eval()
+            with torch.no_grad():
+                log_viz(exp, step, probes, feats, images, masks, cfg)
 
     pbar.close()
     log.info("=" * 60)
-    log.info("Best mIoU per probe:")
-    for p in probes:
-        log.info(f"  {p.name}: {p.best_miou:.4f}")
-        exp.log_metric(f"best_{p.name}_miou", p.best_miou)
+    log.info("Training complete. Best mean mIoU:")
+    for name, p in probes.items():
+        log.info(f"  {name}: {p.best_mean_miou:.4f}")
+        exp.log_metric(f"best/{name}", p.best_mean_miou)
+    log.info("=" * 60)
 
 
 if __name__ == "__main__":

@@ -3,10 +3,10 @@
 from dataclasses import dataclass
 
 import numpy as np
-from canvit.model.active.base import GlimpseOutput
+from canvit import CanViTOutput
 from torch import Tensor
 
-from avp_vit import ActiveCanViT
+from avp_vit import CanViTForPretraining
 from .image import imagenet_denormalize
 
 
@@ -28,12 +28,13 @@ class VizSampleData:
 
 
 def extract_sample0_viz(
-    out: GlimpseOutput,
+    out: CanViTOutput,
+    glimpse: Tensor,
     predicted_scene: Tensor,
-    model: ActiveCanViT,
+    model: CanViTForPretraining,
 ) -> VizSampleData:
     """Extract viz data for sample 0, move to CPU as numpy."""
-    glimpse_cpu = out.glimpse[0].detach().cpu()
+    glimpse_cpu = glimpse[0].detach().cpu()
     glimpse_np = imagenet_denormalize(glimpse_cpu).numpy()
 
     scene_cpu = predicted_scene[0].detach().cpu().float()

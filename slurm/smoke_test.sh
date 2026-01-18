@@ -56,7 +56,7 @@ run_checks() {
     # 4. Teacher load
     echo "--- Teacher ---"
     uv run python -c "
-from canvit.hub import create_backbone
+from canvit import create_backbone
 import os
 b = create_backbone('dinov3_vitb16', weights=os.path.expanduser(os.environ['AVP_TEACHER_CKPT']))
 print(f'  {b.embed_dim}d, {b.n_blocks} blocks')

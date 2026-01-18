@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 import torch
-from canvit.hub import create_backbone
+from canvit import create_backbone
 
 # Import exact same dataset class as export
 sys.path.insert(0, str(Path(__file__).parent))

@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 import torch
-from canvit.hub import create_backbone
+from canvit import create_backbone
 from PIL import Image
 from torchvision import transforms
 

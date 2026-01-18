@@ -16,12 +16,12 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 from tqdm import tqdm
 
-from canvit import GlimpseOutput, RecurrentState
+from canvit import CanViTOutput, RecurrentState
 from canvit.backbone.dinov3 import DINOv3Backbone
-from canvit.hub import create_backbone
+from canvit import create_backbone
 from canvit.viewpoint import Viewpoint as CanvitViewpoint
 
-from avp_vit import ActiveCanViT
+from avp_vit import CanViTForPretraining
 from avp_vit.checkpoint import load as load_ckpt, load_model
 from avp_vit.train.transforms import val_transform
 from avp_vit.train.norm import PositionAwareNorm
@@ -66,7 +66,7 @@ def load_cls_normalizer(ckpt_path: Path, device: torch.device) -> PositionAwareN
 
 
 def run_trajectory(
-    model: ActiveCanViT,
+    model: CanViTForPretraining,
     images: Tensor,
     canvas_grid: int,
     glimpse_size_px: int,
@@ -79,8 +79,8 @@ def run_trajectory(
     def init_fn(_state: RecurrentState) -> list[Tensor]:
         return []
 
-    def step_fn(acc: list[Tensor], out: GlimpseOutput, _vp: CanvitViewpoint) -> list[Tensor]:
-        cls_pred = model.predict_scene_teacher_cls(out.state.recurrent_cls, out.state.canvas)
+    def step_fn(acc: list[Tensor], out: CanViTOutput, _vp: CanvitViewpoint, _glimpse: Tensor) -> list[Tensor]:
+        cls_pred = model.predict_scene_teacher_cls(out.state.recurrent_cls)
         acc.append(cls_pred)
         return acc
 

@@ -6,7 +6,6 @@ import signal
 import subprocess
 import traceback
 from datetime import datetime, timezone
-from collections.abc import Callable
 from contextlib import nullcontext
 from pathlib import Path
 from typing import NamedTuple
@@ -34,7 +33,7 @@ torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(False)
 from ytch.model import count_parameters  # noqa: E402
 
-from avp_vit import ActiveCanViTConfig  # noqa: E402
+from avp_vit import CanViTForPretrainingConfig  # noqa: E402
 from avp_vit.checkpoint import CheckpointData, load as load_checkpoint  # noqa: E402
 from avp_vit.checkpoint import save as save_checkpoint, update_symlink, find_latest  # noqa: E402
 from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
@@ -46,7 +45,7 @@ from .model import compile_model, compile_teacher, create_model, load_student_ba
 from .norm import PositionAwareNorm  # noqa: E402
 from .probe import load_probe  # noqa: E402
 from .scheduler import warmup_constant_scheduler  # noqa: E402
-from .step import TeacherTargets, training_step  # noqa: E402
+from .step import training_step  # noqa: E402
 from .viz import log_figure, plot_multistep_pca, validate  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -153,18 +152,21 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 flat[key] = str(v) if not isinstance(v, (int, float, bool, str, type(None))) else v
         return flat
 
-    # Determine checkpoint to resume from
+    # Determine checkpoint source and load mode
+    # Priority: run_dir/latest.pt (RESUME) > seed_ckpt (SEED) > fresh start
     ckpt_path_to_load: Path | None = None
-    if cfg.resume_ckpt is not None:
-        ckpt_path_to_load = cfg.resume_ckpt
-        log.info(f"Explicit resume checkpoint: {ckpt_path_to_load}")
+    is_seeding = False  # True = seed mode (weights only), False = resume mode (full state)
+    latest = find_latest(run_dir)
+    if latest is not None:
+        ckpt_path_to_load = latest
+        is_seeding = False
+        log.info(f"RESUME mode: continuing from {ckpt_path_to_load}")
+    elif cfg.seed_ckpt is not None:
+        ckpt_path_to_load = cfg.seed_ckpt
+        is_seeding = True
+        log.info(f"SEED mode: loading weights from {ckpt_path_to_load} (fresh opt/sched/step)")
     else:
-        latest = find_latest(run_dir)
-        if latest is not None:
-            ckpt_path_to_load = latest
-            log.info(f"Auto-resume from latest: {ckpt_path_to_load}")
-        else:
-            log.info("No checkpoint found - starting fresh")
+        log.info("FRESH mode: no checkpoint, starting from scratch")
 
     # Load checkpoint BEFORE creating Comet experiment
     ckpt_data: CheckpointData | None = None
@@ -176,8 +178,9 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             log.warning("Checkpoint has no comet_id - will create NEW experiment")
 
     # === COMET EXPERIMENT ===
+    # RESUME mode: continue existing experiment. SEED/FRESH mode: new experiment.
     comet_cfg = comet_ml.ExperimentConfig(auto_metric_logging=False)
-    if prev_comet_id is not None and not cfg.force_new_experiment:
+    if prev_comet_id is not None and not is_seeding:
         log.info(f"Continuing Comet experiment: {prev_comet_id}")
         exp = comet_ml.start(
             experiment_key=prev_comet_id,
@@ -185,8 +188,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             experiment_config=comet_cfg,
         )
     else:
-        if cfg.force_new_experiment and prev_comet_id:
-            log.info(f"Forcing new experiment (prev was {prev_comet_id})")
+        if is_seeding and prev_comet_id:
+            log.info(f"SEED mode: creating new experiment (seed source had {prev_comet_id})")
         else:
             log.info("Creating NEW Comet experiment")
         exp = comet_ml.start(
@@ -212,9 +215,6 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     bundle = create_model(student_backbone, teacher.embed_dim, cfg)
     model, glimpse_size_px = bundle.model, bundle.glimpse_size_px
 
-    if cfg.compile and cfg.model.gradient_checkpointing:
-        raise ValueError("compile=True and gradient_checkpointing=True may be incompatible.")
-
     if cfg.enable_policy and not cfg.model.enable_vpe:
         raise ValueError("enable_policy=True requires cfg.model.enable_vpe=True (VPE provides policy input)")
 
@@ -234,18 +234,18 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     # Extract start_step from checkpoint scheduler state (BEFORE creating loaders)
     # NOTE: PyTorch LRScheduler uses "last_epoch" but we call scheduler.step() once per
     # training step, so last_epoch == number of gradient updates == our "step"
-    if ckpt_data is not None:
+    # SEED mode always starts at step=0 (fresh training run)
+    if ckpt_data is not None and not is_seeding:
         sched_state = ckpt_data.get("scheduler_state")
         assert sched_state is not None, "CORRUPT CHECKPOINT: missing scheduler_state"
         start_step = sched_state["last_epoch"]  # PyTorch API: last_epoch = num scheduler.step() calls
         log.info("=" * 60)
-        log.info(f"RESUME FROM CHECKPOINT: start_step={start_step}")
-        log.info(f"  (scheduler_state['last_epoch']={start_step})")
+        log.info(f"RESUME: start_step={start_step}")
         log.info("=" * 60)
     else:
         start_step = 0
         log.info("=" * 60)
-        log.info(f"FRESH START: start_step={start_step}")
+        log.info(f"{'SEED' if is_seeding else 'FRESH'}: start_step=0")
         log.info("=" * 60)
 
     train_loader, val_loader = create_loaders(cfg, start_step=start_step)
@@ -277,7 +277,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
     # === RESTORE MODEL/OPTIMIZER STATE FROM CHECKPOINT ===
     if ckpt_data is not None:
-        ckpt_cfg = dacite.from_dict(ActiveCanViTConfig, ckpt_data["model_config"])
+        ckpt_cfg = dacite.from_dict(CanViTForPretrainingConfig, ckpt_data["model_config"])
         if ckpt_cfg != cfg.model:
             log.warning("Checkpoint config differs from current config!")
             log.warning(f"  Checkpoint: {ckpt_cfg}")
@@ -309,16 +309,16 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         if not incompat.missing_keys and not incompat.unexpected_keys:
             log.info("Model state loaded successfully (all keys matched)")
 
-        # Load optimizer + scheduler state (tied together)
-        if cfg.reset_opt_and_sched:
-            log.info("Reset optimizer+scheduler: using fresh state (step will be 0)")
+        # Load optimizer + scheduler state (RESUME mode only)
+        if is_seeding:
+            log.info("SEED mode: fresh optimizer+scheduler (step=0)")
         else:
             opt_state = ckpt_data.get("optimizer_state")
             sched_state = ckpt_data.get("scheduler_state")
             if opt_state is not None and sched_state is not None:
                 optimizer.load_state_dict(opt_state)
                 scheduler.load_state_dict(sched_state)
-                log.info(f"Loaded optimizer+scheduler from checkpoint (step={sched_state.get('last_epoch', '?')})")
+                log.info(f"RESUME mode: restored optimizer+scheduler (step={sched_state.get('last_epoch', '?')})")
             elif opt_state is not None or sched_state is not None:
                 log.error("!!! Checkpoint has only one of optimizer/scheduler - using fresh init (STEP WILL BE 0) !!!")
             else:
@@ -350,7 +350,6 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         n_tokens=1, embed_dim=teacher.embed_dim, grid_size=1,
     ).to(cfg.device)
 
-    any_glimpse_loss = cfg.enable_glimpse_patches_loss or cfg.enable_glimpse_cls_loss
 
     norm_loaded = False
     if ckpt_data is not None and not cfg.reset_normalizer:
@@ -374,7 +373,6 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         init_normalizer_stats_from_shard(shard_files[0], scene_norm, cls_norm, cfg.device)
 
     log.info(f"Training: {cfg.n_full_start_branches} full + {cfg.n_random_start_branches} random branches, chunk_size={cfg.chunk_size}, continue_prob={cfg.continue_prob}")
-    log.info(f"Scene loss type: {cfg.scene_loss_type.value}")
 
     # EMA tracking for all metrics
     ema = EMATracker(alpha=cfg.ema_alpha)
@@ -394,16 +392,6 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         norm_patches = scene_norm(raw_patches)
         norm_cls = cls_norm(raw_cls.unsqueeze(1)).squeeze(1)
         return TrainBatch(images, labels, norm_patches, norm_cls, raw_patches, raw_cls)
-
-    # Glimpse targets: raw features (cosine similarity loss, no normalization)
-    if any_glimpse_loss:
-        def _compute_glimpse_targets(glimpse: Tensor) -> TeacherTargets:
-            with torch.no_grad():
-                feats = compute_raw_targets(glimpse, glimpse_size_px)
-            return TeacherTargets(patches=feats.patches, cls=feats.cls)
-        compute_glimpse_targets_fn: Callable[[Tensor], TeacherTargets] | None = _compute_glimpse_targets
-    else:
-        compute_glimpse_targets_fn = None
 
     # Step semantics: step S = model state after S gradient updates
     # step=0: before any gradient (initial model)
@@ -505,12 +493,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 raw_cls_target=batch.raw_cls_target,
                 scene_denorm=scene_norm.denormalize,
                 cls_denorm=cls_norm.denormalize,
-                compute_glimpse_targets=compute_glimpse_targets_fn,
                 enable_scene_patches_loss=cfg.enable_scene_patches_loss,
                 enable_scene_cls_loss=cfg.enable_scene_cls_loss,
-                enable_glimpse_patches_loss=cfg.enable_glimpse_patches_loss,
-                enable_glimpse_cls_loss=cfg.enable_glimpse_cls_loss,
-                scene_loss_type=cfg.scene_loss_type,
                 glimpse_size_px=glimpse_size_px,
                 canvas_grid_size=G,
                 n_full_start_branches=cfg.n_full_start_branches,
@@ -541,10 +525,6 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                     ema.update(f"{prefix}/scene_patches_loss", m.scene_patches_loss)
                 if cfg.enable_scene_cls_loss:
                     ema.update(f"{prefix}/scene_cls_loss", m.scene_cls_loss)
-                if cfg.enable_glimpse_patches_loss:
-                    ema.update(f"{prefix}/glimpse_patches_loss", m.glimpse_patches_loss)
-                if cfg.enable_glimpse_cls_loss:
-                    ema.update(f"{prefix}/glimpse_cls_loss", m.glimpse_cls_loss)
                 ema.update(f"{prefix}/scene_cos_raw", m.scene_cos_raw)
                 ema.update(f"{prefix}/scene_cos_norm", m.scene_cos_norm)
                 ema.update(f"{prefix}/cls_cos_raw", m.cls_cos_raw)
