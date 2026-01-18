@@ -14,7 +14,7 @@ from torch.utils.checkpoint import checkpoint
 from avp_vit import ActiveCanViT, GlimpseOutput, RecurrentState
 from canvit import Viewpoint
 
-from .loss import LossType, reconstruction_loss
+from .loss import mse_loss
 from .viewpoint import Viewpoint as NamedViewpoint, ViewpointType
 from .viz.sample import VizSampleData, extract_sample0_viz
 from .viz.image import imagenet_denormalize
@@ -91,7 +91,6 @@ def training_step(
     cls_denorm: Callable[[Tensor], Tensor],
     enable_scene_patches_loss: bool,
     enable_scene_cls_loss: bool,
-    scene_loss_type: LossType,
     glimpse_size_px: int,
     canvas_grid_size: int,
     n_full_start_branches: int,
@@ -180,9 +179,9 @@ def training_step(
         scene_cls_loss = torch.zeros((), device=device)
 
         if enable_scene_patches_loss:
-            scene_patches_loss = reconstruction_loss(scene_pred, scene_target, scene_loss_type)
+            scene_patches_loss = mse_loss(scene_pred, scene_target)
         if enable_scene_cls_loss:
-            scene_cls_loss = reconstruction_loss(cls_pred, cls_target, scene_loss_type)
+            scene_cls_loss = mse_loss(cls_pred, cls_target)
 
         active: list[Tensor] = []
         if enable_scene_patches_loss:
