@@ -16,7 +16,7 @@ class StepResult:
     scene_cos: float | None = None
     cls_cos: float | None = None
     ms: float = 0.0  # total time
-    ms_forward: float = 0.0  # forward_step only
+    ms_forward: float = 0.0  # sample + forward only
     ms_post: float = 0.0  # post-processing (predictions, classification, numpy)
     top5: list[tuple[str, float]] = field(default_factory=list)
     policy_center: tuple[float, float] | None = None  # (cy, cx) normalized

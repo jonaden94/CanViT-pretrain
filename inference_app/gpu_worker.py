@@ -22,7 +22,7 @@ from avp_vit.checkpoint import load as load_ckpt, load_model
 from avp_vit.train.transforms import imagenet_normalize
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.probe import load_probe
-from avp_vit.train.viewpoint import Viewpoint as NamedViewpoint
+from avp_vit.train.viewpoint import Viewpoint as NamedViewpoint, sample_at_viewpoint
 from avp_vit.train.viz import fit_pca, imagenet_denormalize
 from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit import create_backbone
@@ -234,10 +234,10 @@ class GPUWorker:
             self._sync()
             t_start = time.perf_counter()
             with torch.no_grad():
-                out = self._model.forward_step(
-                    image=self._image, state=self._state,
-                    viewpoint=named_vp, glimpse_size_px=glimpse_px,
+                glimpse = sample_at_viewpoint(
+                    spatial=self._image, viewpoint=named_vp, glimpse_size_px=glimpse_px
                 )
+                out = self._model.forward(glimpse=glimpse, state=self._state, viewpoint=named_vp)
             self._sync()
             t_forward = time.perf_counter()
 
@@ -268,7 +268,7 @@ class GPUWorker:
             # Numpy conversion (includes CPU transfer)
             hidden_np = spatial.detach().cpu().numpy()
             projected_np = scene[0].detach().cpu().numpy()
-            glimpse_np = imagenet_denormalize(out.glimpse[0].detach().cpu()).numpy()
+            glimpse_np = imagenet_denormalize(glimpse[0].detach().cpu()).numpy()
 
             t_end = time.perf_counter()
 
