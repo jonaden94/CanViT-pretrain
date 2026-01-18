@@ -17,7 +17,7 @@ import torch.nn.functional as F
 import tyro
 
 from avp_vit import ActiveCanViT, ActiveCanViTConfig
-from canvit.hub import create_backbone
+from canvit import create_backbone
 from canvit.rope import RoPE, rope_apply
 from canvit.viewpoint import Viewpoint
 

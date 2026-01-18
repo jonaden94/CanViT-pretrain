@@ -75,7 +75,7 @@ from tqdm import tqdm
 
 from avp_vit import ActiveCanViT, ActiveCanViTConfig
 from avp_vit.train.config import Config as TrainConfig
-from canvit.hub import create_backbone
+from canvit import create_backbone
 from canvit.viewpoint import Viewpoint
 
 

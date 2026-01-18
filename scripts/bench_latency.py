@@ -29,7 +29,7 @@ from tqdm import tqdm
 from avp_vit.checkpoint import load as load_ckpt, load_model
 from avp_vit.train.viewpoint import Viewpoint as NamedViewpoint
 from canvit.backbone.dinov3 import DINOv3Backbone
-from canvit.hub import create_backbone
+from canvit import create_backbone
 from canvit.model.active import ActiveCanViT
 from canvit.viewpoint import Viewpoint
 from ytch.device import sync_device

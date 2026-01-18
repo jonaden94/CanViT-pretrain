@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import tyro
 from canvit import flops
-from canvit.hub import create_backbone
+from canvit import create_backbone
 from rich.console import Console
 from rich.table import Table
 

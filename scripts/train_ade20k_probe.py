@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import tyro
 from canvit.backbone.dinov3 import DINOv3Backbone
-from canvit.hub import create_backbone
+from canvit import create_backbone
 from PIL import Image
 from torch import Tensor
 from torch.optim import AdamW

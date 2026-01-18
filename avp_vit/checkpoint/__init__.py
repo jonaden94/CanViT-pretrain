@@ -255,7 +255,7 @@ def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = Fa
     - If checkpoint has policy.* keys but no policy_config (legacy): use default PolicyConfig + warn
     - Otherwise: no policy
     """
-    from canvit.hub import create_backbone
+    from canvit import create_backbone
     from canvit.policy import PolicyConfig, PolicyHead
 
     ckpt = load(path, device)

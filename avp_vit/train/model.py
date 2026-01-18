@@ -4,7 +4,7 @@ import logging
 from typing import NamedTuple
 
 from canvit.backbone.dinov3 import DINOv3Backbone
-from canvit.hub import create_backbone
+from canvit import create_backbone
 from canvit.policy import PolicyConfig, PolicyHead
 
 from avp_vit import ActiveCanViT

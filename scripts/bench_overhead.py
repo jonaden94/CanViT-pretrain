@@ -36,7 +36,7 @@ import tyro
 from ytch.device import get_sensible_device, sync_device
 
 from avp_vit import ActiveCanViT, ActiveCanViTConfig
-from canvit.hub import create_backbone
+from canvit import create_backbone
 from canvit.viewpoint import Viewpoint
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")

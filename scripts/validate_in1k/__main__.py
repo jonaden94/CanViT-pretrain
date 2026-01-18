@@ -18,7 +18,7 @@ from tqdm import tqdm
 
 from canvit import GlimpseOutput, RecurrentState
 from canvit.backbone.dinov3 import DINOv3Backbone
-from canvit.hub import create_backbone
+from canvit import create_backbone
 from canvit.viewpoint import Viewpoint as CanvitViewpoint
 
 from avp_vit import ActiveCanViT

@@ -12,7 +12,7 @@ from torchvision.datasets import ImageFolder
 from tqdm import tqdm
 
 from canvit.backbone.dinov3 import DINOv3Backbone
-from canvit.hub import create_backbone
+from canvit import create_backbone
 
 from avp_vit.train.transforms import val_transform
 from avp_vit.train.probe import load_probe

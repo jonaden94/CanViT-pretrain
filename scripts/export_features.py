@@ -51,7 +51,7 @@ import pyarrow.parquet as pq
 import torch
 import tyro
 import xxhash
-from canvit.hub import create_backbone
+from canvit import create_backbone
 from PIL import Image, ImageFile
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset

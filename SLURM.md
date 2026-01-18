@@ -97,7 +97,7 @@ ls /datashare/imagenet/ILSVRC2012/val | head -3
 
 # 4. Teacher loads (CPU)
 uv run python -c "
-from canvit.hub import create_backbone
+from canvit import create_backbone
 import os
 b = create_backbone('dinov3_vitb16', weights=os.path.expanduser('~/projects/def-skrishna/checkpoints/dinov3/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth'))
 print(f'Teacher: {b.embed_dim}d, {b.n_blocks} blocks')

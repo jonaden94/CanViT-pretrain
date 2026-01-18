@@ -25,7 +25,7 @@ from avp_vit.train.probe import load_probe
 from avp_vit.train.viewpoint import Viewpoint as NamedViewpoint
 from avp_vit.train.viz import fit_pca, imagenet_denormalize
 from canvit.backbone.dinov3 import DINOv3Backbone
-from canvit.hub import create_backbone
+from canvit import create_backbone
 from canvit.policy import PolicyHead
 from dinov3_probes import DINOv3LinearClassificationHead
 from ytch.device import sync_device

@@ -46,7 +46,7 @@ Check canvit source in venv - model architecture lives there, not here. Read `in
 **To verify DINOv3 API:**
 ```bash
 uv run ipython -c "
-from canvit.hub import create_backbone
+from canvit import create_backbone
 bb = create_backbone('dinov3_vitb16', pretrained=False)
 print(dir(bb))  # see available attributes
 "

@@ -28,7 +28,7 @@ from ytch.device import get_sensible_device, sync_device
 from avp_vit import ActiveCanViT, ActiveCanViTConfig
 from avp_vit.train.config import Config as TrainConfig
 from canvit import flops
-from canvit.hub import create_backbone
+from canvit import create_backbone
 from canvit.viewpoint import Viewpoint
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
