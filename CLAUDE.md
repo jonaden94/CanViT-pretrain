@@ -58,8 +58,6 @@ Or read source: `.venv/lib/python3.12/site-packages/dinov3/` and `canvit/backbon
 
 **⚠️ VERIFY THIS SECTION AGAINST SOURCE CODE** — it can go stale. Check `avp_vit/__init__.py` and canvit source in `.venv/lib/python3.12/site-packages/canvit/`.
 
-**Alias**: `avp_vit.ACVFRP` = `CanViTForPretraining` (see `avp_vit/__init__.py`). Historical acronym kept for consistency.
-
 **Class hierarchy**:
 ```
 CanViT (canvit/model/base/)

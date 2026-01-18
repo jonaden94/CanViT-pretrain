@@ -6,7 +6,7 @@ import numpy as np
 from canvit import CanViTOutput
 from torch import Tensor
 
-from avp_vit import ACVFRP
+from avp_vit import CanViTForPretraining
 from .image import imagenet_denormalize
 
 
@@ -31,7 +31,7 @@ def extract_sample0_viz(
     out: CanViTOutput,
     glimpse: Tensor,
     predicted_scene: Tensor,
-    model: ACVFRP,
+    model: CanViTForPretraining,
 ) -> VizSampleData:
     """Extract viz data for sample 0, move to CPU as numpy."""
     glimpse_cpu = glimpse[0].detach().cpu()

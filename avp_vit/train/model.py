@@ -7,7 +7,7 @@ from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit import create_backbone
 from canvit.policy import PolicyConfig, PolicyHead
 
-from avp_vit import ACVFRP
+from avp_vit import CanViTForPretraining
 
 from .config import Config
 
@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 class ModelBundle(NamedTuple):
     """Model with derived runtime parameters."""
 
-    model: ACVFRP
+    model: CanViTForPretraining
     glimpse_size_px: int
 
 
@@ -48,7 +48,7 @@ def create_model(
     teacher_dim: int,
     cfg: Config,
 ) -> ModelBundle:
-    """Create ACVFRP wrapping student backbone."""
+    """Create CanViTForPretraining wrapping student backbone."""
     cfg.model.teacher_dim = teacher_dim
 
     policy = None
@@ -57,7 +57,7 @@ def create_model(
         policy = PolicyHead(embed_dim=student_backbone.embed_dim, cfg=policy_cfg)
         log.info(f"Policy head created: embed_dim={student_backbone.embed_dim}")
 
-    model = ACVFRP(backbone=student_backbone, cfg=cfg.model, policy=policy).to(
+    model = CanViTForPretraining(backbone=student_backbone, cfg=cfg.model, policy=policy).to(
         cfg.device
     )
     glimpse_size_px = cfg.glimpse_grid_size * student_backbone.patch_size_px
@@ -75,6 +75,6 @@ def compile_teacher(teacher: DINOv3Backbone) -> None:
     teacher.compile()
 
 
-def compile_model(model: ACVFRP) -> None:
-    """Compile ACVFRP in-place."""
+def compile_model(model: CanViTForPretraining) -> None:
+    """Compile CanViTForPretraining in-place."""
     model.compile()

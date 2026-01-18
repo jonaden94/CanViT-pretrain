@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 from ytch.device import get_sensible_device
 
-from avp_vit import ACVFRPConfig
+from avp_vit import CanViTForPretrainingConfig
 
 
 @dataclass
@@ -19,8 +19,8 @@ class Config:
     student_ckpt: Path | None = None  # None = random init
     # Model config (PretrainingConfig via alias)
     # teacher_dim placeholder - overridden by create_model based on actual teacher
-    model: ACVFRPConfig = field(
-        default_factory=lambda: ACVFRPConfig(teacher_dim=768)
+    model: CanViTForPretrainingConfig = field(
+        default_factory=lambda: CanViTForPretrainingConfig(teacher_dim=768)
     )
     # Glimpse/canvas sizes (runtime, not in model config)
     glimpse_grid_size: int = 8  # tokens per glimpse side

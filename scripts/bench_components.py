@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 import tyro
 
-from avp_vit import ACVFRP, ACVFRPConfig
+from avp_vit import CanViTForPretraining, CanViTForPretrainingConfig
 from canvit import create_backbone
 from canvit.rope import RoPE, rope_apply
 from canvit.viewpoint import Viewpoint
@@ -145,8 +145,8 @@ def main(cfg: Config) -> None:
     backbone = create_backbone("dinov3_vitb16", pretrained=False)
     teacher = create_backbone("dinov3_vitb16", pretrained=False)
 
-    model_cfg = ACVFRPConfig(teacher_dim=backbone.embed_dim)
-    model = ACVFRP(backbone=backbone, cfg=model_cfg, policy=None)
+    model_cfg = CanViTForPretrainingConfig(teacher_dim=backbone.embed_dim)
+    model = CanViTForPretraining(backbone=backbone, cfg=model_cfg, policy=None)
     model.to(device).eval()
     teacher.to(device).eval()
 

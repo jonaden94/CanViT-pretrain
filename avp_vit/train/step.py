@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
-from avp_vit import ACVFRP
+from avp_vit import CanViTForPretraining
 from canvit import CanViTOutput, RecurrentState, Viewpoint, sample_at_viewpoint
 
 from .loss import mse_loss
@@ -88,7 +88,7 @@ class StepOutput(NamedTuple):
 
 def training_step(
     *,
-    model: ACVFRP,
+    model: CanViTForPretraining,
     images: Tensor,
     scene_target: Tensor,
     cls_target: Tensor,

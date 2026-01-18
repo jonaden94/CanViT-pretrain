@@ -25,7 +25,7 @@ import torch
 import tyro
 from ytch.device import get_sensible_device, sync_device
 
-from avp_vit import ACVFRP, ACVFRPConfig
+from avp_vit import CanViTForPretraining, CanViTForPretrainingConfig
 from avp_vit.train.config import Config as TrainConfig
 from canvit import flops
 from canvit import create_backbone
@@ -79,8 +79,8 @@ def main(cfg: BenchConfig) -> None:
 
     # === Create models and extract ACTUAL config values ===
     backbone = create_backbone("dinov3_vitb16", pretrained=False)
-    model_cfg = ACVFRPConfig(teacher_dim=backbone.embed_dim)
-    model = ACVFRP(backbone=backbone, cfg=model_cfg, policy=None)
+    model_cfg = CanViTForPretrainingConfig(teacher_dim=backbone.embed_dim)
+    model = CanViTForPretraining(backbone=backbone, cfg=model_cfg, policy=None)
     teacher = create_backbone("dinov3_vitb16", pretrained=False)
 
     model.to(device).eval()

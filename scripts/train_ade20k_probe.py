@@ -35,7 +35,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchmetrics.classification import MulticlassJaccardIndex
 from tqdm import tqdm
 
-from avp_vit import ACVFRP, ACVFRPConfig
+from avp_vit import CanViTForPretraining, CanViTForPretrainingConfig
 from avp_vit.checkpoint import load as load_ckpt
 from avp_vit.train.config import Config as TrainConfig
 from avp_vit.train.viewpoint import Viewpoint
@@ -221,7 +221,7 @@ class ADE20kDataset(Dataset[tuple[Tensor, Tensor]]):
 
 
 def extract_features(
-    model: ACVFRP,
+    model: CanViTForPretraining,
     teacher: DINOv3Backbone,
     images: Tensor,
     n_timesteps: int,
@@ -463,10 +463,10 @@ def main(cfg: Config) -> None:
     log.info("Loading AVP model...")
     ckpt = load_ckpt(cfg.avp_ckpt, device)
     model_cfg = dacite.from_dict(
-        ACVFRPConfig, {**ckpt["model_config"], "teacher_dim": ckpt["teacher_dim"]}
+        CanViTForPretrainingConfig, {**ckpt["model_config"], "teacher_dim": ckpt["teacher_dim"]}
     )
     bb = create_backbone(ckpt["backbone"], pretrained=False)
-    model = ACVFRP(backbone=bb, cfg=model_cfg, policy=None)
+    model = CanViTForPretraining(backbone=bb, cfg=model_cfg, policy=None)
     model.load_state_dict(ckpt["state_dict"], strict=False)
     model = model.to(device).eval()
     for p in model.parameters():
