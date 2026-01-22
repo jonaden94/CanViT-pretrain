@@ -57,4 +57,7 @@ else
     echo "[env] No comet_api_key.txt (optional)"
 fi
 
+# Activate venv just in case we forget to use `uv run`
+source "$UV_PROJECT_ENVIRONMENT/bin/activate"
+
 echo "[env] Done"
