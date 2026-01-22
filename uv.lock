@@ -216,7 +216,7 @@ wheels = [
 [[package]]
 name = "canvit"
 version = "0.1.0"
-source = { git = "ssh://git@github.com/m2b3/CanViT.git?branch=main#8ce1ae24d40a010bcdd051fba2ab76815736f89e" }
+source = { git = "ssh://git@github.com/m2b3/CanViT.git?branch=main#8d461015eab181681f7481a7d3e4b191d7dba133" }
 dependencies = [
     { name = "dacite" },
     { name = "dinov3" },
