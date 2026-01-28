@@ -50,6 +50,8 @@ IGNORE_LABEL = 255
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406])
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225])
 
+# Feature types for probing. "predicted_norm" is the normalized scene prediction -
+# the probe learns directly in normalized space (no destandardization needed).
 FeatureType = Literal["hidden", "predicted_norm", "teacher_glimpse"]
 STATIC_FEATURES: set[FeatureType] = {"teacher_glimpse"}
 
@@ -243,6 +245,8 @@ def extract_features(
     state = model.init_state(batch_size=B, canvas_grid_size=canvas_grid)
 
     # Teacher glimpse baseline (static, same at all timesteps)
+    # Intentionally uses the ENTIRE image downscaled to glimpse resolution, not a crop.
+    # This baseline answers: "what if you just ran the teacher on a low-res version?"
     sz = glimpse_grid * teacher.patch_size_px
     small = F.interpolate(images, size=(sz, sz), mode="bilinear", align_corners=False)
     teacher_glimpse_feat = teacher.forward_norm_features(small).patches.view(
@@ -467,7 +471,11 @@ def main(cfg: Config) -> None:
     )
     bb = create_backbone(ckpt["backbone"], pretrained=False)
     model = CanViTForPretraining(backbone=bb, cfg=model_cfg, policy=None)
-    model.load_state_dict(ckpt["state_dict"], strict=False)
+    incompat = model.load_state_dict(ckpt["state_dict"], strict=False)
+    if incompat.missing_keys:
+        log.warning(f"Checkpoint missing keys: {incompat.missing_keys}")
+    if incompat.unexpected_keys:
+        log.warning(f"Checkpoint unexpected keys: {incompat.unexpected_keys}")
     model = model.to(device).eval()
     for p in model.parameters():
         p.requires_grad_(False)
