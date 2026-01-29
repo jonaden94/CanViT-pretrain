@@ -25,7 +25,7 @@ from canvit.viewpoint import Viewpoint as CanvitViewpoint
 from avp_vit import CanViTForPretraining
 from avp_vit.checkpoint import load as load_ckpt, load_model
 from avp_vit.train.transforms import val_transform
-from avp_vit.train.norm import PositionAwareNorm
+from canvit import CLSStandardizer
 from avp_vit.train.probe import load_probe
 from avp_vit.train.viewpoint import make_eval_viewpoints
 from ytch.device import get_sensible_device
@@ -61,13 +61,13 @@ def load_teacher(ckpt_path: Path, device: torch.device) -> DINOv3Backbone:
     return teacher.to(device).eval()
 
 
-def load_cls_normalizer(ckpt_path: Path, device: torch.device) -> PositionAwareNorm:
+def load_cls_normalizer(ckpt_path: Path, device: torch.device) -> CLSStandardizer:
     """Load CLS normalizer from checkpoint."""
     ckpt = load_ckpt(ckpt_path, device)
     cls_state = ckpt.get("cls_norm_state")
     assert cls_state is not None, "Checkpoint missing cls_norm_state"
-    n_tokens, embed_dim = cls_state["mean"].shape
-    cls_norm = PositionAwareNorm(n_tokens, embed_dim, grid_size=1)
+    embed_dim = cls_state["mean"].shape[-1]
+    cls_norm = CLSStandardizer(embed_dim)
     cls_norm.load_state_dict(cls_state)
     cls_norm.eval()
     return cls_norm.to(device)
