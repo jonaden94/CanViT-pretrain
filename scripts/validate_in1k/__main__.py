@@ -2,7 +2,11 @@
 """ImageNet-1k validation with coarse-to-fine viewpoint policy.
 
 Usage:
-    uv run -m scripts.validate_in1k --val-dir /path/to/imagenet/val --checkpoint reference.pt
+    source slurm/env.sh
+    uv run -m scripts.validate_in1k  # uses defaults from env.sh
+
+    # Or explicit:
+    uv run -m scripts.validate_in1k --checkpoint /path/to/ckpt.pt --val-dir /path/to/val
 """
 
 import logging
@@ -40,9 +44,13 @@ def _default_val_dir() -> Path | None:
     return None
 
 
+def _default_checkpoint() -> Path:
+    return Path("~/projects/def-skrishna/checkpoints/CanViT-flagship.pt").expanduser()
+
+
 @dataclass
 class Config:
-    checkpoint: Path
+    checkpoint: Path = field(default_factory=_default_checkpoint)
     val_dir: Path | None = field(default_factory=_default_val_dir)
     batch_size: int = 64
     num_workers: int = 8
@@ -105,31 +113,72 @@ def run_trajectory(
 
 @torch.inference_mode()
 def validate(cfg: Config) -> dict[str, float]:
+    log.info("=" * 70)
+    log.info("ImageNet-1k Validation")
+    log.info("=" * 70)
+    log.info("")
+    log.info("Configuration:")
+    log.info(f"  checkpoint:    {cfg.checkpoint}")
+    log.info(f"  val_dir:       {cfg.val_dir}")
+    log.info(f"  batch_size:    {cfg.batch_size}")
+    log.info(f"  num_workers:   {cfg.num_workers}")
+    log.info(f"  canvas_grid:   {cfg.canvas_grid}")
+    log.info(f"  glimpse_grid:  {cfg.glimpse_grid}")
+    log.info(f"  n_viewpoints:  {cfg.n_viewpoints}")
+    log.info(f"  no_teacher:    {cfg.no_teacher}")
+    log.info("")
+
     if cfg.val_dir is None:
         raise ValueError("--val-dir required (or set IN1K_VAL_DIR env var)")
+
     device = cfg.device
     log.info(f"Device: {device}")
+    if device.type == "cuda":
+        log.info(f"  GPU: {torch.cuda.get_device_name()}")
+        log.info(f"  Memory: {torch.cuda.get_device_properties(device).total_memory / 1e9:.1f} GB")
+    log.info("")
 
+    log.info("Loading checkpoint...")
+    assert cfg.checkpoint.exists(), f"Checkpoint not found: {cfg.checkpoint}"
+    ckpt = load_ckpt(cfg.checkpoint, device)
+    backbone_name = ckpt["backbone"]
+    step = ckpt.get("step", "unknown")
+    log.info(f"  backbone: {backbone_name}")
+    log.info(f"  step: {step}")
+    log.info("")
+
+    log.info("Loading model...")
     model = load_model(cfg.checkpoint, device)
     patch_size = model.backbone.patch_size_px
     glimpse_size_px = cfg.glimpse_grid * patch_size
     img_size = cfg.canvas_grid * patch_size
-    log.info(f"Grid: {cfg.canvas_grid}, glimpse: {cfg.glimpse_grid}, image: {img_size}px")
+    log.info(f"  patch_size: {patch_size}px")
+    log.info(f"  glimpse: {cfg.glimpse_grid}x{cfg.glimpse_grid} = {glimpse_size_px}px")
+    log.info(f"  canvas: {cfg.canvas_grid}x{cfg.canvas_grid} = {img_size}px")
+    log.info("")
 
-    ckpt = load_ckpt(cfg.checkpoint, device)
-    backbone = ckpt["backbone"]
-    probe = load_probe(backbone, device)
-    assert probe is not None, f"No probe for backbone {backbone}"
-    log.info(f"Probe loaded for {backbone}")
+    log.info("Loading probe...")
+    probe = load_probe(backbone_name, device)
+    assert probe is not None, f"No probe for backbone {backbone_name}"
+    log.info(f"  Probe loaded for {backbone_name}")
+    log.info("")
 
+    log.info("Loading CLS normalizer...")
     cls_norm = load_cls_normalizer(cfg.checkpoint, device)
+    log.info("  CLS normalizer loaded")
+    log.info("")
+
     teacher: DINOv3Backbone | None = None
     if not cfg.no_teacher:
+        log.info("Loading teacher for baseline comparison...")
         teacher = load_teacher(cfg.checkpoint, device)
-        log.info("Teacher loaded for baseline comparison")
+        log.info(f"  Teacher: {backbone_name}")
+        log.info("")
     else:
         log.info("Teacher baseline disabled")
+        log.info("")
 
+    log.info("Setting up dataset...")
     transform = val_transform(img_size)
     dataset = ImageFolder(str(cfg.val_dir), transform=transform)
     loader = DataLoader(
@@ -139,8 +188,14 @@ def validate(cfg: Config) -> dict[str, float]:
         num_workers=cfg.num_workers,
         pin_memory=True,
     )
-    log.info(f"Dataset: {len(dataset)} images, {len(loader)} batches")
-    log.info(f"Viewpoints: {cfg.n_viewpoints}")
+    log.info(f"  val_dir: {cfg.val_dir}")
+    log.info(f"  images: {len(dataset)}")
+    log.info(f"  batches: {len(loader)}")
+    log.info(f"  batch_size: {cfg.batch_size}")
+    log.info(f"  num_workers: {cfg.num_workers}")
+    log.info("")
+
+    log.info(f"Running validation with {cfg.n_viewpoints} viewpoints...")
 
     # Accumulators on GPU - no sync until needed
     correct_top1 = torch.zeros(cfg.n_viewpoints, device=device, dtype=torch.long)
@@ -190,7 +245,13 @@ def validate(cfg: Config) -> dict[str, float]:
     correct_top1_list = correct_top1.tolist()
     correct_top5_list = correct_top5.tolist()
 
-    log.info(f"Results by timestep ({cfg.n_viewpoints} viewpoints):")
+    log.info("")
+    log.info("=" * 70)
+    log.info("RESULTS")
+    log.info("=" * 70)
+    log.info(f"Total samples: {total}")
+    log.info("")
+    log.info(f"Accuracy by timestep ({cfg.n_viewpoints} viewpoints):")
     metrics: dict[str, float] = {"total_samples": float(total)}
     for t in range(cfg.n_viewpoints):
         acc1 = 100 * correct_top1_list[t] / total
