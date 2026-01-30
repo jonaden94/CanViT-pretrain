@@ -67,7 +67,7 @@ class Config:
     features: list[FeatureType] = field(
         default_factory=lambda: ["hidden", "predicted_norm", "teacher_glimpse"]
     )
-    n_timesteps: int = 5
+    n_timesteps: int = 10
 
     image_size: int = 512
     batch_size: int = 64
