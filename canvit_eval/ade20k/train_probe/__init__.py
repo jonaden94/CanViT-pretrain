@@ -85,6 +85,7 @@ def _save_checkpoint(
         filename = f"final_step{step}.pt"
 
     path = run_dir / filename
+    tmp_path = run_dir / f".{filename}.tmp"
     data = {
         "step": step,
         "probe_state_dicts": {name: p.head.state_dict() for name, p in probes.items()},
@@ -98,7 +99,9 @@ def _save_checkpoint(
         for old in run_dir.glob("best_*.pt"):
             old.unlink()
 
-    torch.save(data, path)
+    # Atomic save: write to temp, then rename
+    torch.save(data, tmp_path)
+    tmp_path.rename(path)
     log.info(f"Saved checkpoint: {path} ({path.stat().st_size / 1e6:.1f} MB)")
     return path
 
