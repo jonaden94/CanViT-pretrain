@@ -55,8 +55,8 @@ class Config:
     val_every: int = 500
     viz_every: int = 500
     viz_samples: int = 4
-    comet_project: str = "canvit-ade20k-probe"
+    comet_project: str = "canvit-ade20k-probes"
     comet_workspace: str = "m2b3-ava"
     device: str = "cuda"
     amp: bool = True
-    probe_ckpt_dir: Path | None = None
+    probe_ckpt_dir: Path | None = field(default_factory=lambda: Path("checkpoints/canvit-ade20k-probes"))
