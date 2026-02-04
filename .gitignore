@@ -1,21 +1,26 @@
-# Python-generated files
+# Python
 __pycache__/
 *.py[oc]
+*.egg-info/
 build/
 dist/
 wheels/
-*.egg-info
 
 # Virtual environments
-.venv
+.venv/
 
-# Model checkpoints
-*.pth
-outputs/
-avp_vit/train/viz/test_outputs/
-
-# Untracked directories (not part of main project)
-throwaway/
-*.DS_Store
+# Testing/linting
+.pytest_cache/
+.ruff_cache/
 .coverage
+
+# Outputs
+outputs/
+*.pth
+
+# macOS
+*.DS_Store
+
+# Misc
+throwaway/
 profile_*.json

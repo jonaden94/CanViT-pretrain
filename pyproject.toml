@@ -1,31 +1,34 @@
 [project]
-name = "avp-vit"
+name = "canvit-train"
 version = "0.1.0"
-description = "Active Visual Pondering for Vision Transformers"
+description = "CanViT pretraining and evaluation"
 authors = [{ name = "Yohaï-Eliel BERREBY", email = "me@yberreby.com" }]
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "dinov3",
-    "ybml",
-    "ijepa",
-    "torch>=2.9.1",
-    "torchvision>=0.24.1",
-    "omegaconf>=2.4.0.dev4",
-    "comet-ml>=3.55.0",
-    "tyro>=1.0.1",
-    "rich>=14.2.0",
-    "pyarrow>=22.0.0",
-    "dacite>=1.9.2",
-    "optuna>=4.6.0",
     "canvit",
+    "dinov3",
     "dinov3-probes",
-    "plotly>=6.5.0",
-    "albumentations>=2.0.8",
-    "ml-dtypes>=0.5.4",
-    "xxhash>=3.6.0",
-    "polars>=1.37.1",
-    "matplotlib>=3.10.8",
+    "ybml",
+    "torch>=2.0",
+    "torchvision",
+    "huggingface-hub",
+    "safetensors",
+    "comet-ml",
+    "tyro",
+    "tqdm",
+    "rich",
+    "omegaconf",
+    "dacite",
+    "optuna",
+    "albumentations",
+    "pandas",
+    "pyarrow",
+    "polars",
+    "torchmetrics",
+    "matplotlib",
+    "plotly",
+    "xxhash",
 ]
 
 [build-system]
@@ -34,30 +37,31 @@ build-backend = "hatchling.build"
 
 [tool.uv.sources]
 dinov3 = { git = "https://github.com/yberreby/dinov3.git" }
-ybml = { git = "https://github.com/yberreby/ybml.git", rev = "133cc9b" }
-ijepa = { git = "https://github.com/yberreby/ijepa.git" }
+ybml = { git = "https://github.com/yberreby/ybml.git" }
 canvit = { git = "ssh://git@github.com/yberreby/CanViT.git", branch = "main" }
 dinov3-probes = { git = "https://github.com/yberreby/dinov3-probes.git" }
 
 [dependency-groups]
 dev = [
     "basedpyright>=1.36.1",
-    "ipython>=9.8.0",
-    "pypatree>=0.3.0",
-    "pyright>=1.1.407",
+    "ipython",
+    "pypatree",
     "pytest>=9.0.2",
-    "pytest-cov>=7.0.0",
-    "ruff>=0.14.9",
+    "pytest-cov",
+    "ruff>=0.15.0",
 ]
 
 [tool.pytest.ini_options]
+testpaths = ["canvit_eval", "train"]
 python_files = ["test.py", "test_*.py"]
-testpaths = ["avp_vit", "tests"]
 
 [tool.ruff]
+line-length = 120
+target-version = "py312"
 exclude = ["throwaway"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
 
 [tool.basedpyright]
 typeCheckingMode = "standard"
-stubPath = "stubs"
-# exclude = ["throwaway"]
