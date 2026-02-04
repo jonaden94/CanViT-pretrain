@@ -25,8 +25,9 @@ from dinov3.eval.segmentation.schedulers import WarmupOneCycleLR
 from torch import Tensor
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
-from torchmetrics.classification import MulticlassJaccardIndex
 from tqdm import tqdm
+
+from canvit_eval.metrics import IoUAccumulator
 
 from dinov3.eval.segmentation.transforms import make_segmentation_train_transforms
 
@@ -144,15 +145,13 @@ def train(cfg: Config) -> None:
     for feat, probe in probes.items():
         log.info(f"  probe[{feat}]: dim={dims[feat]}, params={sum(p.numel() for p in probe.head.parameters()):,}")
 
-    # IoU metrics
+    # IoU metrics (histc-based, no sync in hot path)
     val_iou = {
-        feat: [MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(device)
-               for _ in range(cfg.n_timesteps)]
+        feat: [IoUAccumulator(NUM_CLASSES, IGNORE_LABEL, device) for _ in range(cfg.n_timesteps)]
         for feat in cfg.features
     }
     train_iou = {
-        feat: [MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(device)
-               for _ in range(cfg.n_timesteps)]
+        feat: [IoUAccumulator(NUM_CLASSES, IGNORE_LABEL, device) for _ in range(cfg.n_timesteps)]
         for feat in cfg.features
     }
 
@@ -246,11 +245,11 @@ def train(cfg: Config) -> None:
             any_improved = False
             for feat_type in cfg.features:
                 if feat_type in STATIC_FEATURES:
-                    miou = val_iou[feat_type][0].compute().item()
+                    miou = val_iou[feat_type][0].compute()
                     exp.log_metric(f"{feat_type}/val_miou", miou, step=step)
                     mean_miou = miou
                 else:
-                    mious = [val_iou[feat_type][t].compute().item() for t in range(cfg.n_timesteps)]
+                    mious = [val_iou[feat_type][t].compute() for t in range(cfg.n_timesteps)]
                     mean_miou = sum(mious) / len(mious)
                     for t, miou in enumerate(mious):
                         exp.log_metric(f"{feat_type}/val_miou_t{t}", miou, step=step)
@@ -339,11 +338,11 @@ def train(cfg: Config) -> None:
             log_curves = (step % cfg.val_every == 0)
             for feat_type in cfg.features:
                 if feat_type in STATIC_FEATURES:
-                    miou = train_iou[feat_type][0].compute().item()
+                    miou = train_iou[feat_type][0].compute()
                     log_dict[f"{feat_type}/train_miou"] = miou
                     train_iou[feat_type][0].reset()
                 else:
-                    mious = [train_iou[feat_type][t].compute().item() for t in range(cfg.n_timesteps)]
+                    mious = [train_iou[feat_type][t].compute() for t in range(cfg.n_timesteps)]
                     log_dict[f"{feat_type}/train_miou_mean"] = sum(mious) / len(mious)
                     if log_curves:
                         xs = list(range(cfg.n_timesteps))

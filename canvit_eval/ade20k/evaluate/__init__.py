@@ -15,10 +15,10 @@ import torch
 from canvit import CanViTForPretrainingHFHub
 from canvit_utils.teacher import load_teacher
 from torch.utils.data import DataLoader
-from torchmetrics.classification import MulticlassJaccardIndex
 from tqdm import tqdm
 
 from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset, ResizeMode, make_val_transform
+from canvit_eval.metrics import IoUAccumulator
 from canvit_eval.ade20k.probe import ProbeHead
 from canvit_eval.ade20k.train_probe.config import (
     FEATURE_NEEDS_LN,
@@ -145,10 +145,9 @@ def evaluate(cfg: EvalConfig) -> Path:
         num_workers=cfg.num_workers, pin_memory=True,
     )
 
-    # IoU metrics per feature per timestep (on GPU, no sync until end)
-    iou_metrics: dict[FeatureType, list[MulticlassJaccardIndex]] = {
-        feat: [MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(device)
-               for _ in range(T)]
+    # IoU metrics per feature per timestep (no sync until compute)
+    iou_metrics: dict[FeatureType, list[IoUAccumulator]] = {
+        feat: [IoUAccumulator(NUM_CLASSES, IGNORE_LABEL, device) for _ in range(T)]
         for feat in feature_types
     }
 
@@ -199,11 +198,11 @@ def evaluate(cfg: EvalConfig) -> Path:
 
     for feat_type in feature_types:
         if feat_type in STATIC_FEATURES:
-            miou = iou_metrics[feat_type][0].compute().item()
+            miou = iou_metrics[feat_type][0].compute()
             results["mious"][feat_type] = {"t0": miou, "mean": miou}
             log.info(f"  {feat_type}: mIoU={100*miou:.2f}%")
         else:
-            mious = [iou_metrics[feat_type][t].compute().item() for t in range(T)]
+            mious = [iou_metrics[feat_type][t].compute() for t in range(T)]
             mean_miou = sum(mious) / len(mious)
             results["mious"][feat_type] = {
                 **{f"t{t}": m for t, m in enumerate(mious)},
