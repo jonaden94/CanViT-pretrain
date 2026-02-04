@@ -25,6 +25,7 @@ dependencies = [
     "ml-dtypes>=0.5.4",
     "xxhash>=3.6.0",
     "polars>=1.37.1",
+    "matplotlib>=3.10.8",
 ]
 
 [build-system]

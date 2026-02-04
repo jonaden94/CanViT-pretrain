@@ -3,7 +3,7 @@
 Extends canvit.viewpoint with training-specific utilities:
 - Named viewpoints for debugging/logging
 - Random viewpoint sampling with safe-box-area distribution
-- Evaluation viewpoint sequences
+- Evaluation viewpoint sequences (wraps canvit_utils.policies)
 """
 
 from dataclasses import dataclass
@@ -12,6 +12,7 @@ from typing import NamedTuple
 
 import torch
 from canvit.viewpoint import Viewpoint as CoreViewpoint
+from canvit_utils.policies import coarse_to_fine_viewpoints as _coarse_to_fine
 from torch import Tensor
 
 __all__ = [
@@ -142,55 +143,11 @@ def make_eval_viewpoints(
 ) -> list[Viewpoint]:
     """Generate quadtree viewpoints with random ordering WITHIN each level, per batch item.
 
-    Quadtree structure:
-    - Level 0: Full scene (1 viewpoint, scale=1) - always first
-    - Level 1: 4 quadrants (scale=0.5) - shuffled per batch item
-    - Level 2: 16 sub-quadrants (scale=0.25) - shuffled per batch item
-    - Level L: 4^L viewpoints (scale=0.5^L)
-
-    Each batch item gets the same level ordering but different shuffle within levels.
+    Wraps canvit_utils.policies.coarse_to_fine_viewpoints and adds names for debugging.
     """
-    assert n_viewpoints >= 1
-
-    # Build levels of quadtree nodes
-    levels: list[list[tuple[float, float, float]]] = [[(0.0, 0.0, 1.0)]]
-    while sum(len(lvl) for lvl in levels) < n_viewpoints:
-        parent_level = levels[-1]
-        child_level: list[tuple[float, float, float]] = []
-        for parent_cy, parent_cx, parent_scale in parent_level:
-            child_scale = parent_scale / 2
-            for qy, qx in [(0, 0), (0, 1), (1, 0), (1, 1)]:
-                child_cy = parent_cy + (qy - 0.5) * parent_scale
-                child_cx = parent_cx + (qx - 0.5) * parent_scale
-                child_level.append((child_cy, child_cx, child_scale))
-        levels.append(child_level)
-
-    # Build viewpoints with per-batch-item shuffling within each level
+    core_vps = _coarse_to_fine(B, device, n_viewpoints)
     result: list[Viewpoint] = []
-    for level_idx, level in enumerate(levels):
-        level_tensor = torch.tensor(level, device=device, dtype=torch.float32)  # (L, 3)
-        L = len(level)
-
-        # Random permutation per batch item for this level
-        if L == 1:
-            # Only one node in level (e.g., full scene) - no shuffle needed
-            perms = torch.zeros(B, 1, dtype=torch.long, device=device)
-        else:
-            perms = torch.stack([torch.randperm(L, device=device) for _ in range(B)])  # (B, L)
-
-        for i in range(L):
-            if len(result) >= n_viewpoints:
-                break
-            indices = perms[:, i]  # (B,) - which node in this level each batch item sees
-            centers = level_tensor[indices, :2]  # (B, 2)
-            scales = level_tensor[indices, 2]  # (B,)
-            if level_idx == 0:
-                name = "full"
-            else:
-                name = f"L{level_idx}_{i}"
-            result.append(Viewpoint(name=name, centers=centers, scales=scales))
-
-        if len(result) >= n_viewpoints:
-            break
-
-    return result[:n_viewpoints]
+    for i, vp in enumerate(core_vps):
+        name = "full" if i == 0 else f"vp_{i}"
+        result.append(Viewpoint(name=name, centers=vp.centers, scales=vp.scales))
+    return result
