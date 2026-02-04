@@ -3,9 +3,16 @@
 Defaults aligned with DINOv3's linear probing protocol (Appendix D.1).
 """
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
+
+
+def _default_probe_ckpt_dir() -> Path:
+    base = os.environ.get("CHECKPOINTS_DIR", "checkpoints")
+    return Path(base) / "canvit-ade20k-probes"
+
 
 FeatureType = Literal["hidden", "predicted_norm", "teacher_glimpse", "teacher_full"]
 STATIC_FEATURES: frozenset[FeatureType] = frozenset({"teacher_glimpse", "teacher_full"})
@@ -59,4 +66,4 @@ class Config:
     comet_workspace: str = "m2b3-ava"
     device: str = "cuda"
     amp: bool = True
-    probe_ckpt_dir: Path | None = field(default_factory=lambda: Path("checkpoints/canvit-ade20k-probes"))
+    probe_ckpt_dir: Path | None = field(default_factory=_default_probe_ckpt_dir)
