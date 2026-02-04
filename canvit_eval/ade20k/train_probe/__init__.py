@@ -10,7 +10,6 @@ Note: We use whole-image inference, not sliding window (intentional simplificati
 """
 
 import logging
-import math
 import os
 import time
 from dataclasses import asdict
@@ -297,10 +296,7 @@ def train(cfg: Config) -> None:
                 losses = [focal_loss(logits, masks, cfg.focal_gamma) for logits in logits_list]
             loss = torch.stack(losses).mean()
             loss.backward()
-            if math.isfinite(cfg.grad_clip):
-                grad_norm = nn.utils.clip_grad_norm_(probe.head.parameters(), cfg.grad_clip)
-            else:
-                grad_norm = torch.nn.utils.clip_grad_norm_(probe.head.parameters(), float("inf"))
+            grad_norm = nn.utils.clip_grad_norm_(probe.head.parameters(), cfg.grad_clip)
             probe.optimizer.step()
             probe.scheduler.step()
             probe.accumulate(loss, grad_norm)
