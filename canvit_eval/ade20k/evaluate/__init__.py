@@ -20,7 +20,13 @@ from tqdm import tqdm
 
 from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset, ResizeMode, make_val_transform
 from canvit_eval.ade20k.probe import ProbeHead
-from canvit_eval.ade20k.train_probe.config import FEATURE_NEEDS_LN, STATIC_FEATURES, FeatureType, get_feature_dims
+from canvit_eval.ade20k.train_probe.config import (
+    FEATURE_NEEDS_LN,
+    STATIC_FEATURES,
+    FeatureType,
+    _default_ade20k_root,
+    get_feature_dims,
+)
 from canvit_eval.ade20k.train_probe.features import extract_features
 from canvit_eval.ade20k.train_probe.loss import upsample_preds
 from canvit_eval.utils import PolicyName, collect_metadata, make_viewpoints
@@ -41,7 +47,7 @@ class EvalConfig:
     """ADE20K probe evaluation configuration."""
 
     probe_ckpt: Path
-    ade20k_root: Path
+    ade20k_root: Path = field(default_factory=_default_ade20k_root)
     output: Path = field(default_factory=_default_output)
 
     model_repo: str = "canvit/canvit-vitb16-pretrain-512px-in21k"

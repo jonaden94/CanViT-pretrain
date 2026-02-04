@@ -14,6 +14,15 @@ def _default_probe_ckpt_dir() -> Path:
     return Path(base) / "canvit-ade20k-probes"
 
 
+def _default_ade20k_root() -> Path:
+    """Default ADE20K root from env var, or SLURM_TMPDIR if available."""
+    if root := os.environ.get("ADE20K_ROOT"):
+        return Path(root)
+    if tmpdir := os.environ.get("SLURM_TMPDIR"):
+        return Path(tmpdir) / "ADEChallengeData2016"
+    raise ValueError("ADE20K_ROOT env var not set and not running under SLURM")
+
+
 FeatureType = Literal["hidden", "predicted_norm", "teacher_glimpse", "teacher_full"]
 STATIC_FEATURES: frozenset[FeatureType] = frozenset({"teacher_glimpse", "teacher_full"})
 
@@ -40,7 +49,7 @@ LossType = Literal["ce", "focal"]
 class Config:
     """ADE20K probe training configuration."""
 
-    ade20k_root: Path
+    ade20k_root: Path = field(default_factory=_default_ade20k_root)
     model_repo: str = "canvit/canvit-vitb16-pretrain-512px-in21k"
     features: list[FeatureType] = field(default_factory=lambda: ["hidden", "predicted_norm", "teacher_glimpse"])
     n_timesteps: int = 10

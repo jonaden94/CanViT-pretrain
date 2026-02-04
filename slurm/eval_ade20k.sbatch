@@ -8,8 +8,10 @@
 #SBATCH --output=logs/eval-ade20k-%j.out
 #SBATCH --error=logs/eval-ade20k-%j.err
 
-# CanViT ADE20K probe training
-# Usage: sbatch slurm/eval_ade20k.sbatch
+# CanViT ADE20K probe training/evaluation
+# Usage:
+#   sbatch slurm/eval_ade20k.sbatch train --max-steps 5000
+#   sbatch slurm/eval_ade20k.sbatch evaluate --probe-ckpt /path/to/best.pt
 
 set -eux
 
@@ -26,12 +28,11 @@ source slurm/env.sh
 mkdir -p logs
 
 # Extract ADE20K to SLURM_TMPDIR if needed
-ADE20K_ROOT="$SLURM_TMPDIR/ADEChallengeData2016"
+export ADE20K_ROOT="$SLURM_TMPDIR/ADEChallengeData2016"
 if [ ! -d "$ADE20K_ROOT" ]; then
     log "Extracting ADE20K dataset..."
     unzip -q "$ADE20K_ZIP" -d "$SLURM_TMPDIR"
 fi
 
 log "Running..."
-exec uv run python -m canvit_eval.ade20k "$@" \
-    --ade20k-root "$ADE20K_ROOT"
+exec uv run python -m canvit_eval.ade20k "$@"
