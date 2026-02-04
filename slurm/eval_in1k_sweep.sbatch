@@ -7,42 +7,47 @@
 #SBATCH --mem=32G
 #SBATCH --output=logs/eval-in1k-sweep-%A_%a.out
 #SBATCH --error=logs/eval-in1k-sweep-%A_%a.err
-#SBATCH --array=0-5
 
-# IN1k evaluation sweep: 3 policies × 2 rollouts = 6 jobs
-# Usage: sbatch slurm/eval_in1k_sweep.sbatch
+# IN1k evaluation sweep: N rollouts of a given policy
+#
+# Usage:
+#   sbatch --array=0-1 slurm/eval_in1k_sweep.sbatch c2f
+#   sbatch --array=0-1 slurm/eval_in1k_sweep.sbatch fullrand
+#   sbatch --array=0-1 slurm/eval_in1k_sweep.sbatch iid
+#
+# First argument is policy name: c2f, fullrand, iid
 
 set -eux
+
+NAME="${1:?Usage: sbatch --array=0-N eval_in1k_sweep.sbatch <c2f|fullrand|iid>}"
 
 cd ~/scratch/CanViT-train
 source slurm/env.sh
 mkdir -p logs outputs
 
-# Decode array task ID into policy config
-# 0-1: coarse_to_fine
-# 2-3: random with start_full=True (full-then-random)
-# 4-5: random with start_full=False (IID)
+case "$NAME" in
+    c2f)
+        POLICY="coarse_to_fine"
+        EXTRA_ARGS=""
+        ;;
+    fullrand)
+        POLICY="random"
+        EXTRA_ARGS="--random-start-full"
+        ;;
+    iid)
+        POLICY="random"
+        EXTRA_ARGS="--no-random-start-full"
+        ;;
+    *)
+        echo "Unknown policy name: $NAME (expected c2f, fullrand, iid)"
+        exit 1
+        ;;
+esac
 
-TASK=$SLURM_ARRAY_TASK_ID
-ROLLOUT=$((TASK % 2))
-
-if [ $TASK -lt 2 ]; then
-    POLICY="coarse_to_fine"
-    NAME="c2f"
-    EXTRA_ARGS=""
-elif [ $TASK -lt 4 ]; then
-    POLICY="random"
-    NAME="fullrand"
-    EXTRA_ARGS="--random-start-full"
-else
-    POLICY="random"
-    NAME="iid"
-    EXTRA_ARGS="--no-random-start-full"
-fi
-
+ROLLOUT=$SLURM_ARRAY_TASK_ID
 OUTPUT="outputs/in1k_${NAME}_r${ROLLOUT}.pt"
 
-echo "Task $TASK: policy=$POLICY, rollout=$ROLLOUT, output=$OUTPUT"
+echo "Policy: $NAME ($POLICY), rollout: $ROLLOUT, output: $OUTPUT"
 exec uv run python -m canvit_eval.in1k \
     --policy "$POLICY" \
     --output "$OUTPUT" \
