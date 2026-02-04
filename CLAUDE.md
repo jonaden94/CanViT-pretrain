@@ -1,10 +1,10 @@
-# AVP-ViT Development Guide
+# CanViT-train Development Guide
 
 ## Context
 
 Research project, started September 2024. Mostly one person. High cognitive load.
 
-This repo (`avp-vit`) is experimental - training, viz, monitoring code that evolves rapidly. We accept the mess, gradually clean/extract/modularize.
+This repo contains CanViT pretraining (`canvit_pretrain/`) and evaluation (`canvit_eval/`) code.
 
 `canvit` (separate repo, in venv) is the core architecture - stabler, cleaner API, geared for future public release. **Will not merge back.** The split is intentional: core arch evolves slower than experiment code.
 
@@ -56,7 +56,7 @@ Or read source: `.venv/lib/python3.12/site-packages/dinov3/` and `canvit/backbon
 
 ## CanViT Model Architecture
 
-**⚠️ VERIFY THIS SECTION AGAINST SOURCE CODE** — it can go stale. Check `avp_vit/__init__.py` and canvit source in `.venv/lib/python3.12/site-packages/canvit/`.
+**⚠️ VERIFY THIS SECTION AGAINST SOURCE CODE** — it can go stale. Check `canvit_pretrain/__init__.py` and canvit source in `.venv/lib/python3.12/site-packages/canvit/`.
 
 **Class hierarchy**:
 ```
@@ -83,13 +83,34 @@ RecurrentState(
 
 ```bash
 uv run pypatree                              # structure
-uv run -m avp_vit.train                      # training
+uv run -m canvit_pretrain.train              # pretraining
+uv run -m canvit_eval.in1k                   # IN1k evaluation
+uv run -m canvit_eval.ade20k                 # ADE20k evaluation
 COMET_API_KEY=$(cat ~/comet_api_key.txt) uv run ...
 uv run ipython -c "..."                      # quick experiments
 ```
 
 ## Conventions
 
-- NEVER `git add -A` or `git add -u`
-- Directory structure: `avp_vit/mymodule/{__init__.py,test.py,...}`
+### ⚠️ CRITICAL: Git Safety
+
+**NEVER EVER use `git add -A`, `git add -u`, or `git add .`**
+
+This repo has GIGABYTES of untracked checkpoint files (.pt). Staging them would be catastrophic.
+
+**ALWAYS stage files explicitly by name:**
+```bash
+git add specific_file.py another_file.py
+```
+
+**Before ANY commit, verify what's staged:**
+```bash
+git diff --cached --stat
+```
+
+If you see .pt files or anything unexpected, `git reset HEAD` and start over.
+
+### Other Conventions
+
+- Directory structure: `canvit_pretrain/mymodule/{__init__.py,test.py,...}`
 - `assert isinstance(...)` over `cast` or `type: ignore`
