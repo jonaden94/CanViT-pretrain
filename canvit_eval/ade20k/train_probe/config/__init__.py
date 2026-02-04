@@ -16,6 +16,23 @@ def _default_probe_ckpt_dir() -> Path:
 
 FeatureType = Literal["hidden", "predicted_norm", "teacher_glimpse", "teacher_full"]
 STATIC_FEATURES: frozenset[FeatureType] = frozenset({"teacher_glimpse", "teacher_full"})
+
+# Only raw canvas features need LN; others are already normalized by teacher
+FEATURE_NEEDS_LN: dict[FeatureType, bool] = {
+    "hidden": True, "predicted_norm": False, "teacher_glimpse": False, "teacher_full": False,
+}
+
+
+def get_feature_dims(canvas_dim: int, teacher_dim: int) -> dict[FeatureType, int]:
+    """Get embedding dimension for each feature type."""
+    return {
+        "hidden": canvas_dim,
+        "predicted_norm": teacher_dim,
+        "teacher_glimpse": teacher_dim,
+        "teacher_full": teacher_dim,
+    }
+
+
 LossType = Literal["ce", "focal"]
 
 

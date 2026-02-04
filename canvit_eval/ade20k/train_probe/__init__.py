@@ -33,7 +33,7 @@ from canvit_eval.ade20k.probe import ProbeHead
 from canvit_eval.ade20k.viz import log_viz
 from canvit_eval.utils import make_viewpoints
 
-from .config import STATIC_FEATURES, Config, FeatureType
+from .config import FEATURE_NEEDS_LN, STATIC_FEATURES, Config, FeatureType, get_feature_dims
 from .features import ExtractedFeatures, extract_features
 from .loss import ce_loss, focal_loss, upsample_preds
 from .state import ProbeState
@@ -60,11 +60,12 @@ def _make_probe(name: str, dim: int, cfg: Config, device: torch.device, *, use_l
     return ProbeState(name, head, opt, scheduler)
 
 
-def _save_checkpoint(path: Path, probes: dict[FeatureType, ProbeState], step: int) -> None:
+def _save_checkpoint(path: Path, probes: dict[FeatureType, ProbeState], step: int, cfg: Config) -> None:
     data = {
         "step": step,
         "probe_state_dicts": {name: p.head.state_dict() for name, p in probes.items()},
         "best_mean_mious": {name: p.best_mean_miou for name, p in probes.items()},
+        "config": asdict(cfg),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(data, path)
@@ -100,21 +101,11 @@ def train(cfg: Config) -> None:
     log.info(f"  canvas: {canvas_grid}x{canvas_grid}, glimpse: {cfg.glimpse_px}px")
 
     # Probes
-    dims: dict[FeatureType, int] = {
-        "hidden": model.canvas_dim,
-        "predicted_norm": teacher.embed_dim,
-        "teacher_glimpse": teacher.embed_dim,
-        "teacher_full": teacher.embed_dim,
-    }
-    # Only raw canvas features need LN; others are already normalized
-    needs_ln: dict[FeatureType, bool] = {
-        "hidden": True, "predicted_norm": False, "teacher_glimpse": False, "teacher_full": False,
-    }
-
+    dims = get_feature_dims(model.canvas_dim, teacher.embed_dim)
     compute_teacher_full = "teacher_full" in cfg.features
     need_canvit = any(f not in STATIC_FEATURES for f in cfg.features)
     probes: dict[FeatureType, ProbeState] = {
-        feat: _make_probe(feat, dims[feat], cfg, device, use_ln=needs_ln[feat]) for feat in cfg.features
+        feat: _make_probe(feat, dims[feat], cfg, device, use_ln=FEATURE_NEEDS_LN[feat]) for feat in cfg.features
     }
     for feat, probe in probes.items():
         log.info(f"  probe[{feat}]: dim={dims[feat]}, params={sum(p.numel() for p in probe.head.parameters()):,}")
@@ -223,7 +214,7 @@ def train(cfg: Config) -> None:
                     any_improved = True
 
             if any_improved and cfg.probe_ckpt_dir:
-                _save_checkpoint(cfg.probe_ckpt_dir / "best.pt", probes, step)
+                _save_checkpoint(cfg.probe_ckpt_dir / "best.pt", probes, step, cfg)
 
             val_time = time.perf_counter() - val_start
             log.info(f"Step {step}: validation took {val_time:.1f}s")
@@ -320,7 +311,7 @@ def train(cfg: Config) -> None:
     pbar.close()
 
     if cfg.probe_ckpt_dir:
-        _save_checkpoint(cfg.probe_ckpt_dir / "final.pt", probes, step)
+        _save_checkpoint(cfg.probe_ckpt_dir / "final.pt", probes, step, cfg)
 
     log.info("=" * 60)
     log.info("Training complete. Best mean mIoU:")

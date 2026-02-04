@@ -21,12 +21,12 @@ from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 from torchmetrics.classification import MulticlassJaccardIndex
-from torchvision import transforms as T
+from torchvision import transforms as tvt
 from tqdm import tqdm
 
 from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES
 from canvit_eval.ade20k.probe import ProbeHead
-from canvit_eval.ade20k.train_probe.config import STATIC_FEATURES, FeatureType
+from canvit_eval.ade20k.train_probe.config import FEATURE_NEEDS_LN, STATIC_FEATURES, FeatureType, get_feature_dims
 from canvit_eval.ade20k.train_probe.features import extract_features
 from canvit_eval.ade20k.train_probe.loss import upsample_preds
 from canvit_eval.utils import PolicyName, collect_metadata, make_viewpoints
@@ -77,26 +77,25 @@ class ADE20kValDataset(Dataset[tuple[Tensor, Tensor]]):
 
     def __init__(self, root: Path, size: int, transform_mode: TransformMode) -> None:
         self.size = size
-        self._transform_mode = transform_mode
 
         if transform_mode == "center_crop":
-            self._img_transform = T.Compose([
-                T.Resize(size),
-                T.CenterCrop(size),
-                T.ToTensor(),
-                T.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD),
+            self._img_transform = tvt.Compose([
+                tvt.Resize(size),
+                tvt.CenterCrop(size),
+                tvt.ToTensor(),
+                tvt.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD),
             ])
-            self._mask_transform = T.Compose([
-                T.Resize(size, T.InterpolationMode.NEAREST),
-                T.CenterCrop(size),
+            self._mask_transform = tvt.Compose([
+                tvt.Resize(size, tvt.InterpolationMode.NEAREST),
+                tvt.CenterCrop(size),
             ])
         else:  # squish
-            self._img_transform = T.Compose([
-                T.Resize((size, size)),
-                T.ToTensor(),
-                T.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD),
+            self._img_transform = tvt.Compose([
+                tvt.Resize((size, size)),
+                tvt.ToTensor(),
+                tvt.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD),
             ])
-            self._mask_transform = T.Resize((size, size), T.InterpolationMode.NEAREST)
+            self._mask_transform = tvt.Resize((size, size), tvt.InterpolationMode.NEAREST)
 
         img_dir = root / "images" / "validation"
         ann_dir = root / "annotations" / "validation"
@@ -134,19 +133,13 @@ def load_probes(
     log.info(f"Loading probes from {ckpt_path}")
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
 
-    dims: dict[FeatureType, int] = {
-        "hidden": canvas_dim,
-        "predicted_norm": teacher_dim,
-        "teacher_glimpse": teacher_dim,
-        "teacher_full": teacher_dim,
-    }
-    needs_ln: dict[FeatureType, bool] = {
-        "hidden": True, "predicted_norm": False, "teacher_glimpse": False, "teacher_full": False,
-    }
+    dims = get_feature_dims(canvas_dim, teacher_dim)
+    # Use dropout from checkpoint config if available, else 0 (doesn't matter for eval)
+    dropout = ckpt.get("config", {}).get("dropout", 0.0)
 
     probes: dict[FeatureType, ProbeHead] = {}
     for name, state_dict in ckpt["probe_state_dicts"].items():
-        probe = ProbeHead(dims[name], use_ln=needs_ln[name]).to(device)
+        probe = ProbeHead(dims[name], dropout=dropout, use_ln=FEATURE_NEEDS_LN[name]).to(device)
         probe.load_state_dict(state_dict)
         probe.eval()
         probes[name] = probe
