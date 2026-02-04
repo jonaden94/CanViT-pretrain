@@ -33,9 +33,9 @@ torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(False)
 from ytch.model import count_parameters  # noqa: E402
 
-from avp_vit import CanViTForPretrainingConfig  # noqa: E402
-from avp_vit.checkpoint import CheckpointData, load as load_checkpoint  # noqa: E402
-from avp_vit.checkpoint import save as save_checkpoint, update_symlink, find_latest  # noqa: E402
+from canvit_pretrain import CanViTForPretrainingConfig  # noqa: E402
+from canvit_pretrain.checkpoint import CheckpointData, load as load_checkpoint  # noqa: E402
+from canvit_pretrain.checkpoint import save as save_checkpoint, update_symlink, find_latest  # noqa: E402
 from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
 
 from .config import Config  # noqa: E402

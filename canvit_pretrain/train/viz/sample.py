@@ -6,7 +6,7 @@ import numpy as np
 from canvit import CanViTOutput
 from torch import Tensor
 
-from avp_vit import CanViTForPretraining
+from canvit_pretrain import CanViTForPretraining
 from .image import imagenet_denormalize
 
 

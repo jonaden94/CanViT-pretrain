@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 from ytch.device import get_sensible_device
 
-from avp_vit import CanViTForPretrainingConfig
+from canvit_pretrain import CanViTForPretrainingConfig
 
 
 @dataclass

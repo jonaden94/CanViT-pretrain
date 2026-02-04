@@ -1,24 +1,24 @@
 """Training utilities for AVP-ViT.
 
 This module provides the main training loop and supporting utilities.
-Entry point: python -m avp_vit.train
+Entry point: python -m canvit_pretrain.train
 """
 
-from avp_vit.train.data import (
+from canvit_pretrain.train.data import (
     Batch,
     InfiniteLoader,
     Loaders,
     create_loaders,
     scene_size_px,
 )
-from avp_vit.train.transforms import (
+from canvit_pretrain.train.transforms import (
     IMAGENET_MEAN,
     IMAGENET_STD,
     imagenet_normalize,
     train_transform,
     val_transform,
 )
-from avp_vit.train.probe import (
+from canvit_pretrain.train.probe import (
     IN1K_NUM_CLASSES,
     PROBE_REGISTRY,
     ProbeInfo,
@@ -30,15 +30,15 @@ from avp_vit.train.probe import (
     labels_are_in1k,
     load_probe,
 )
-from avp_vit.train.scheduler import warmup_constant_scheduler
-from avp_vit.train.viewpoint import (
+from canvit_pretrain.train.scheduler import warmup_constant_scheduler
+from canvit_pretrain.train.viewpoint import (
     PixelBox,
     Viewpoint,
     make_eval_viewpoints,
     random_viewpoint,
     viewpoint_to_pixel_box,
 )
-from avp_vit.train.viz import (
+from canvit_pretrain.train.viz import (
     TimestepPredictions,
     fit_pca,
     imagenet_denormalize,

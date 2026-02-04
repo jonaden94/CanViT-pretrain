@@ -1,29 +1,29 @@
-"""Tests for avp_vit.train module."""
+"""Tests for canvit_pretrain.train module."""
 
 import torch
 from PIL import Image
 from torch import Tensor
 from torchvision import transforms
 
-from avp_vit.train.data import (
+from canvit_pretrain.train.data import (
     MAX_CONSECUTIVE_FAILURES,
     InfiniteLoader,
 )
-from avp_vit.train.transforms import (
+from canvit_pretrain.train.transforms import (
     IMAGENET_MEAN,
     IMAGENET_STD,
     imagenet_normalize,
     train_transform,
     val_transform,
 )
-from avp_vit.train.scheduler import warmup_constant_scheduler
-from avp_vit.train.viewpoint import (
+from canvit_pretrain.train.scheduler import warmup_constant_scheduler
+from canvit_pretrain.train.viewpoint import (
     PixelBox,
     random_viewpoint,
     make_eval_viewpoints,
     viewpoint_to_pixel_box,
 )
-from avp_vit.train.viz import imagenet_denormalize, timestep_colors
+from canvit_pretrain.train.viz import imagenet_denormalize, timestep_colors
 
 
 # === Data Tests ===

@@ -1,12 +1,12 @@
-"""Tests for avp_vit.train.viz module."""
+"""Tests for canvit_pretrain.train.viz module."""
 
 import numpy as np
 import torch
 
-from avp_vit.train.viz.image import imagenet_denormalize
-from avp_vit.train.viz.metrics import compute_spatial_stats, cosine_dissimilarity
-from avp_vit.train.viz.pca import fit_pca, pca_rgb
-from avp_vit.train.viz.plot import timestep_colors
+from canvit_pretrain.train.viz.image import imagenet_denormalize
+from canvit_pretrain.train.viz.metrics import compute_spatial_stats, cosine_dissimilarity
+from canvit_pretrain.train.viz.pca import fit_pca, pca_rgb
+from canvit_pretrain.train.viz.plot import timestep_colors
 
 
 class TestFitPca:

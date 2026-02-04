@@ -18,7 +18,7 @@ from dinov3_probes import DINOv3LinearClassificationHead
 
 from ytch.correctness import assert_shape
 
-from avp_vit import CanViTForPretraining
+from canvit_pretrain import CanViTForPretraining
 from canvit import CLSStandardizer, PatchStandardizer
 from ..probe import (
     compute_in1k_top1,

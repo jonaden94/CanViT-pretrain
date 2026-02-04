@@ -5,9 +5,9 @@ from pathlib import Path
 
 import torch
 
-from avp_vit import CanViTForPretraining, CanViTForPretrainingConfig
+from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
 from canvit.backbone.dinov3 import DINOv3Backbone
-from avp_vit.checkpoint import CheckpointData, load, save
+from canvit_pretrain.checkpoint import CheckpointData, load, save
 
 
 def _make_tiny_model(device: torch.device) -> CanViTForPretraining:

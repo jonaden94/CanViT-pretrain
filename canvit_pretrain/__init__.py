@@ -1,4 +1,4 @@
-"""avp_vit: Active Vision Pretraining with ViT."""
+"""canvit_pretrain: Active Vision Pretraining with ViT."""
 
 from canvit.model.pretraining import CanViTForPretraining, CanViTForPretrainingConfig
 

@@ -8,7 +8,7 @@ from canvit import create_backbone
 from canvit.policy import PolicyConfig, PolicyHead
 from canvit_utils.teacher import load_teacher as _load_teacher
 
-from avp_vit import CanViTForPretraining
+from canvit_pretrain import CanViTForPretraining
 
 from .config import Config
 

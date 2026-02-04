@@ -15,7 +15,7 @@ import dacite
 import torch
 from torch import Tensor
 
-from avp_vit import CanViTForPretraining, CanViTForPretrainingConfig
+from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
 
 log = logging.getLogger(__name__)
 

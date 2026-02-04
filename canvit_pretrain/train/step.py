@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
-from avp_vit import CanViTForPretraining
+from canvit_pretrain import CanViTForPretraining
 from canvit import CanViTOutput, RecurrentState, Viewpoint, sample_at_viewpoint
 
 from .loss import mse_loss
