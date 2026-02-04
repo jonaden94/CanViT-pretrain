@@ -290,6 +290,9 @@ def train(cfg: Config) -> None:
                 log_dict[f"{name}/loss"] = avg_loss
                 log_dict[f"{name}/grad_norm"] = avg_grad
 
+            # Log train mIoU mean (scalar) at log_every
+            # Log train mIoU curves only at val_every to save Comet curve budget
+            log_curves = (step % cfg.val_every == 0)
             for feat_type in cfg.features:
                 if feat_type in STATIC_FEATURES:
                     miou = train_iou[feat_type][0].compute().item()
@@ -298,7 +301,8 @@ def train(cfg: Config) -> None:
                 else:
                     mious = [train_iou[feat_type][t].compute().item() for t in range(cfg.n_timesteps)]
                     log_dict[f"{feat_type}/train_miou_mean"] = sum(mious) / len(mious)
-                    exp.log_curve(f"{feat_type}/train_miou_curve", x=list(range(cfg.n_timesteps)), y=mious, step=step)
+                    if log_curves:
+                        exp.log_curve(f"{feat_type}/train_miou_curve", x=list(range(cfg.n_timesteps)), y=mious, step=step)
                     for m in train_iou[feat_type]:
                         m.reset()
 
