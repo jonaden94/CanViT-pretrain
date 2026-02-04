@@ -1,0 +1,57 @@
+[project]
+name = "canvit-eval"
+version = "0.1.0"
+description = "Evaluation suite for CanViT models"
+requires-python = ">=3.12"
+dependencies = [
+    "canvit",
+    "torch>=2.0",
+    "torchvision",
+    "huggingface-hub",
+    "safetensors",
+    "pandas",
+    "pyarrow",
+    "tyro",
+    "tqdm",
+    "albumentations",
+    "comet-ml",
+    "torchmetrics",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    "basedpyright",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["canvit_eval"]
+python_files = ["test.py"]
+python_classes = [""]
+python_functions = ["test_*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.basedpyright]
+typeCheckingMode = "standard"
+
+[tool.uv.sources]
+canvit = { git = "ssh://git@github.com/yberreby/CanViT.git", branch = "policies" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "ruff>=0.15.0",
+]
