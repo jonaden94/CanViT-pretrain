@@ -14,7 +14,7 @@ import subprocess
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -24,7 +24,7 @@ from canvit_utils.policies import coarse_to_fine_viewpoints, random_viewpoints
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from torch import nn
+from torch import Tensor, nn
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.datasets import ImageFolder
@@ -33,6 +33,10 @@ from tqdm import tqdm
 log = logging.getLogger(__name__)
 
 PolicyName = Literal["coarse_to_fine", "random"]
+TOP_K = 5
+
+
+# === Config ===
 
 
 def _default_val_dir() -> Path:
@@ -46,12 +50,6 @@ def _default_output() -> Path:
 
 @dataclass
 class Config:
-    """IN1k evaluation configuration.
-
-    Defaults read from environment for cluster compatibility.
-    One policy per run - use SLURM job arrays for multiple policies/rollouts.
-    """
-
     val_dir: Path = field(default_factory=_default_val_dir)
     output: Path = field(default_factory=_default_output)
     model_repo: str = "canvit/canvit-vitb16-pretrain-512px-in21k"
@@ -65,9 +63,16 @@ class Config:
     device: str = "cuda"
     save_logits: bool = True
     save_cls: bool = True
+    # Random policy params (ignored for coarse_to_fine)
+    random_min_scale: float = 0.25
+    random_max_scale: float = 1.0
+    random_start_full: bool = True
 
 
-def _get_git_commit() -> str | None:
+# === Pure helpers ===
+
+
+def get_git_commit() -> str | None:
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
@@ -76,18 +81,18 @@ def _get_git_commit() -> str | None:
         return None
 
 
-def _collect_metadata(cfg: Config) -> dict:
+def collect_metadata(cfg: Config) -> dict:
     return {
         "config": asdict(cfg),
         "timestamp": datetime.now(UTC).isoformat(),
-        "git_commit": _get_git_commit(),
+        "git_commit": get_git_commit(),
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "hostname": os.environ.get("HOSTNAME") or os.environ.get("SLURMD_NODENAME"),
         "cuda_device": torch.cuda.get_device_name() if torch.cuda.is_available() else None,
     }
 
 
-def _load_probe(repo: str, device: torch.device) -> nn.Linear:
+def load_probe(repo: str, device: torch.device) -> nn.Linear:
     with open(hf_hub_download(repo, "config.json")) as f:
         probe_cfg = json.load(f)
     probe = nn.Linear(probe_cfg["in_features"], probe_cfg["out_features"])
@@ -95,127 +100,253 @@ def _load_probe(repo: str, device: torch.device) -> nn.Linear:
     return probe.to(device).eval()
 
 
-def _make_viewpoints(policy: PolicyName, batch_size: int, device: torch.device, n: int) -> list[Viewpoint]:
+def make_viewpoints(
+    policy: PolicyName,
+    batch_size: int,
+    device: torch.device,
+    n_viewpoints: int,
+    **kwargs,
+) -> list[Viewpoint]:
+    """Create viewpoints for given policy.
+
+    For 'random' policy, kwargs are passed to random_viewpoints (min_scale, max_scale, start_with_full_scene).
+    """
     if policy == "coarse_to_fine":
-        return coarse_to_fine_viewpoints(batch_size, device, n)
-    return random_viewpoints(batch_size, device, n, min_scale=0.25, max_scale=1.0, start_with_full_scene=True)
+        return coarse_to_fine_viewpoints(batch_size, device, n_viewpoints)
+    if policy == "random":
+        return random_viewpoints(batch_size, device, n_viewpoints, **kwargs)
+    raise ValueError(f"Unknown policy: {policy}")
+
+
+def make_transform(img_size: int) -> transforms.Compose:
+    return transforms.Compose([
+        transforms.Resize((img_size, img_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD),
+    ])
+
+
+class OutputTensors(NamedTuple):
+    labels: Tensor          # [N] int16
+    top_k_preds: Tensor     # [N, T, K] int16
+    top_k_probs: Tensor     # [N, T, K] float16
+    viewpoints: Tensor      # [N, T, 3] float16 (cx, cy, scale)
+    logits: Tensor | None   # [N, T, C] float16
+    cls_tokens: Tensor | None  # [N, T, D] float16
+
+
+def allocate_outputs(
+    n_images: int,
+    n_timesteps: int,
+    n_classes: int,
+    cls_dim: int,
+    save_logits: bool,
+    save_cls: bool,
+) -> OutputTensors:
+    return OutputTensors(
+        labels=torch.zeros(n_images, dtype=torch.int16),
+        top_k_preds=torch.zeros(n_images, n_timesteps, TOP_K, dtype=torch.int16),
+        top_k_probs=torch.zeros(n_images, n_timesteps, TOP_K, dtype=torch.float16),
+        viewpoints=torch.zeros(n_images, n_timesteps, 3, dtype=torch.float16),
+        logits=torch.zeros(n_images, n_timesteps, n_classes, dtype=torch.float16) if save_logits else None,
+        cls_tokens=torch.zeros(n_images, n_timesteps, cls_dim, dtype=torch.float16) if save_cls else None,
+    )
+
+
+def extract_viewpoint_coords(vp: Viewpoint) -> Tensor:
+    """Extract (cx, cy, scale) from viewpoint. Returns [B, 3] float16 on CPU."""
+    # vp.centers is [B, 2] with (y, x) ordering, vp.scales is [B]
+    cx = vp.centers[:, 1]  # x coord
+    cy = vp.centers[:, 0]  # y coord
+    return torch.stack([cx, cy, vp.scales], dim=1).to(torch.float16).cpu()
+
+
+class StepOutput(NamedTuple):
+    top_k_classes: Tensor  # [B, K] int64 on GPU
+    top_k_probs: Tensor    # [B, K] float32 on GPU
+    logits: Tensor         # [B, C] float32 on GPU
+    cls_raw: Tensor        # [B, D] float32 on GPU
+
+
+def run_timestep(
+    model: CanViTForPretrainingHFHub,
+    probe: nn.Linear,
+    cls_std,
+    state,
+    images: Tensor,
+    vp: Viewpoint,
+    glimpse_px: int,
+) -> tuple[StepOutput, any]:
+    """Run single timestep, return predictions and new state."""
+    glimpse = sample_at_viewpoint(spatial=images, viewpoint=vp, glimpse_size_px=glimpse_px)
+    out = model(glimpse=glimpse, state=state, viewpoint=vp)
+    state = out.state
+
+    cls_pred = model.predict_scene_teacher_cls(out.state.recurrent_cls)
+    cls_raw = cls_std.destandardize(cls_pred.unsqueeze(1)).squeeze(1)
+    logits = probe(cls_raw)
+    probs = F.softmax(logits, dim=-1)
+    top_probs, top_classes = probs.topk(TOP_K, dim=-1)
+
+    return StepOutput(top_classes, top_probs, logits, cls_raw), state
+
+
+def store_timestep(
+    out: OutputTensors,
+    step: StepOutput,
+    vp: Viewpoint,
+    start: int,
+    end: int,
+    t: int,
+) -> None:
+    """Store timestep results to pre-allocated CPU tensors."""
+    out.top_k_preds[start:end, t] = step.top_k_classes.to(torch.int16).cpu()
+    out.top_k_probs[start:end, t] = step.top_k_probs.to(torch.float16).cpu()
+    out.viewpoints[start:end, t] = extract_viewpoint_coords(vp)
+    if out.logits is not None:
+        out.logits[start:end, t] = step.logits.to(torch.float16).cpu()
+    if out.cls_tokens is not None:
+        out.cls_tokens[start:end, t] = step.cls_raw.to(torch.float16).cpu()
+
+
+def update_accuracy(
+    correct_top1: Tensor,
+    correct_top5: Tensor,
+    top_k_classes: Tensor,
+    labels: Tensor,
+    t: int,
+) -> None:
+    """Update accuracy accumulators on GPU."""
+    correct_top1[t] += (top_k_classes[:, 0] == labels).sum()
+    correct_top5[t] += (top_k_classes == labels.unsqueeze(1)).any(dim=1).sum()
+
+
+def build_output_dict(
+    out: OutputTensors,
+    correct_top1: Tensor,
+    correct_top5: Tensor,
+    n_images: int,
+    cfg: Config,
+) -> dict:
+    """Build final output dictionary for saving."""
+    c1 = correct_top1.tolist()
+    c5 = correct_top5.tolist()
+    T = cfg.n_viewpoints
+
+    result = {
+        "labels": out.labels,
+        "top_k_preds": out.top_k_preds,
+        "top_k_probs": out.top_k_probs,
+        "viewpoints": out.viewpoints,
+        "accuracy_top1": torch.tensor([c1[t] / n_images for t in range(T)]),
+        "accuracy_top5": torch.tensor([c5[t] / n_images for t in range(T)]),
+        "metadata": collect_metadata(cfg),
+    }
+    if out.logits is not None:
+        result["logits"] = out.logits
+    if out.cls_tokens is not None:
+        result["cls_tokens"] = out.cls_tokens
+    return result
+
+
+# === Main evaluation ===
 
 
 @torch.inference_mode()
 def evaluate(cfg: Config) -> Path:
     """Run evaluation, save tensors, return output path."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    # Validate inputs
+    assert cfg.val_dir.exists(), f"val_dir does not exist: {cfg.val_dir}"
+
     device = torch.device(cfg.device)
     T = cfg.n_viewpoints
 
+    # Log config
     log.info("=" * 70)
     log.info("ImageNet-1k Evaluation")
     log.info("=" * 70)
     for k, v in asdict(cfg).items():
         log.info(f"  {k}: {v}")
-    log.info("")
 
     if device.type == "cuda":
         log.info(f"GPU: {torch.cuda.get_device_name()}")
         log.info(f"Memory: {torch.cuda.get_device_properties(device).total_memory / 1e9:.1f} GB")
 
-    # Load model
+    # Load model and probe
     log.info(f"Loading model: {cfg.model_repo}")
     model = CanViTForPretrainingHFHub.from_pretrained(cfg.model_repo).to(device).eval()
     log.info(f"  params: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
 
-    # Load probe
     log.info(f"Loading probe: {cfg.probe_repo}")
-    probe = _load_probe(cfg.probe_repo, device)
+    probe = load_probe(cfg.probe_repo, device)
+    n_classes = probe.out_features
+    cls_dim = model.backbone.embed_dim
+    log.info(f"  probe: {probe.in_features} -> {n_classes}")
 
     cls_std, _ = model.standardizers(cfg.canvas_grid)
     assert cls_std.initialized, "CLS standardizer not initialized"
+    assert probe.in_features == cls_dim, f"Probe input {probe.in_features} != model dim {cls_dim}"
 
-    # Dataset (no shuffle - deterministic ordering)
+    # Dataset
     patch_size = model.backbone.patch_size_px
     img_size = cfg.canvas_grid * patch_size
-    transform = transforms.Compose([
-        transforms.Resize((img_size, img_size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD),
-    ])
+    transform = make_transform(img_size)
     dataset = ImageFolder(str(cfg.val_dir), transform=transform)
     loader = DataLoader(
         dataset, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=True
     )
     N = len(dataset)
+    assert N > 0, f"Empty dataset at {cfg.val_dir}"
     log.info(f"Dataset: {N} images, {len(loader)} batches")
 
-    # Pre-allocate output tensors on CPU
-    D_cls = model.backbone.embed_dim
-    D_logits = 1000
-
-    labels = torch.zeros(N, dtype=torch.int16)
-    top5_preds = torch.zeros(N, T, 5, dtype=torch.int16)
-    top5_probs = torch.zeros(N, T, 5, dtype=torch.float16)
-    viewpoints = torch.zeros(N, T, 3, dtype=torch.float16)
-
-    logits_out = torch.zeros(N, T, D_logits, dtype=torch.float16) if cfg.save_logits else None
-    cls_out = torch.zeros(N, T, D_cls, dtype=torch.float16) if cfg.save_cls else None
+    # Allocate outputs
+    out = allocate_outputs(N, T, n_classes, cls_dim, cfg.save_logits, cfg.save_cls)
 
     # Accuracy accumulators on GPU
     correct_top1 = torch.zeros(T, device=device, dtype=torch.long)
     correct_top5 = torch.zeros(T, device=device, dtype=torch.long)
-    pbar_sync_interval = 20
 
+    # Run evaluation
     log.info(f"Running {cfg.policy} policy, {T} viewpoints...")
     pbar = tqdm(loader, desc="Evaluating", unit="batch")
+    total_processed = 0
+    pbar_sync_interval = 20
 
     for batch_idx, (images, batch_labels) in enumerate(pbar):
         images = images.to(device, non_blocking=True)
-        batch_labels_gpu = batch_labels.to(device, non_blocking=True)
+        labels_gpu = batch_labels.to(device, non_blocking=True)
         B = images.shape[0]
         start = batch_idx * cfg.batch_size
         end = start + B
 
         # Store labels
-        labels[start:end] = batch_labels.to(torch.int16)
+        out.labels[start:end] = batch_labels.to(torch.int16)
 
-        # Generate viewpoints and run trajectory
-        vps = _make_viewpoints(cfg.policy, B, device, T)
+        # Run trajectory
+        vps = make_viewpoints(
+            cfg.policy, B, device, T,
+            min_scale=cfg.random_min_scale,
+            max_scale=cfg.random_max_scale,
+            start_with_full_scene=cfg.random_start_full,
+        )
         state = model.init_state(batch_size=B, canvas_grid_size=cfg.canvas_grid)
 
         for t, vp in enumerate(vps):
-            glimpse = sample_at_viewpoint(spatial=images, viewpoint=vp, glimpse_size_px=cfg.glimpse_px)
-            out = model(glimpse=glimpse, state=state, viewpoint=vp)
-            state = out.state
+            step, state = run_timestep(model, probe, cls_std, state, images, vp, cfg.glimpse_px)
+            store_timestep(out, step, vp, start, end, t)
+            update_accuracy(correct_top1, correct_top5, step.top_k_classes, labels_gpu, t)
 
-            # Predict CLS
-            cls_pred = model.predict_scene_teacher_cls(out.state.recurrent_cls)
-            cls_raw = cls_std.destandardize(cls_pred.unsqueeze(1)).squeeze(1)
-            logits = probe(cls_raw)
-            probs = F.softmax(logits, dim=-1)
-            top_probs, top_classes = probs.topk(5, dim=-1)
+        total_processed += B
 
-            # Update accuracy on GPU
-            correct_top1[t] += (top_classes[:, 0] == batch_labels_gpu).sum()
-            correct_top5[t] += (top_classes == batch_labels_gpu.unsqueeze(1)).any(dim=1).sum()
-
-            # Store to CPU tensors (single copy per timestep)
-            top5_preds[start:end, t] = top_classes.to(torch.int16).cpu()
-            top5_probs[start:end, t] = top_probs.to(torch.float16).cpu()
-            viewpoints[start:end, t, 0] = vp.centers[:, 1].to(torch.float16).cpu()
-            viewpoints[start:end, t, 1] = vp.centers[:, 0].to(torch.float16).cpu()
-            viewpoints[start:end, t, 2] = vp.scales.to(torch.float16).cpu()
-
-            if logits_out is not None:
-                logits_out[start:end, t] = logits.to(torch.float16).cpu()
-            if cls_out is not None:
-                cls_out[start:end, t] = cls_raw.to(torch.float16).cpu()
-
-        # Progress update (sync only periodically)
+        # Progress update (periodic sync)
         if batch_idx % pbar_sync_interval == 0:
-            total = end
             c1 = correct_top1.tolist()
-            ts = " ".join(f"t{t}={100*c1[t]/total:.1f}" for t in range(T))
+            ts = " ".join(f"t{t}={100*c1[t]/total_processed:.1f}" for t in range(T))
             pbar.set_postfix_str(ts)
 
-    # Final accuracy
+    # Final results
     log.info("")
     log.info("=" * 70)
     log.info("RESULTS")
@@ -225,24 +356,10 @@ def evaluate(cfg: Config) -> Path:
     for t in range(T):
         log.info(f"  t{t}: top1={100*c1[t]/N:.2f}%, top5={100*c5[t]/N:.2f}%")
 
-    # Build output dict
-    output = {
-        "labels": labels,
-        "top5_preds": top5_preds,
-        "top5_probs": top5_probs,
-        "viewpoints": viewpoints,
-        "accuracy_top1": torch.tensor([c1[t] / N for t in range(T)]),
-        "accuracy_top5": torch.tensor([c5[t] / N for t in range(T)]),
-        "metadata": _collect_metadata(cfg),
-    }
-    if logits_out is not None:
-        output["logits"] = logits_out
-    if cls_out is not None:
-        output["cls_tokens"] = cls_out
-
     # Save
+    output_dict = build_output_dict(out, correct_top1, correct_top5, N, cfg)
     cfg.output.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(output, cfg.output)
+    torch.save(output_dict, cfg.output)
     size_mb = cfg.output.stat().st_size / 1e6
     log.info(f"Saved to {cfg.output} ({size_mb:.1f} MB)")
 
