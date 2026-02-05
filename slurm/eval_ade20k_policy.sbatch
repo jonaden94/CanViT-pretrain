@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=ade20k-policy
+#SBATCH --job-name=eval-ade20k-policy
 #SBATCH --account=rrg-skrishna_gpu
 #SBATCH --time=00:05:00
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --output=logs/ade20k-policy-%A_%a.out
-#SBATCH --error=logs/ade20k-policy-%A_%a.err
+#SBATCH --output=logs/eval-ade20k-policy-%A_%a.out
+#SBATCH --error=logs/eval-ade20k-policy-%A_%a.err
 
 # ADE20K probe evaluation: run a policy with array jobs for variance
 #

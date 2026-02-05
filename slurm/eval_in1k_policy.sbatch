@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=in1k-policy
+#SBATCH --job-name=eval-in1k-policy
 #SBATCH --account=rrg-skrishna_gpu
 #SBATCH --time=00:15:00
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --output=logs/in1k-policy-%A_%a.out
-#SBATCH --error=logs/in1k-policy-%A_%a.err
+#SBATCH --output=logs/eval-in1k-policy-%A_%a.out
+#SBATCH --error=logs/eval-in1k-policy-%A_%a.err
 
 # IN1k evaluation: run a policy with array jobs for variance
 #
