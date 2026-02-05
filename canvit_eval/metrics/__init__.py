@@ -1,5 +1,8 @@
 """Segmentation metrics using DINOv3's histc-based approach.
 
+mIoU is computed GLOBALLY: sum intersection/union across all images, then divide.
+This matches DINOv3 and standard benchmarks. NOT per-image average.
+
 Works on MPS/CUDA/CPU without sync issues in hot path.
 """
 
@@ -8,23 +11,14 @@ from dinov3.eval.segmentation.metrics import calculate_intersect_and_union
 from torch import Tensor
 
 
-def per_image_miou(preds: Tensor, targets: Tensor, num_classes: int, ignore_index: int) -> Tensor:
-    """Compute mIoU for each image in batch. Returns [B] tensor."""
-    B = preds.shape[0]
-    mious = torch.empty(B, device=preds.device)
-    for i in range(B):
-        inter, union, _, _ = calculate_intersect_and_union(
-            preds[i], targets[i], num_classes, ignore_index
-        )
-        valid = union > 0
-        mious[i] = (inter[valid] / (union[valid] + 1e-8)).mean() if valid.any() else 0.0
-    return mious
-
-
 class IoUAccumulator:
-    """Accumulates intersection/union for mIoU computation.
+    """Accumulates intersection/union for GLOBAL mIoU computation.
 
     Uses torch.histc (DINOv3 approach) - no GPU sync until compute().
+
+    mIoU = mean over classes of (total_intersection / total_union)
+    where totals are summed across ALL images. This weights images
+    by pixel count, matching standard benchmark methodology.
     """
 
     def __init__(self, num_classes: int, ignore_index: int, device: torch.device) -> None:
@@ -50,7 +44,7 @@ class IoUAccumulator:
         self.union += areas[1]
 
     def compute(self) -> float:
-        """Compute mIoU. GPU sync happens here."""
+        """Compute GLOBAL mIoU. GPU sync happens here."""
         iou_per_class = self.intersection / (self.union + 1e-8)
         valid = self.union > 0
         return iou_per_class[valid].mean().item()
