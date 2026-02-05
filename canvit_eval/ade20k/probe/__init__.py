@@ -57,7 +57,7 @@ class ProbeHead(nn.Module):
         assert D == self.embed_dim, f"Expected embed_dim={self.embed_dim}, got {D}"
 
         x = self.ln(x)                    # [B, Hp, Wp, D]
-        x = x.permute(0, 3, 1, 2)         # [B, D, Hp, Wp]
+        x = x.permute(0, 3, 1, 2).clone() # [B, D, Hp, Wp] - clone for MPS BN bug
         x = self.dropout(x)               # no-op in eval mode
         x = self.bn(x)                    # [B, D, Hp, Wp]
         x = self.conv(x)                  # [B, NUM_CLASSES, Hp, Wp]
