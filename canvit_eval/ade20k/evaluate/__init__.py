@@ -18,7 +18,6 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset, ResizeMode, make_val_transform
-from canvit_eval.metrics import IoUAccumulator
 from canvit_eval.ade20k.probe import ProbeHead
 from canvit_eval.ade20k.train_probe.config import (
     FEATURE_NEEDS_LN,
@@ -29,6 +28,7 @@ from canvit_eval.ade20k.train_probe.config import (
 )
 from canvit_eval.ade20k.train_probe.features import extract_features
 from canvit_eval.ade20k.train_probe.loss import upsample_preds
+from canvit_eval.metrics import IoUAccumulator, per_image_miou
 from canvit_eval.utils import PolicyName, collect_metadata, make_viewpoints
 
 log = logging.getLogger(__name__)
@@ -151,12 +151,20 @@ def evaluate(cfg: EvalConfig) -> Path:
         for feat in feature_types
     }
 
+    # Per-image storage for post-hoc analysis
+    N = len(dataset)
+    per_image_mious: dict[FeatureType, torch.Tensor] = {
+        feat: torch.empty(N, T if feat not in STATIC_FEATURES else 1) for feat in feature_types
+    }
+    all_viewpoints = torch.empty(N, T, 3) if need_canvit else None  # [cy, cx, scale]
+
     amp_dtype = torch.bfloat16 if cfg.amp else torch.float32
     amp_ctx = torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=cfg.amp)
 
     # Run evaluation
     log.info(f"Evaluating with policy={cfg.policy}, {T} timesteps...")
     pbar = tqdm(loader, desc="Evaluating", unit="batch")
+    img_idx = 0
 
     for images, masks in pbar:
         images = images.to(device, non_blocking=True)
@@ -170,6 +178,12 @@ def evaluate(cfg: EvalConfig) -> Path:
             start_with_full_scene=cfg.start_full,
         ) if need_canvit else None
 
+        # Store viewpoints for this batch [B, T, 3] = (cy, cx, scale)
+        if viewpoints is not None and all_viewpoints is not None:
+            for t, vp in enumerate(viewpoints):
+                all_viewpoints[img_idx : img_idx + B, t, :2] = vp.centers.cpu()
+                all_viewpoints[img_idx : img_idx + B, t, 2] = vp.scales.cpu()
+
         with amp_ctx:
             feats = extract_features(
                 model=model, teacher=teacher, images=images,
@@ -177,7 +191,7 @@ def evaluate(cfg: EvalConfig) -> Path:
                 viewpoints=viewpoints, compute_teacher_full=compute_teacher_full,
             )
 
-        # Update metrics (no sync here - torchmetrics accumulates on GPU)
+        # Update metrics and compute per-image mIoU
         for feat_type in feature_types:
             t_range = [0] if feat_type in STATIC_FEATURES else range(T)
             for t in t_range:
@@ -187,6 +201,12 @@ def evaluate(cfg: EvalConfig) -> Path:
                 preds = logits.argmax(1)
                 preds_up = upsample_preds(preds, masks.shape[1], masks.shape[2])
                 iou_metrics[feat_type][t].update(preds_up, masks)
+                # Per-image mIoU (stored on CPU)
+                per_image_mious[feat_type][img_idx : img_idx + B, t] = per_image_miou(
+                    preds_up, masks, NUM_CLASSES, IGNORE_LABEL
+                ).cpu()
+
+        img_idx += B
 
     # Compute final mIoUs (sync happens here)
     log.info("")
@@ -194,7 +214,12 @@ def evaluate(cfg: EvalConfig) -> Path:
     log.info("RESULTS")
     log.info("=" * 70)
 
-    results: dict[str, dict] = {"mious": {}, "metadata": collect_metadata(cfg)}
+    results: dict = {
+        "mious": {},
+        "per_image_mious": {k: v for k, v in per_image_mious.items()},
+        "viewpoints": all_viewpoints,  # [N, T, 3] or None
+        "metadata": collect_metadata(cfg),
+    }
 
     for feat_type in feature_types:
         if feat_type in STATIC_FEATURES:
@@ -216,7 +241,8 @@ def evaluate(cfg: EvalConfig) -> Path:
     # Save
     cfg.output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(results, cfg.output)
-    log.info(f"Saved to {cfg.output}")
+    size_kb = cfg.output.stat().st_size / 1024
+    log.info(f"Saved to {cfg.output} ({size_kb:.1f} KB)")
 
     return cfg.output
 

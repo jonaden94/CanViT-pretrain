@@ -4,8 +4,21 @@ Works on MPS/CUDA/CPU without sync issues in hot path.
 """
 
 import torch
-from torch import Tensor
 from dinov3.eval.segmentation.metrics import calculate_intersect_and_union
+from torch import Tensor
+
+
+def per_image_miou(preds: Tensor, targets: Tensor, num_classes: int, ignore_index: int) -> Tensor:
+    """Compute mIoU for each image in batch. Returns [B] tensor."""
+    B = preds.shape[0]
+    mious = torch.empty(B, device=preds.device)
+    for i in range(B):
+        inter, union, _, _ = calculate_intersect_and_union(
+            preds[i], targets[i], num_classes, ignore_index
+        )
+        valid = union > 0
+        mious[i] = (inter[valid] / (union[valid] + 1e-8)).mean() if valid.any() else 0.0
+    return mious
 
 
 class IoUAccumulator:

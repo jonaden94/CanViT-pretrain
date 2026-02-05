@@ -11,7 +11,7 @@ def test_config_defaults_match_dinov3() -> None:
     assert cfg.n_timesteps == 10
     assert cfg.max_steps == 40000  # DINOv3: 40k iterations
     assert cfg.batch_size == 16  # DINOv3: 2 * 8 GPUs
-    assert cfg.peak_lr == 1e-3  # DINOv3: 1e-3
+    assert cfg.peak_lr == 3e-4  # tuned (DINOv3 uses 1e-3)
     assert cfg.weight_decay == 1e-3  # DINOv3: 1e-3
     assert cfg.dropout == 0.1  # DINOv3: 0.1
     assert cfg.loss_type == "ce"  # DINOv3: cross-entropy
