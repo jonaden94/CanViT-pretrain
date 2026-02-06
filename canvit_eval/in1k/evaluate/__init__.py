@@ -18,12 +18,11 @@ import torch
 import torch.nn.functional as F
 import tyro
 from canvit import CanViTForPretrainingHFHub, Viewpoint, sample_at_viewpoint
+from canvit_utils.transforms import preprocess
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
-from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
-from torchvision import transforms
 from torchvision.datasets import ImageFolder
 from tqdm import tqdm
 
@@ -75,14 +74,6 @@ def load_probe(repo: str, device: torch.device) -> nn.Linear:
     probe = nn.Linear(probe_cfg["in_features"], probe_cfg["out_features"])
     probe.load_state_dict(load_file(hf_hub_download(repo, "model.safetensors")))
     return probe.to(device).eval()
-
-
-def make_transform(img_size: int) -> transforms.Compose:
-    return transforms.Compose([
-        transforms.Resize((img_size, img_size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD),
-    ])
 
 
 class OutputTensors(NamedTuple):
@@ -253,7 +244,7 @@ def evaluate(cfg: Config) -> Path:
     # Dataset
     patch_size = model.backbone.patch_size_px
     img_size = cfg.canvas_grid * patch_size
-    transform = make_transform(img_size)
+    transform = preprocess(img_size)
     dataset = ImageFolder(str(cfg.val_dir), transform=transform)
     loader = DataLoader(
         dataset, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=True
