@@ -34,9 +34,8 @@ class Config:
     # weight_decay: float = 0.05  # standard in ViTs
     # we can use a much lower weight decay due to the richness of our training signal
     # and we *should*, due to the use of small batches
-    # 1e-3 has proven to be safe and work well in our early experiments in this project
-    # 1e-4 was used by the AdaGlimpse authors
-    weight_decay: float = 1e-3
+    # 1e-4 was used for the published 2M-step flagship run
+    weight_decay: float = 1e-4
     min_viewpoint_scale: float = 0.05  # Minimum scale for random viewpoints
     n_full_start_branches: int = 1  # branches starting with FULL viewpoint at t0
     n_random_start_branches: int = 1  # branches starting with RANDOM viewpoint at t0
