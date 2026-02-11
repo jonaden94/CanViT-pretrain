@@ -10,6 +10,8 @@ from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
 from canvit_pretrain.checkpoint import CheckpointData, load, save
 
 _TEACHER_REPO = "facebook/dinov3-vits16-pretrain"
+_TEACHER_NAME = "dinov3_vits16"
+_DATASET = "in21k"
 
 
 def _make_tiny_model(device: torch.device) -> CanViTForPretraining:
@@ -20,7 +22,7 @@ def _make_tiny_model(device: torch.device) -> CanViTForPretraining:
         backbone=backbone,
         cfg=cfg,
         backbone_name="vits16",
-        grid_sizes=[8, 16, 32],
+        canvas_patch_grid_sizes=[8, 16, 32],
     ).to(device)
 
 
@@ -32,18 +34,21 @@ def test_save_load_roundtrip() -> None:
         path = Path(tmpdir) / "test.pt"
         save(
             path, model, backbone_name="vits16",
-            teacher_repo_id=_TEACHER_REPO, glimpse_grid_size=8, image_resolution=512,
+            teacher_repo_id=_TEACHER_REPO, teacher_name=_TEACHER_NAME,
+            dataset=_DATASET, glimpse_grid_size=8, scene_resolution=512,
             step=100, train_loss=0.5,
         )
 
         data = load(path, device)
 
         assert data["backbone_name"] == "vits16"
-        assert data["grid_sizes"] == [8, 16, 32]
+        assert data["canvas_patch_grid_sizes"] == [8, 16, 32]
         assert data["teacher_dim"] == 384
         assert data["teacher_repo_id"] == _TEACHER_REPO
+        assert data["teacher_name"] == _TEACHER_NAME
+        assert data["dataset"] == _DATASET
         assert data["glimpse_grid_size"] == 8
-        assert data["image_resolution"] == 512
+        assert data["scene_resolution"] == 512
         assert data["step"] == 100
         assert data["train_loss"] == 0.5
 
@@ -66,11 +71,13 @@ def test_strips_orig_mod() -> None:
             "state_dict": state_dict,
             "model_config": {},
             "backbone_name": "vits16",
-            "grid_sizes": [8, 16, 32],
+            "canvas_patch_grid_sizes": [8, 16, 32],
             "teacher_dim": 384,
             "teacher_repo_id": _TEACHER_REPO,
+            "teacher_name": _TEACHER_NAME,
+            "dataset": _DATASET,
             "glimpse_grid_size": 8,
-            "image_resolution": 512,
+            "scene_resolution": 512,
             "step": None,
             "train_loss": None,
             "scene_norm_state": None,

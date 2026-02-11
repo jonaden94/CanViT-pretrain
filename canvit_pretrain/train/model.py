@@ -47,12 +47,12 @@ def create_model(
         backbone=student_backbone,
         cfg=cfg.model,
         backbone_name=cfg.backbone_name,
-        grid_sizes=[cfg.grid_size],
+        canvas_patch_grid_sizes=[cfg.canvas_patch_grid_size],
     ).to(cfg.device)
     glimpse_size_px = cfg.glimpse_grid_size * student_backbone.patch_size_px
 
     log.info(
-        f"Model created: canvas={cfg.grid_size}x{cfg.grid_size}, "
+        f"Model created: canvas={cfg.canvas_patch_grid_size}x{cfg.canvas_patch_grid_size}, "
         f"glimpse={cfg.glimpse_grid_size}x{cfg.glimpse_grid_size} ({glimpse_size_px}px), "
         f"student_dim={student_backbone.embed_dim} -> teacher_dim={teacher_dim}, "
     )

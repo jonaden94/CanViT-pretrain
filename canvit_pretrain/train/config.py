@@ -29,7 +29,7 @@ class Config:
     # Glimpse/canvas sizes (runtime, not in model config)
     glimpse_grid_size: int = 8  # tokens per glimpse side
     use_checkpointing: bool = True  # checkpoint odd steps in TBPTT chunks
-    grid_size: int = 32  # canvas grid size
+    canvas_patch_grid_size: int = 32  # canvas spatial grid side length in tokens
     # Training
     batch_size: int = 64
     warmup_steps: int = 100_000
@@ -58,7 +58,7 @@ class Config:
     val_index_dir: Path | None = None  # Required for validation
     # Precomputed features (skips teacher inference on train images)
     # If feature_base_dir is set, shards path is auto-constructed:
-    #   {feature_base_dir}/{teacher_name}/{image_resolution}/shards/
+    #   {feature_base_dir}/{teacher_name}/{scene_resolution}/shards/
     feature_base_dir: Path | None = None
     feature_image_root: Path | None = None  # Required with feature_base_dir
     # Run identification and checkpointing
@@ -73,7 +73,8 @@ class Config:
     """Re-warmup normalizer stats when loading any checkpoint."""
     # Training
     num_workers: int = 16
-    image_resolution: int = 512
+    scene_resolution: int = 512
+    dataset: str = "in21k"
     # Logging
     comet_project: str = "canvit-pretrain"
     comet_workspace: str = "m2b3-ava"

@@ -34,13 +34,15 @@ class CheckpointData(TypedDict):
     state_dict: dict[str, Tensor]
     model_config: dict
     backbone_name: str
-    grid_sizes: list[int]
+    canvas_patch_grid_sizes: list[int]
     teacher_dim: int
     teacher_repo_id: str
+    teacher_name: str
+    dataset: str
 
     # --- Training context ---
     glimpse_grid_size: int
-    image_resolution: int
+    scene_resolution: int
     step: int | None
     train_loss: float | None
 
@@ -164,8 +166,10 @@ def save(
     backbone_name: str,
     *,
     teacher_repo_id: str,
+    teacher_name: str,
+    dataset: str,
     glimpse_grid_size: int,
-    image_resolution: int,
+    scene_resolution: int,
     step: int | None = None,
     train_loss: float | None = None,
     comet_id: str | None = None,
@@ -175,10 +179,7 @@ def save(
     scheduler_state: dict | None = None,
     training_config_history: dict[str, dict] | None = None,
 ) -> None:
-    """Save checkpoint with all info needed to reconstruct model.
-
-    Uses atomic write (tmp file + rename) to prevent corruption.
-    """
+    """Save checkpoint with all info needed to reconstruct model and push to hub."""
     assert isinstance(model.cfg, CanViTForPretrainingConfig)
     git_commit, git_dirty = _git_info()
     hostname, slurm_job_id, slurm_array_task_id, cmdline = get_env_metadata()
@@ -187,11 +188,13 @@ def save(
         "state_dict": model.state_dict(),
         "model_config": asdict(model.cfg),
         "backbone_name": backbone_name,
-        "grid_sizes": model.grid_sizes,
+        "canvas_patch_grid_sizes": model.canvas_patch_grid_sizes,
         "teacher_dim": model.cfg.teacher_dim,
         "teacher_repo_id": teacher_repo_id,
+        "teacher_name": teacher_name,
+        "dataset": dataset,
         "glimpse_grid_size": glimpse_grid_size,
-        "image_resolution": image_resolution,
+        "scene_resolution": scene_resolution,
         "step": step,
         "train_loss": train_loss,
         "scene_norm_state": scene_norm_state,
@@ -214,8 +217,9 @@ def save(
 
     log.info(f"Checkpoint saved: {path} ({size_mb:.1f} MB)")
     log.info(
-        f"  backbone_name={backbone_name}, grid_sizes={model.grid_sizes},"
-        f" teacher={teacher_repo_id}, glimpse={glimpse_grid_size}, res={image_resolution}px"
+        f"  backbone={backbone_name}, canvas_patch_grid_sizes={model.canvas_patch_grid_sizes},"
+        f" teacher={teacher_name}, dataset={dataset},"
+        f" glimpse={glimpse_grid_size}, scene={scene_resolution}px"
     )
     if step is not None:
         log.info(f"  step={step}, train_loss={train_loss:.4e}" if train_loss else f"  step={step}")
@@ -229,18 +233,23 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
     raw = torch.load(path, weights_only=False, map_location=device)
 
     # Required model fields — fail loudly if missing
-    for key in ("state_dict", "model_config", "backbone_name", "grid_sizes", "teacher_dim", "teacher_repo_id"):
+    for key in (
+        "state_dict", "model_config", "backbone_name", "canvas_patch_grid_sizes",
+        "teacher_dim", "teacher_repo_id", "teacher_name", "dataset",
+    ):
         assert key in raw, f"Checkpoint {path.name} missing required field: {key!r}"
 
     data: CheckpointData = {
         "state_dict": _strip_orig_mod(raw["state_dict"]),
         "model_config": raw["model_config"],
         "backbone_name": _map_backbone_name(raw["backbone_name"]),
-        "grid_sizes": raw["grid_sizes"],
+        "canvas_patch_grid_sizes": raw["canvas_patch_grid_sizes"],
         "teacher_dim": raw["teacher_dim"],
         "teacher_repo_id": raw["teacher_repo_id"],
+        "teacher_name": raw["teacher_name"],
+        "dataset": raw["dataset"],
         "glimpse_grid_size": raw["glimpse_grid_size"],
-        "image_resolution": raw["image_resolution"],
+        "scene_resolution": raw["scene_resolution"],
         "step": raw["step"],
         "train_loss": raw["train_loss"],
         "scene_norm_state": raw["scene_norm_state"],
@@ -259,8 +268,9 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
     }
 
     log.info(
-        f"  backbone_name={data['backbone_name']}, grid_sizes={data['grid_sizes']},"
-        f" teacher={data['teacher_repo_id']}, res={data['image_resolution']}px"
+        f"  backbone={data['backbone_name']}, grids={data['canvas_patch_grid_sizes']},"
+        f" teacher={data['teacher_name']}, dataset={data['dataset']},"
+        f" scene={data['scene_resolution']}px"
     )
     if data["step"] is not None:
         step = data["step"]
@@ -285,7 +295,7 @@ def load_model(path: Path, device: torch.device | str = "cpu") -> CanViTForPretr
         backbone=create_backbone(backbone_name),
         cfg=cfg,
         backbone_name=backbone_name,
-        grid_sizes=ckpt["grid_sizes"],
+        canvas_patch_grid_sizes=ckpt["canvas_patch_grid_sizes"],
     )
     model.load_state_dict(ckpt["state_dict"], strict=True)
 

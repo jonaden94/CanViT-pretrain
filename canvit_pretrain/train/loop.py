@@ -221,7 +221,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         compile_teacher(teacher)
         compile_model(model)
 
-    G = cfg.grid_size
+    G = cfg.canvas_patch_grid_size
     patch_size = teacher.model.config.patch_size
     scene_size = scene_size_px(G, patch_size)
     log.info(f"Grid size: {G}, scene size: {scene_size}px")
@@ -351,7 +351,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
     if not norm_loaded:
         assert cfg.feature_base_dir is not None, "feature_base_dir required for normalizer init"
-        shards_dir = cfg.feature_base_dir / cfg.teacher_name / str(cfg.image_resolution) / "shards"
+        shards_dir = cfg.feature_base_dir / cfg.teacher_name / str(cfg.scene_resolution) / "shards"
         shard_files = sorted(shards_dir.glob("*.pt"))
         assert shard_files, f"No shards in {shards_dir}"
         init_normalizer_stats_from_shard(shard_files[0], scene_norm, cls_norm, cfg.device)
@@ -446,8 +446,10 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             save_checkpoint(
                 ckpt_path, model, cfg.backbone_name,
                 teacher_repo_id=cfg.teacher_repo_id,
+                teacher_name=cfg.teacher_name,
+                dataset=cfg.dataset,
                 glimpse_grid_size=cfg.glimpse_grid_size,
-                image_resolution=cfg.image_resolution,
+                scene_resolution=cfg.scene_resolution,
                 step=step, train_loss=ema_loss.item() if ema_loss is not None else None,
                 comet_id=exp.get_key(),
                 scene_norm_state=scene_norm.state_dict(),
@@ -573,8 +575,10 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         save_checkpoint(
             ckpt_path, model, cfg.backbone_name,
             teacher_repo_id=cfg.teacher_repo_id,
+            teacher_name=cfg.teacher_name,
+            dataset=cfg.dataset,
             glimpse_grid_size=cfg.glimpse_grid_size,
-            image_resolution=cfg.image_resolution,
+            scene_resolution=cfg.scene_resolution,
             step=end_step, train_loss=ema_loss.item() if ema_loss is not None else None,
             comet_id=exp.get_key(),
             scene_norm_state=scene_norm.state_dict(),

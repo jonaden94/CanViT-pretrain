@@ -4,7 +4,7 @@ import logging
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, NamedTuple
 
 from torch import Tensor
 
@@ -103,7 +103,7 @@ def create_loaders(cfg: "Config", start_step: int) -> Loaders:
     val_dir = cfg.val_dir
     assert val_dir.is_dir(), f"val_dir not found: {val_dir}"
 
-    sz = cfg.image_resolution
+    sz = cfg.scene_resolution
     persistent = cfg.num_workers > 0
 
     # Train loader: precomputed features (required)

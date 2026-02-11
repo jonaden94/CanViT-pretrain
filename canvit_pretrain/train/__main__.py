@@ -24,7 +24,7 @@ def main() -> None:
     log.info(f"Config: {cfg}")
     log.info(f"Device: {cfg.device}")
     log.info(f"Steps per job: {cfg.steps_per_job:,}")
-    log.info(f"Grid size: {cfg.grid_size}")
+    log.info(f"Canvas patch grid size: {cfg.canvas_patch_grid_size}")
     log.info(f"Warmup: {cfg.warmup_steps} steps")
     log.info("=" * 60)
 
