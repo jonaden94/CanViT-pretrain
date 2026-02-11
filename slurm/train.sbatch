@@ -17,7 +17,7 @@
 #   sbatch slurm/train.sbatch
 #
 # CanViT-S:
-#   sbatch slurm/train.sbatch --backbone-name canvits16
+#   sbatch slurm/train.sbatch --backbone-name vits16
 #
 # Continue existing run:
 #   sbatch --array=0-99%1 slurm/train.sbatch --run-name train-XXXXXXX

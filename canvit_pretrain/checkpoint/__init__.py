@@ -21,9 +21,9 @@ log = logging.getLogger(__name__)
 
 # Old backbone names from pre-refactor checkpoints → new registry names
 BACKBONE_NAME_MAP: dict[str, str] = {
-    "dinov3_vits16": "canvits16",
-    "dinov3_vitb16": "canvitb16",
-    "dinov3_vitl16": "canvitl16",
+    "dinov3_vits16": "vits16",
+    "dinov3_vitb16": "vitb16",
+    "dinov3_vitl16": "vitl16",
 }
 
 
@@ -33,7 +33,7 @@ class CheckpointData(TypedDict):
     # --- Model reconstruction (required) ---
     state_dict: dict[str, Tensor]
     model_config: dict
-    backbone: str
+    backbone_name: str
     grid_sizes: list[int]
     teacher_dim: int
     teacher_repo_id: str
@@ -161,7 +161,7 @@ def _map_backbone_name(name: str) -> str:
 def save(
     path: Path,
     model: CanViTForPretraining,
-    backbone: str,
+    backbone_name: str,
     *,
     teacher_repo_id: str,
     glimpse_grid_size: int,
@@ -186,7 +186,7 @@ def save(
     data: CheckpointData = {
         "state_dict": model.state_dict(),
         "model_config": asdict(model.cfg),
-        "backbone": backbone,
+        "backbone_name": backbone_name,
         "grid_sizes": model.grid_sizes,
         "teacher_dim": model.cfg.teacher_dim,
         "teacher_repo_id": teacher_repo_id,
@@ -214,7 +214,7 @@ def save(
 
     log.info(f"Checkpoint saved: {path} ({size_mb:.1f} MB)")
     log.info(
-        f"  backbone={backbone}, grid_sizes={model.grid_sizes},"
+        f"  backbone_name={backbone_name}, grid_sizes={model.grid_sizes},"
         f" teacher={teacher_repo_id}, glimpse={glimpse_grid_size}, res={image_resolution}px"
     )
     if step is not None:
@@ -229,13 +229,13 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
     raw = torch.load(path, weights_only=False, map_location=device)
 
     # Required model fields — fail loudly if missing
-    for key in ("state_dict", "model_config", "backbone", "grid_sizes", "teacher_dim", "teacher_repo_id"):
+    for key in ("state_dict", "model_config", "backbone_name", "grid_sizes", "teacher_dim", "teacher_repo_id"):
         assert key in raw, f"Checkpoint {path.name} missing required field: {key!r}"
 
     data: CheckpointData = {
         "state_dict": _strip_orig_mod(raw["state_dict"]),
         "model_config": raw["model_config"],
-        "backbone": _map_backbone_name(raw["backbone"]),
+        "backbone_name": _map_backbone_name(raw["backbone_name"]),
         "grid_sizes": raw["grid_sizes"],
         "teacher_dim": raw["teacher_dim"],
         "teacher_repo_id": raw["teacher_repo_id"],
@@ -259,7 +259,7 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
     }
 
     log.info(
-        f"  backbone={data['backbone']}, grid_sizes={data['grid_sizes']},"
+        f"  backbone_name={data['backbone_name']}, grid_sizes={data['grid_sizes']},"
         f" teacher={data['teacher_repo_id']}, res={data['image_resolution']}px"
     )
     if data["step"] is not None:
@@ -272,49 +272,22 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
     return data
 
 
-def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = False) -> CanViTForPretraining:
-    """Load CanViTForPretraining from checkpoint."""
+def load_model(path: Path, device: torch.device | str = "cpu") -> CanViTForPretraining:
+    """Load CanViTForPretraining from checkpoint. Strict — no fallbacks."""
     from canvit import create_backbone
 
     ckpt = load(path, device)
 
-    backbone_name = ckpt["backbone"]
-    backbone = create_backbone(backbone_name)
-
-    model_config = ckpt["model_config"]
-    if "teacher_dim" not in model_config:
-        model_config = {**model_config, "teacher_dim": ckpt["teacher_dim"]}
-    cfg = dacite.from_dict(CanViTForPretrainingConfig, model_config)
+    backbone_name = ckpt["backbone_name"]
+    cfg = dacite.from_dict(CanViTForPretrainingConfig, ckpt["model_config"])
 
     model = CanViTForPretraining(
-        backbone=backbone,
+        backbone=create_backbone(backbone_name),
         cfg=cfg,
         backbone_name=backbone_name,
         grid_sizes=ckpt["grid_sizes"],
     )
-
-    # Strip legacy policy keys and filter shape mismatches
-    state_dict = {k: v for k, v in ckpt["state_dict"].items() if not k.startswith("policy.")}
-    model_state = model.state_dict()
-    filtered = {}
-    skipped = []
-    for k, v in state_dict.items():
-        if k in model_state and model_state[k].shape != v.shape:
-            skipped.append(f"{k}: ckpt {tuple(v.shape)} vs model {tuple(model_state[k].shape)}")
-        else:
-            filtered[k] = v
-    if skipped:
-        log.warning(f"Skipped {len(skipped)} keys with shape mismatch: {skipped}")
-
-    result = model.load_state_dict(filtered, strict=strict)
-    if strict and (result.missing_keys or result.unexpected_keys):
-        raise RuntimeError(
-            f"State dict mismatch. Missing: {result.missing_keys}, Unexpected: {result.unexpected_keys}"
-        )
-    if result.missing_keys:
-        log.warning(f"Missing keys (freshly initialized): {result.missing_keys}")
-    if result.unexpected_keys:
-        log.warning(f"Unexpected keys (ignored): {result.unexpected_keys}")
+    model.load_state_dict(ckpt["state_dict"], strict=True)
 
     if isinstance(device, str):
         device = torch.device(device)

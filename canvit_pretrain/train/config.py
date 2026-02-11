@@ -20,7 +20,7 @@ class Config:
     teacher_repo_id: str = TEACHER_REPO_ID
     teacher_name: str = TEACHER_NAME
     # Student
-    backbone_name: str = "canvitb16"
+    backbone_name: str = "vitb16"
     # Model config (PretrainingConfig via alias)
     # teacher_dim placeholder - overridden by create_model based on actual teacher
     model: CanViTForPretrainingConfig = field(

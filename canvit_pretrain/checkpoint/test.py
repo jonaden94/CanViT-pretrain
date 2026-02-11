@@ -14,12 +14,12 @@ _TEACHER_REPO = "facebook/dinov3-vits16-pretrain"
 
 def _make_tiny_model(device: torch.device) -> CanViTForPretraining:
     """Create minimal CanViTForPretraining for testing (no pretrained weights needed)."""
-    backbone = create_backbone("canvits16").to(device)
+    backbone = create_backbone("vits16").to(device)
     cfg = CanViTForPretrainingConfig(teacher_dim=384)
     return CanViTForPretraining(
         backbone=backbone,
         cfg=cfg,
-        backbone_name="canvits16",
+        backbone_name="vits16",
         grid_sizes=[8, 16, 32],
     ).to(device)
 
@@ -31,14 +31,14 @@ def test_save_load_roundtrip() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "test.pt"
         save(
-            path, model, backbone="canvits16",
+            path, model, backbone_name="vits16",
             teacher_repo_id=_TEACHER_REPO, glimpse_grid_size=8, image_resolution=512,
             step=100, train_loss=0.5,
         )
 
         data = load(path, device)
 
-        assert data["backbone"] == "canvits16"
+        assert data["backbone_name"] == "vits16"
         assert data["grid_sizes"] == [8, 16, 32]
         assert data["teacher_dim"] == 384
         assert data["teacher_repo_id"] == _TEACHER_REPO
@@ -65,7 +65,7 @@ def test_strips_orig_mod() -> None:
         raw: CheckpointData = {
             "state_dict": state_dict,
             "model_config": {},
-            "backbone": "canvits16",
+            "backbone_name": "vits16",
             "grid_sizes": [8, 16, 32],
             "teacher_dim": 384,
             "teacher_repo_id": _TEACHER_REPO,
