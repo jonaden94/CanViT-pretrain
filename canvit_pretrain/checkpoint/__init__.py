@@ -130,19 +130,6 @@ def find_latest(run_dir: Path) -> Path | None:
     return None
 
 
-def _strip_orig_mod(state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
-    """Strip '_orig_mod.' from keys (torch.compile artifact)."""
-    result = {}
-    n = 0
-    for k, v in state_dict.items():
-        if "._orig_mod" in k:
-            k = k.replace("._orig_mod", "")
-            n += 1
-        result[k] = v
-    if n:
-        log.warning(f"Stripped _orig_mod from {n} keys (legacy checkpoint)")
-    return result
-
 
 def save(
     path: Path,
@@ -224,7 +211,7 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
         assert key in raw, f"Checkpoint {path.name} missing required field: {key!r}"
 
     data: CheckpointData = {
-        "state_dict": _strip_orig_mod(raw["state_dict"]),
+        "state_dict": raw["state_dict"],
         "model_config": raw["model_config"],
         "backbone_name": raw["backbone_name"],
         "canvas_patch_grid_sizes": raw["canvas_patch_grid_sizes"],
