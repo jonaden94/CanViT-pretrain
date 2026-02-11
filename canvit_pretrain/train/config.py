@@ -73,7 +73,6 @@ class Config:
     """Re-warmup normalizer stats when loading any checkpoint."""
     # Training
     num_workers: int = 16
-    crop_scale_min: float = 0.8
     image_resolution: int = 512
     # Logging
     comet_project: str = "canvit-pretrain"

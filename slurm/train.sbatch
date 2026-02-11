@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=avp-train
+#SBATCH --job-name=cvit-b-pt-in21k
 #SBATCH --account=rrg-skrishna_gpu
 #SBATCH --time=00:30:00
 #SBATCH --array=0-400%1
@@ -11,10 +11,13 @@
 #SBATCH --mail-user=me@yberreby.com
 #SBATCH --mail-type=BEGIN,END,FAIL,REQUEUE
 
-# AVP-ViT training: 401 jobs × 4992 steps ≈ 2M steps (~8 days)
+# CanViT pretraining: 401 jobs × 4992 steps ≈ 2M steps (~8 days)
 #
-# Default (just run it):
+# Default (CanViT-B):
 #   sbatch slurm/train.sbatch
+#
+# CanViT-S:
+#   sbatch slurm/train.sbatch --backbone-name canvits16
 #
 # Continue existing run:
 #   sbatch --array=0-99%1 slurm/train.sbatch --run-name train-XXXXXXX
@@ -27,7 +30,7 @@ set -eux
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 timed() { local start=$SECONDS; "$@"; log "  ↳ $((SECONDS - start))s"; }
 
-log "=== AVP-ViT Training ==="
+log "=== CanViT Training ==="
 if [ -n "${SLURM_ARRAY_JOB_ID:-}" ]; then
     log "Array Job: $SLURM_ARRAY_JOB_ID, Task: $SLURM_ARRAY_TASK_ID, Host: $(hostname)"
     RUN_NAME="train-${SLURM_ARRAY_JOB_ID}"
@@ -48,7 +51,7 @@ timed uv sync
 # Ensure logs dir exists
 mkdir -p logs
 
-# Training with precomputed features
+# Training with precomputed features (teacher loaded from HF Hub)
 log "Starting training..."
 RUN_NAME_ARG=()
 [ -n "$RUN_NAME" ] && RUN_NAME_ARG=(--run-name "$RUN_NAME")
@@ -59,7 +62,6 @@ exec uv run python -m canvit_pretrain.train \
     --val-dir "$IN1K_VAL_DIR" \
     --train-index-dir "$INDEX_DIR" \
     --ckpt-dir "$CHECKPOINTS_DIR" \
-    --teacher-ckpt "$DINOV3_VITB16_CKPT" \
     --n-trials 1 \
     --val-every 1000 \
     --no-use-checkpointing \
