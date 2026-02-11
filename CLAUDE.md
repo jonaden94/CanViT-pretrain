@@ -79,6 +79,12 @@ RecurrentState(
 
 **Viewpoint coordinates**: `centers` is `[cy, cx]` — **y first**, normalized to `[-1, 1]`.
 
+## Viewpoint Policies
+
+**Coarse-to-fine is NOT deterministic.** Scales are deterministic (halving each level) but center positions within each scale level are randomly shuffled. Only t0 (full scene, scale=1) is deterministic. This means multiple runs with c2f will produce different results — this is expected and is why we run multiple seeds for CI.
+
+**All policies have run-to-run variance.** Always run multiple seeds. Never assume a single run is representative.
+
 ## Commands
 
 ```bash
