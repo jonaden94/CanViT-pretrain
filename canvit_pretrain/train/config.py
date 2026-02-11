@@ -28,7 +28,7 @@ class Config:
     )
     # Glimpse/canvas sizes (runtime, not in model config)
     glimpse_grid_size: int = 8  # tokens per glimpse side
-    use_checkpointing: bool = True  # checkpoint odd steps in TBPTT chunks
+    use_checkpointing: bool = False  # checkpoint odd steps in TBPTT chunks
     canvas_patch_grid_size: int = 32  # canvas spatial grid side length in tokens
     # Training
     batch_size: int = 64
@@ -79,7 +79,7 @@ class Config:
     comet_project: str = "canvit-pretrain"
     comet_workspace: str = "m2b3-ava"
     log_every: int = 20
-    val_every: int = 250
+    val_every: int = 1000
     n_eval_viewpoints: int = 10  # Number of viewpoints in validation (quadtree)
     viz_every_n_vals: int = 5  # Log viz every N validation runs
     curve_every_n_vals: int = 5  # Log curves every N validation runs
@@ -90,6 +90,6 @@ class Config:
     amp: bool = True
     non_blocking_transfer: bool = True  # Ablation: async CPU→GPU transfers
     # Optuna
-    n_trials: int = 100
+    n_trials: int = 1
     # Runtime
     device: torch.device = field(default_factory=get_sensible_device)

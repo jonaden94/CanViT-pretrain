@@ -62,7 +62,4 @@ exec uv run python -m canvit_pretrain.train \
     --val-dir "$IN1K_VAL_DIR" \
     --train-index-dir "$INDEX_DIR" \
     --ckpt-dir "$CHECKPOINTS_DIR" \
-    --n-trials 1 \
-    --val-every 1000 \
-    --no-use-checkpointing \
     "$@"
