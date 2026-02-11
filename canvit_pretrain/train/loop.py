@@ -277,29 +277,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             log.warning("Checkpoint config differs from current config!")
             log.warning(f"  Checkpoint: {ckpt_cfg}")
             log.warning(f"  Current:    {cfg.model}")
-        state_dict = ckpt_data["state_dict"]
-        # Strip legacy policy keys from old checkpoints
-        state_dict = {k: v for k, v in state_dict.items() if not k.startswith("policy.")}
-
-        # Filter out shape-incompatible weights (e.g., when changing canvas_num_heads)
-        model_state = model.state_dict()
-        mismatched_params = 0
-        for k, v in list(state_dict.items()):
-            if k in model_state and v.shape != model_state[k].shape:
-                mismatched_params += model_state[k].numel()
-                del state_dict[k]
-        if mismatched_params > 0:
-            total_params = sum(p.numel() for p in model.parameters())
-            pct = 100 * mismatched_params / total_params
-            log.warning(f"Shape mismatch: {mismatched_params:,} params ({pct:.1f}%) freshly initialized")
-
-        incompat = model.load_state_dict(state_dict, strict=False)
-        if incompat.missing_keys:
-            log.warning(f"Checkpoint missing keys (freshly initialized): {incompat.missing_keys}")
-        if incompat.unexpected_keys:
-            log.warning(f"Checkpoint has unexpected keys (ignored): {incompat.unexpected_keys}")
-        if not incompat.missing_keys and not incompat.unexpected_keys:
-            log.info("Model state loaded successfully (all keys matched)")
+        model.load_state_dict(ckpt_data["state_dict"], strict=True)
+        log.info("Model state loaded (strict=True)")
 
         # Load optimizer + scheduler state (RESUME mode only)
         if is_seeding:

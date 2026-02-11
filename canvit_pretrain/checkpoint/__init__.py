@@ -19,14 +19,6 @@ from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
 
 log = logging.getLogger(__name__)
 
-# Old backbone names from pre-refactor checkpoints → new registry names
-BACKBONE_NAME_MAP: dict[str, str] = {
-    "dinov3_vits16": "vits16",
-    "dinov3_vitb16": "vitb16",
-    "dinov3_vitl16": "vitl16",
-}
-
-
 class CheckpointData(TypedDict):
     """Checkpoint structure. All fields present; None where not applicable."""
 
@@ -152,14 +144,6 @@ def _strip_orig_mod(state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
     return result
 
 
-def _map_backbone_name(name: str) -> str:
-    """Map old backbone names to new registry names for backward compat."""
-    mapped = BACKBONE_NAME_MAP.get(name, name)
-    if mapped != name:
-        log.info(f"Mapped backbone name: {name!r} -> {mapped!r}")
-    return mapped
-
-
 def save(
     path: Path,
     model: CanViTForPretraining,
@@ -242,7 +226,7 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
     data: CheckpointData = {
         "state_dict": _strip_orig_mod(raw["state_dict"]),
         "model_config": raw["model_config"],
-        "backbone_name": _map_backbone_name(raw["backbone_name"]),
+        "backbone_name": raw["backbone_name"],
         "canvas_patch_grid_sizes": raw["canvas_patch_grid_sizes"],
         "teacher_dim": raw["teacher_dim"],
         "teacher_repo_id": raw["teacher_repo_id"],
