@@ -117,7 +117,7 @@ wheels = [
 [[package]]
 name = "canvit"
 version = "0.1.0"
-source = { git = "ssh://git@github.com/yberreby/CanViT-PyTorch.git?rev=16ff581#16ff5815b6e941da709c8f4214fc025c597c00db" }
+source = { git = "ssh://git@github.com/yberreby/CanViT-PyTorch.git?rev=493c1b6#493c1b6ed2a24c23591886c7b7ac4ad8546dc951" }
 dependencies = [
     { name = "dinov3-in1k-probes" },
     { name = "huggingface-hub" },
@@ -174,7 +174,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "albumentations" },
-    { name = "canvit", git = "ssh://git@github.com/yberreby/CanViT-PyTorch.git?rev=16ff581" },
+    { name = "canvit", git = "ssh://git@github.com/yberreby/CanViT-PyTorch.git?rev=493c1b6" },
     { name = "comet-ml" },
     { name = "dacite" },
     { name = "dinov3", git = "https://github.com/yberreby/dinov3.git" },
