@@ -117,7 +117,7 @@ wheels = [
 [[package]]
 name = "canvit"
 version = "0.1.0"
-source = { git = "ssh://git@github.com/yberreby/CanViT-PyTorch.git?branch=main#97ebd9ce672390d0bac25c1a626cedf30d0e49c9" }
+source = { git = "ssh://git@github.com/yberreby/CanViT-PyTorch.git?branch=main#d90d151e0a4db5e14596da20b5743a9738840486" }
 dependencies = [
     { name = "dinov3-in1k-probes" },
     { name = "huggingface-hub" },
@@ -196,7 +196,7 @@ requires-dist = [
     { name = "tqdm" },
     { name = "tyro" },
     { name = "xxhash" },
-    { name = "ybml", git = "https://github.com/yberreby/ybml.git?rev=133cc9b" },
+    { name = "ybml", git = "https://github.com/yberreby/ybml.git?rev=b161368" },
 ]
 
 [package.metadata.requires-dev]
@@ -3118,7 +3118,7 @@ wheels = [
 [[package]]
 name = "ybml"
 version = "0.1.0"
-source = { git = "https://github.com/yberreby/ybml.git?rev=133cc9b#133cc9b2333327d5ee671ceccb3fd03a6747822a" }
+source = { git = "https://github.com/yberreby/ybml.git?rev=b161368#b161368e8ab23a5cf1da6e2c807d5d989fff5504" }
 dependencies = [
     { name = "jaxtyping" },
     { name = "numpy" },
