@@ -21,7 +21,7 @@ def _default_ade20k_root() -> Path:
 
 # --- Canvas feature registry ---
 
-CanvasFeatureType = Literal["canvas_hidden", "canvas_predicted"]
+CanvasFeatureType = Literal["canvas_hidden", "recon_normalized"]
 
 
 @dataclass(frozen=True)
@@ -32,7 +32,7 @@ class FeatureSpec:
 
 CANVAS_FEATURES: dict[CanvasFeatureType, FeatureSpec] = {
     "canvas_hidden": FeatureSpec(needs_ln=True, dim_source="canvas"),
-    "canvas_predicted": FeatureSpec(needs_ln=False, dim_source="teacher"),
+    "recon_normalized": FeatureSpec(needs_ln=False, dim_source="teacher"),
 }
 
 
@@ -86,7 +86,7 @@ class Config(ProbeTrainBase):
 
     model_repo: str = "canvit/canvit-vitb16-pretrain-512px-in21k"
     teacher_repo: str = "facebook/dinov3-vitb16-pretrain-lvd1689m"
-    features: list[CanvasFeatureType] = field(default_factory=lambda: ["canvas_hidden", "canvas_predicted"])
+    features: list[CanvasFeatureType] = field(default_factory=lambda: ["canvas_hidden"])
     n_timesteps: int = 10
     glimpse_px: int = 128
 

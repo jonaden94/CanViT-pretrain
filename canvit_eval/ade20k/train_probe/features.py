@@ -26,7 +26,7 @@ def extract_canvas_features(
     glimpse_px: int,
     viewpoints: list[Viewpoint],
 ) -> CanvasFeatures:
-    """Run CanViT rollout, collect canvas_hidden and canvas_predicted at each timestep."""
+    """Run CanViT rollout, collect canvas_hidden and recon_normalized at each timestep."""
     B = images.shape[0]
     hidden_list: list[Tensor] = []
     predicted_list: list[Tensor] = []
@@ -41,5 +41,5 @@ def extract_canvas_features(
 
     return CanvasFeatures(features={
         "canvas_hidden": hidden_list,
-        "canvas_predicted": predicted_list,
+        "recon_normalized": predicted_list,
     })
