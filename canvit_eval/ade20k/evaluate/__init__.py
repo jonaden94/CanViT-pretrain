@@ -1,13 +1,4 @@
-"""ADE20K probe evaluation with configurable policies and transforms.
-
-Runs trained probes on ADE20K validation set with:
-- Different viewpoint policies (coarse_to_fine, random, full_then_random)
-- Different transforms (center_crop, squish)
-- Efficient batch processing (no GPU syncs in hot path)
-
-mIoU is computed GLOBALLY (sum intersection/union across all images, then divide).
-This matches DINOv3 and standard benchmarks.
-"""
+"""ADE20K canvas probe evaluation with configurable policies."""
 
 import logging
 import os
@@ -21,23 +12,18 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset, ResizeMode, make_val_transform
-from canvit_eval.ade20k.probe import ProbeHead
+from canvit_eval.ade20k.probe import ProbeHead, eval_probe_on_batch
 from canvit_eval.ade20k.train_probe.config import (
-    FEATURE_NEEDS_LN,
-    STATIC_FEATURES,
-    FeatureType,
+    CANVAS_FEATURES,
+    CanvasFeatureType,
     _default_ade20k_root,
     get_feature_dims,
 )
-from canvit_eval.ade20k.train_probe.features import extract_features
-from canvit_eval.ade20k.train_probe.loss import upsample_preds
+from canvit_eval.ade20k.train_probe.features import extract_canvas_features
 from canvit_eval.metrics import IoUAccumulator
 from canvit_eval.utils import PolicyName, collect_metadata, make_viewpoints
 
 log = logging.getLogger(__name__)
-
-
-# === Config ===
 
 
 def _default_output() -> Path:
@@ -48,7 +34,7 @@ def _default_output() -> Path:
 
 @dataclass
 class EvalConfig:
-    """ADE20K probe evaluation configuration."""
+    """ADE20K canvas probe evaluation configuration."""
 
     probe_ckpt: Path
     ade20k_root: Path = field(default_factory=_default_ade20k_root)
@@ -62,7 +48,6 @@ class EvalConfig:
     image_size: int = 512
     glimpse_px: int = 128
 
-    # Random policy params (ignored for coarse_to_fine)
     min_scale: float = 0.05
     max_scale: float = 1.0
     start_full: bool = True
@@ -73,26 +58,21 @@ class EvalConfig:
     amp: bool = True
 
 
-# === Checkpoint loading ===
-
-
 def load_probes(
     ckpt_path: Path,
     device: torch.device,
     canvas_dim: int,
     teacher_dim: int,
-) -> dict[FeatureType, ProbeHead]:
-    """Load trained probes from checkpoint."""
+) -> dict[CanvasFeatureType, ProbeHead]:
     log.info(f"Loading probes from {ckpt_path}")
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
 
     dims = get_feature_dims(canvas_dim, teacher_dim)
-    # Use dropout from checkpoint config if available, else 0 (doesn't matter for eval)
     dropout = ckpt.get("config", {}).get("dropout", 0.0)
 
-    probes: dict[FeatureType, ProbeHead] = {}
+    probes: dict[CanvasFeatureType, ProbeHead] = {}
     for name, state_dict in ckpt["probe_state_dicts"].items():
-        probe = ProbeHead(dims[name], dropout=dropout, use_ln=FEATURE_NEEDS_LN[name]).to(device)
+        probe = ProbeHead(dims[name], dropout=dropout, use_ln=CANVAS_FEATURES[name].needs_ln).to(device)
         probe.load_state_dict(state_dict)
         probe.eval()
         probes[name] = probe
@@ -101,12 +81,8 @@ def load_probes(
     return probes
 
 
-# === Main evaluation ===
-
-
 @torch.inference_mode()
 def evaluate(cfg: EvalConfig) -> Path:
-    """Run evaluation, save results, return output path."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     torch.set_float32_matmul_precision("high")
 
@@ -114,10 +90,9 @@ def evaluate(cfg: EvalConfig) -> Path:
     T = cfg.n_timesteps
 
     log.info("=" * 70)
-    log.info("ADE20K Probe Evaluation")
+    log.info("ADE20K Canvas Probe Evaluation")
     log.info("=" * 70)
     log.info(f"  policy={cfg.policy}, resize_mode={cfg.resize_mode}, n_timesteps={T}")
-    log.info("-" * 70)
     for k, v in asdict(cfg).items():
         log.info(f"  {k}: {v}")
 
@@ -133,24 +108,17 @@ def evaluate(cfg: EvalConfig) -> Path:
     # Load probes
     probes = load_probes(cfg.probe_ckpt, device, model.canvas_dim, teacher.embed_dim)
     feature_types = list(probes.keys())
-    need_canvit = any(f not in STATIC_FEATURES for f in feature_types)
-    compute_teacher_full = "teacher_full" in feature_types
-
-    log.info(f"Features: {feature_types}, need_canvit={need_canvit}")
+    log.info(f"Features: {feature_types}")
 
     # Dataset
     dataset = ADE20kDataset(
-        root=cfg.ade20k_root,
-        split="validation",
+        root=cfg.ade20k_root, split="validation",
         transform=make_val_transform(cfg.image_size, cfg.resize_mode),
     )
-    loader = DataLoader(
-        dataset, batch_size=cfg.batch_size, shuffle=False,
-        num_workers=cfg.num_workers, pin_memory=True,
-    )
+    loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=True)
 
-    # IoU metrics per feature per timestep (no sync until compute)
-    iou_metrics: dict[FeatureType, list[IoUAccumulator]] = {
+    # IoU metrics
+    iou_metrics: dict[CanvasFeatureType, list[IoUAccumulator]] = {
         feat: [IoUAccumulator(NUM_CLASSES, IGNORE_LABEL, device) for _ in range(T)]
         for feat in feature_types
     }
@@ -158,11 +126,9 @@ def evaluate(cfg: EvalConfig) -> Path:
     amp_dtype = torch.bfloat16 if cfg.amp else torch.float32
     amp_ctx = torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=cfg.amp)
 
-    # Run evaluation
     log.info(f"Evaluating with policy={cfg.policy}, {T} timesteps...")
-    pbar = tqdm(loader, desc="Evaluating", unit="batch")
 
-    for images, masks in pbar:
+    for images, masks in tqdm(loader, desc="Evaluating", unit="batch"):
         images = images.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True)
         B = images.shape[0]
@@ -171,55 +137,42 @@ def evaluate(cfg: EvalConfig) -> Path:
             cfg.policy, B, device, T,
             min_scale=cfg.min_scale, max_scale=cfg.max_scale,
             start_with_full_scene=cfg.start_full,
-        ) if need_canvit else None
+        )
 
         with amp_ctx:
-            feats = extract_features(
-                model=model, teacher=teacher, images=images,
+            feats = extract_canvas_features(
+                model=model, images=images,
                 canvas_grid=canvas_grid, glimpse_px=cfg.glimpse_px,
-                viewpoints=viewpoints, compute_teacher_full=compute_teacher_full,
+                viewpoints=viewpoints,
             )
 
         for feat_type in feature_types:
-            t_range = [0] if feat_type in STATIC_FEATURES else range(T)
-            for t in t_range:
-                feat_t = feats.get(feat_type, t)
-                assert feat_t is not None
-                logits = probes[feat_type](feat_t.float())
-                preds = logits.argmax(1)
-                preds_up = upsample_preds(preds, masks.shape[1], masks.shape[2])
-                iou_metrics[feat_type][t].update(preds_up, masks)
+            for t in range(T):
+                eval_probe_on_batch(probes[feat_type], feats.get(feat_type, t), masks, iou_metrics[feat_type][t])
 
-    # Compute final mIoUs (sync happens here)
+    # Results
     log.info("")
     log.info("=" * 70)
-    log.info("RESULTS (global mIoU, matches DINOv3/benchmarks)")
+    log.info("RESULTS (global mIoU)")
     log.info("=" * 70)
 
     results: dict = {"mious": {}, "metadata": collect_metadata(cfg)}
 
     for feat_type in feature_types:
-        if feat_type in STATIC_FEATURES:
-            miou = iou_metrics[feat_type][0].compute()
-            results["mious"][feat_type] = {"t0": miou, "mean": miou}
-            log.info(f"  {feat_type}: mIoU={100*miou:.2f}%")
-        else:
-            mious = [iou_metrics[feat_type][t].compute() for t in range(T)]
-            mean_miou = sum(mious) / len(mious)
-            results["mious"][feat_type] = {
-                **{f"t{t}": m for t, m in enumerate(mious)},
-                "mean": mean_miou,
-            }
-            log.info(f"  {feat_type}:")
-            for t, m in enumerate(mious):
-                log.info(f"    t{t}: {100*m:.2f}%")
-            log.info(f"    mean: {100*mean_miou:.2f}%")
+        mious = [iou_metrics[feat_type][t].compute() for t in range(T)]
+        mean_miou = sum(mious) / len(mious)
+        results["mious"][feat_type] = {
+            **{f"t{t}": m for t, m in enumerate(mious)},
+            "mean": mean_miou,
+        }
+        log.info(f"  {feat_type}:")
+        for t, m in enumerate(mious):
+            log.info(f"    t{t}: {100*m:.2f}%")
+        log.info(f"    mean: {100*mean_miou:.2f}%")
 
-    # Save
     cfg.output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(results, cfg.output)
-    size_kb = cfg.output.stat().st_size / 1024
-    log.info(f"Saved to {cfg.output} ({size_kb:.1f} KB)")
+    log.info(f"Saved to {cfg.output} ({cfg.output.stat().st_size / 1024:.1f} KB)")
 
     return cfg.output
 

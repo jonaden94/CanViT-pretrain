@@ -1,4 +1,4 @@
-"""ADE20K probe training for CanViT.
+"""ADE20K canvas probe training.
 
 Trains segmentation probes on frozen CanViT features:
 - ONE probe per feature type, shared weights across timesteps (anytime decoding)
@@ -29,21 +29,20 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset, make_val_transform
-from canvit_eval.ade20k.probe import ProbeHead
+from canvit_eval.ade20k.probe import ProbeHead, eval_probe_on_batch
 from canvit_eval.ade20k.viz import log_viz
 from canvit_eval.metrics import IoUAccumulator
 from canvit_eval.utils import make_viewpoints
 
-from .config import FEATURE_NEEDS_LN, STATIC_FEATURES, Config, FeatureType, get_feature_dims
-from .features import ExtractedFeatures, extract_features
-from .loss import ce_loss, focal_loss, upsample_preds
+from .config import CANVAS_FEATURES, CanvasFeatureType, Config, get_feature_dims
+from .features import CanvasFeatures, extract_canvas_features
+from .loss import ce_loss, upsample_preds
 from .state import ProbeState
 
 log = logging.getLogger(__name__)
 
 
 def _make_probe(name: str, dim: int, cfg: Config, device: torch.device, *, use_ln: bool) -> ProbeState:
-    """Create probe with DINOv3's WarmupOneCycleLR scheduler."""
     head = ProbeHead(dim, dropout=cfg.dropout, use_ln=use_ln).to(device)
     opt = AdamW(head.parameters(), lr=cfg.peak_lr, weight_decay=cfg.weight_decay)
     scheduler = WarmupOneCycleLR(
@@ -52,9 +51,9 @@ def _make_probe(name: str, dim: int, cfg: Config, device: torch.device, *, use_l
         total_steps=cfg.max_steps,
         warmup_iters=cfg.warmup_steps,
         warmup_ratio=cfg.warmup_lr_ratio,
-        pct_start=0,  # no rising phase after warmup
+        pct_start=0,
         anneal_strategy="cos",
-        final_div_factor=float("inf"),  # decay to 0
+        final_div_factor=float("inf"),
         use_beta1=False,
         update_momentum=False,
     )
@@ -63,25 +62,16 @@ def _make_probe(name: str, dim: int, cfg: Config, device: torch.device, *, use_l
 
 def _save_checkpoint(
     run_dir: Path,
-    probes: dict[FeatureType, ProbeState],
+    probes: dict[CanvasFeatureType, ProbeState],
     step: int,
     cfg: Config,
     *,
     is_best: bool,
 ) -> Path:
-    """Save checkpoint with descriptive filename.
-
-    Best: best_miou0.3245_step5000.pt
-    Final: final_step40000.pt
-    """
     best_mious = {name: p.best_mean_miou for name, p in probes.items()}
     mean_miou = sum(best_mious.values()) / len(best_mious)
 
-    if is_best:
-        filename = f"best_miou{mean_miou:.4f}_step{step}.pt"
-    else:
-        filename = f"final_step{step}.pt"
-
+    filename = f"best_miou{mean_miou:.4f}_step{step}.pt" if is_best else f"final_step{step}.pt"
     path = run_dir / filename
     tmp_path = run_dir / f".{filename}.tmp"
     data = {
@@ -92,12 +82,10 @@ def _save_checkpoint(
     }
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Remove old best checkpoint if saving new best
     if is_best:
         for old in run_dir.glob("best_*.pt"):
             old.unlink()
 
-    # Atomic save: write to temp, then rename
     torch.save(data, tmp_path)
     tmp_path.rename(path)
     log.info(f"Saved checkpoint: {path} ({path.stat().st_size / 1e6:.1f} MB)")
@@ -110,14 +98,13 @@ def train(cfg: Config) -> None:
     device = torch.device(cfg.device)
 
     log.info("=" * 60)
-    log.info("ADE20K Probe Training")
+    log.info("ADE20K Canvas Probe Training")
     log.info("=" * 60)
     log.info(f"Model: {cfg.model_repo}")
     log.info(f"Features: {cfg.features}")
     log.info(f"Timesteps: {cfg.n_timesteps}")
     log.info(f"Viewpoint: scale=[{cfg.min_vp_scale}, {cfg.max_vp_scale}], train_start_full={cfg.train_start_full}")
     log.info(f"Training: BS={cfg.batch_size}, steps={cfg.max_steps}, LR={cfg.peak_lr}")
-    log.info("Val: resize_mode=squish")
 
     # Model
     log.info("Loading model...")
@@ -135,15 +122,14 @@ def train(cfg: Config) -> None:
 
     # Probes
     dims = get_feature_dims(model.canvas_dim, teacher.embed_dim)
-    compute_teacher_full = "teacher_full" in cfg.features
-    need_canvit = any(f not in STATIC_FEATURES for f in cfg.features)
-    probes: dict[FeatureType, ProbeState] = {
-        feat: _make_probe(feat, dims[feat], cfg, device, use_ln=FEATURE_NEEDS_LN[feat]) for feat in cfg.features
+    probes: dict[CanvasFeatureType, ProbeState] = {
+        feat: _make_probe(feat, dims[feat], cfg, device, use_ln=CANVAS_FEATURES[feat].needs_ln)
+        for feat in cfg.features
     }
     for feat, probe in probes.items():
         log.info(f"  probe[{feat}]: dim={dims[feat]}, params={sum(p.numel() for p in probe.head.parameters()):,}")
 
-    # IoU metrics (histc-based, no sync in hot path)
+    # IoU metrics
     val_iou = {
         feat: [IoUAccumulator(NUM_CLASSES, IGNORE_LABEL, device) for _ in range(cfg.n_timesteps)]
         for feat in cfg.features
@@ -153,7 +139,7 @@ def train(cfg: Config) -> None:
         for feat in cfg.features
     }
 
-    # Data transforms
+    # Data
     _train_aug = make_segmentation_train_transforms(
         img_size=cfg.image_size,
         random_img_size_ratio_range=list(cfg.aug_scale_range),
@@ -164,10 +150,11 @@ def train(cfg: Config) -> None:
 
     def train_transform(img, mask):
         img_t, mask_t = _train_aug(img, mask)
-        return img_t, mask_t.squeeze(0)  # (1, H, W) → (H, W)
+        return img_t, mask_t.squeeze(0)
 
     train_ds = ADE20kDataset(root=cfg.ade20k_root, split="training", transform=train_transform)
-    val_ds = ADE20kDataset(root=cfg.ade20k_root, split="validation", transform=make_val_transform(cfg.image_size, "squish"))
+    val_transform = make_val_transform(cfg.image_size, "squish")
+    val_ds = ADE20kDataset(root=cfg.ade20k_root, split="validation", transform=val_transform)
     train_loader = DataLoader(
         train_ds, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True, drop_last=True
     )
@@ -178,7 +165,6 @@ def train(cfg: Config) -> None:
     exp.log_parameters(asdict(cfg))
     log.info(f"Comet: {cfg.comet_workspace}/{cfg.comet_project}/{exp.get_key()}")
 
-    # Run directory: {base}/{timestamp}_{job_id}_{comet_key}/
     job_id = os.environ.get("SLURM_JOB_ID", "local")
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     run_dir = cfg.probe_ckpt_dir / f"{timestamp}_{job_id}_{exp.get_key()[:8]}" if cfg.probe_ckpt_dir else None
@@ -195,7 +181,7 @@ def train(cfg: Config) -> None:
     step = 0
     train_iter = iter(train_loader)
     pbar = tqdm(total=cfg.max_steps, desc="Training")
-    val_viz_batch: tuple[Tensor, Tensor, ExtractedFeatures] | None = None
+    val_viz_batch: tuple[Tensor, Tensor, CanvasFeatures] | None = None
 
     while step < cfg.max_steps:
         try:
@@ -222,37 +208,32 @@ def train(cfg: Config) -> None:
                     viewpoints = make_viewpoints(
                         "random", B, device, cfg.n_timesteps,
                         min_scale=cfg.min_vp_scale, max_scale=cfg.max_vp_scale,
-                        start_with_full_scene=True,  # Val ALWAYS starts full
-                    ) if need_canvit else None
+                        start_with_full_scene=True,
+                    )
                     with amp_ctx:
-                        val_feats = extract_features(
-                            model=model, teacher=teacher, images=vi,
+                        val_feats = extract_canvas_features(
+                            model=model, images=vi,
                             canvas_grid=canvas_grid, glimpse_px=cfg.glimpse_px,
-                            viewpoints=viewpoints, compute_teacher_full=compute_teacher_full,
+                            viewpoints=viewpoints,
                         )
                     if first_val_batch:
                         val_viz_batch = (vi, vm, val_feats)
                         first_val_batch = False
                     for feat_type in cfg.features:
-                        t_range = [0] if feat_type in STATIC_FEATURES else range(cfg.n_timesteps)
-                        for t in t_range:
-                            logits = probes[feat_type].head(val_feats.get(feat_type, t).float())
-                            preds_up = upsample_preds(logits.argmax(1), vm.shape[1], vm.shape[2])
-                            val_iou[feat_type][t].update(preds_up, vm)
+                        for t in range(cfg.n_timesteps):
+                            feat_t = val_feats.get(feat_type, t)
+                            eval_probe_on_batch(
+                                probes[feat_type].head, feat_t, vm, val_iou[feat_type][t],
+                            )
 
             any_improved = False
             for feat_type in cfg.features:
-                if feat_type in STATIC_FEATURES:
-                    miou = val_iou[feat_type][0].compute()
-                    exp.log_metric(f"{feat_type}/val_miou", miou, step=step)
-                    mean_miou = miou
-                else:
-                    mious = [val_iou[feat_type][t].compute() for t in range(cfg.n_timesteps)]
-                    mean_miou = sum(mious) / len(mious)
-                    for t, miou in enumerate(mious):
-                        exp.log_metric(f"{feat_type}/val_miou_t{t}", miou, step=step)
-                    exp.log_metric(f"{feat_type}/val_miou_mean", mean_miou, step=step)
-                    exp.log_curve(f"{feat_type}/val_miou_curve", x=list(range(cfg.n_timesteps)), y=mious, step=step)
+                mious = [val_iou[feat_type][t].compute() for t in range(cfg.n_timesteps)]
+                mean_miou = sum(mious) / len(mious)
+                for t, miou in enumerate(mious):
+                    exp.log_metric(f"{feat_type}/val_miou_t{t}", miou, step=step)
+                exp.log_metric(f"{feat_type}/val_miou_mean", mean_miou, step=step)
+                exp.log_curve(f"{feat_type}/val_miou_curve", x=list(range(cfg.n_timesteps)), y=mious, step=step)
 
                 if mean_miou > probes[feat_type].best_mean_miou:
                     probes[feat_type].best_mean_miou = mean_miou
@@ -274,23 +255,19 @@ def train(cfg: Config) -> None:
             "random", B, device, cfg.n_timesteps,
             min_scale=cfg.min_vp_scale, max_scale=cfg.max_vp_scale,
             start_with_full_scene=cfg.train_start_full,
-        ) if need_canvit else None
+        )
         with amp_ctx:
-            feats = extract_features(
-                model=model, teacher=teacher, images=images,
+            feats = extract_canvas_features(
+                model=model, images=images,
                 canvas_grid=canvas_grid, glimpse_px=cfg.glimpse_px,
-                viewpoints=viewpoints, compute_teacher_full=compute_teacher_full,
+                viewpoints=viewpoints,
             )
 
         for feat_type in cfg.features:
             probe = probes[feat_type]
             probe.optimizer.zero_grad()
-            t_range = [0] if feat_type in STATIC_FEATURES else range(cfg.n_timesteps)
-            logits_list = [probe.head(feats.get(feat_type, t).float()) for t in t_range]
-            if cfg.loss_type == "ce":
-                losses = [ce_loss(logits, masks) for logits in logits_list]
-            else:
-                losses = [focal_loss(logits, masks, cfg.focal_gamma) for logits in logits_list]
+            logits_list = [probe.head(feats.get(feat_type, t).float()) for t in range(cfg.n_timesteps)]
+            losses = [ce_loss(logits, masks) for logits in logits_list]
             loss = torch.stack(losses).mean()
             loss.backward()
             grad_norm = nn.utils.clip_grad_norm_(probe.head.parameters(), cfg.grad_clip)
@@ -298,14 +275,13 @@ def train(cfg: Config) -> None:
             probe.scheduler.step()
             probe.accumulate(loss, grad_norm)
 
-            # Train IoU (NO GPU sync here)
             with torch.no_grad():
-                for t, logits in zip(t_range, logits_list, strict=True):
+                for t, logits in enumerate(logits_list):
                     preds = logits.detach().argmax(1)
                     preds_up = upsample_preds(preds, masks.shape[1], masks.shape[2])
                     train_iou[feat_type][t].update(preds_up, masks)
 
-        # === Visualization (before increment, like val) ===
+        # === Visualization ===
         if step % cfg.viz_every == 0:
             viz_start = time.perf_counter()
             for p in probes.values():
@@ -322,7 +298,7 @@ def train(cfg: Config) -> None:
         step += 1
         pbar.update(1)
 
-        # === Logging (GPU sync here) ===
+        # === Logging ===
         if step % cfg.log_every == 0:
             lr = list(probes.values())[0].scheduler.get_last_lr()[0]
             log_dict: dict[str, float] = {"lr": float(lr)}
@@ -331,22 +307,14 @@ def train(cfg: Config) -> None:
                 log_dict[f"{name}/loss"] = avg_loss
                 log_dict[f"{name}/grad_norm"] = avg_grad
 
-            # Log train mIoU mean (scalar) at log_every
-            # Log train mIoU curves only at val_every to save Comet curve budget
             log_curves = (step % cfg.val_every == 0)
             for feat_type in cfg.features:
-                if feat_type in STATIC_FEATURES:
-                    miou = train_iou[feat_type][0].compute()
-                    log_dict[f"{feat_type}/train_miou"] = miou
-                    train_iou[feat_type][0].reset()
-                else:
-                    mious = [train_iou[feat_type][t].compute() for t in range(cfg.n_timesteps)]
-                    log_dict[f"{feat_type}/train_miou_mean"] = sum(mious) / len(mious)
-                    if log_curves:
-                        xs = list(range(cfg.n_timesteps))
-                        exp.log_curve(f"{feat_type}/train_miou_curve", x=xs, y=mious, step=step)
-                    for m in train_iou[feat_type]:
-                        m.reset()
+                mious = [train_iou[feat_type][t].compute() for t in range(cfg.n_timesteps)]
+                log_dict[f"{feat_type}/train_miou_mean"] = sum(mious) / len(mious)
+                if log_curves:
+                    exp.log_curve(f"{feat_type}/train_miou_curve", x=list(range(cfg.n_timesteps)), y=mious, step=step)
+                for m in train_iou[feat_type]:
+                    m.reset()
 
             exp.log_metrics(log_dict, step=step)
 

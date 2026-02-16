@@ -11,6 +11,7 @@ from canvit import Viewpoint
 from canvit_utils.policies import coarse_to_fine_viewpoints, random_viewpoints
 
 PolicyName = Literal["coarse_to_fine", "random", "full_then_random"]
+POLICY_ALIASES: dict[str, PolicyName] = {"c2f": "coarse_to_fine", "fullrand": "full_then_random", "iid": "random"}
 
 
 def get_git_commit() -> str | None:

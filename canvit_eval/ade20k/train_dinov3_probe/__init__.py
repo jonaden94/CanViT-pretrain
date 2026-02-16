@@ -1,0 +1,252 @@
+"""DINOv3 baseline probe training on ADE20K.
+
+No CanViT, no viewpoints, no rollout. Just:
+  resize -> DINOv3 forward -> probe -> loss -> backward
+
+One probe, one resolution, one forward pass per image.
+"""
+
+import logging
+import os
+import time
+from dataclasses import asdict, dataclass
+
+import comet_ml
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import tyro
+from canvit_utils.teacher import DINOv3Teacher, load_teacher
+from dinov3.eval.segmentation.schedulers import WarmupOneCycleLR
+from dinov3.eval.segmentation.transforms import make_segmentation_train_transforms
+from torch.optim import AdamW
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset, make_val_transform
+from canvit_eval.ade20k.probe import ProbeHead, eval_probe_on_batch
+from canvit_eval.ade20k.train_probe.config import ProbeTrainBase
+from canvit_eval.ade20k.train_probe.loss import ce_loss, upsample_preds
+from canvit_eval.metrics import IoUAccumulator
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class DINOv3ProbeTrainConfig(ProbeTrainBase):
+    """DINOv3 baseline probe training configuration."""
+
+    resolution: int = 128
+    model: str = "facebook/dinov3-vitb16-pretrain-lvd1689m"
+
+
+def _extract_features(teacher: DINOv3Teacher, images: torch.Tensor, resolution: int) -> torch.Tensor:
+    """Resize images to resolution, forward through teacher, return spatial features [B, H, W, D]."""
+    patch_size = teacher.model.config.patch_size
+    # Snap resolution to multiple of patch_size
+    grid = resolution // patch_size
+    assert grid > 0, f"resolution={resolution} too small for patch_size={patch_size}"
+    sz = grid * patch_size
+    resized = F.interpolate(images, size=(sz, sz), mode="bilinear", align_corners=False)
+    feats = teacher.forward_norm_features(resized).patches
+    return feats.view(images.shape[0], grid, grid, -1)
+
+
+def train(cfg: DINOv3ProbeTrainConfig) -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    torch.set_float32_matmul_precision("high")
+    device = torch.device(cfg.device)
+
+    log.info("=" * 60)
+    log.info("DINOv3 Baseline Probe Training (ADE20K)")
+    log.info("=" * 60)
+    log.info(f"Model: {cfg.model}")
+    log.info(f"Resolution: {cfg.resolution}px")
+    log.info(f"Training: BS={cfg.batch_size}, steps={cfg.max_steps}, LR={cfg.peak_lr}")
+
+    # Teacher
+    teacher = load_teacher(cfg.model, device)
+    patch_size = teacher.model.config.patch_size
+    grid = cfg.resolution // patch_size
+    assert grid > 0, f"resolution={cfg.resolution} too small for patch_size={patch_size}"
+    log.info(f"  embed_dim={teacher.embed_dim}, patch_size={patch_size}, grid={grid}x{grid}")
+
+    # Probe (no LN needed — teacher features are already post-LN)
+    probe = ProbeHead(teacher.embed_dim, dropout=cfg.dropout, use_ln=False).to(device)
+    optimizer = AdamW(probe.parameters(), lr=cfg.peak_lr, weight_decay=cfg.weight_decay)
+    scheduler = WarmupOneCycleLR(
+        optimizer,
+        max_lr=cfg.peak_lr,
+        total_steps=cfg.max_steps,
+        warmup_iters=cfg.warmup_steps,
+        warmup_ratio=cfg.warmup_lr_ratio,
+        pct_start=0,
+        anneal_strategy="cos",
+        final_div_factor=float("inf"),
+        use_beta1=False,
+        update_momentum=False,
+    )
+    log.info(f"  probe params: {sum(p.numel() for p in probe.parameters()):,}")
+
+    # IoU
+    val_iou = IoUAccumulator(NUM_CLASSES, IGNORE_LABEL, device)
+    train_iou = IoUAccumulator(NUM_CLASSES, IGNORE_LABEL, device)
+    best_miou = 0.0
+
+    # Data
+    _train_aug = make_segmentation_train_transforms(
+        img_size=cfg.image_size,
+        random_img_size_ratio_range=list(cfg.aug_scale_range),
+        crop_size=(cfg.image_size, cfg.image_size),
+        flip_prob=cfg.aug_flip_prob,
+        reduce_zero_label=True,
+    )
+
+    def train_transform(img, mask):
+        img_t, mask_t = _train_aug(img, mask)
+        return img_t, mask_t.squeeze(0)
+
+    train_ds = ADE20kDataset(root=cfg.ade20k_root, split="training", transform=train_transform)
+    val_transform = make_val_transform(cfg.image_size, "squish")
+    val_ds = ADE20kDataset(root=cfg.ade20k_root, split="validation", transform=val_transform)
+    train_loader = DataLoader(
+        train_ds, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True, drop_last=True
+    )
+    val_loader = DataLoader(val_ds, cfg.eval_batch_size, num_workers=cfg.num_workers, pin_memory=True)
+
+    # Comet
+    exp = comet_ml.Experiment(project_name=cfg.comet_project, workspace=cfg.comet_workspace)
+    exp.log_parameters(asdict(cfg))
+    exp.add_tag("dinov3-baseline")
+    log.info(f"Comet: {cfg.comet_workspace}/{cfg.comet_project}/{exp.get_key()}")
+
+    job_id = os.environ.get("SLURM_JOB_ID", "local")
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    run_dir = (
+        cfg.probe_ckpt_dir / f"dinov3_{cfg.resolution}px_{timestamp}_{job_id}_{exp.get_key()[:8]}"
+        if cfg.probe_ckpt_dir else None
+    )
+    if run_dir:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        log.info(f"Checkpoints: {run_dir}")
+
+    amp_dtype = torch.bfloat16 if cfg.amp else torch.float32
+    amp_ctx = torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=cfg.amp)
+
+    log.info("=" * 60)
+    log.info("Starting training...")
+
+    step = 0
+    train_iter = iter(train_loader)
+    pbar = tqdm(total=cfg.max_steps, desc="Training")
+    loss_sum = 0.0
+    loss_count = 0
+
+    while step < cfg.max_steps:
+        try:
+            images, masks = next(train_iter)
+        except StopIteration:
+            train_iter = iter(train_loader)
+            images, masks = next(train_iter)
+        images, masks = images.to(device), masks.to(device)
+
+        # === Validation ===
+        if step % cfg.val_every == 0:
+            val_start = time.perf_counter()
+            probe.eval()
+            val_iou.reset()
+
+            with torch.no_grad():
+                for vi, vm in val_loader:
+                    vi, vm = vi.to(device), vm.to(device)
+                    with amp_ctx:
+                        feats = _extract_features(teacher, vi, cfg.resolution)
+                    eval_probe_on_batch(probe, feats, vm, val_iou)
+
+            miou = val_iou.compute()
+            exp.log_metric("val_miou", miou, step=step)
+            log.info(f"Step {step}: val mIoU={100*miou:.2f}% (best={100*best_miou:.2f}%)")
+
+            if miou > best_miou and run_dir:
+                best_miou = miou
+                path = run_dir / f"best_miou{miou:.4f}_step{step}.pt"
+                for old in run_dir.glob("best_*.pt"):
+                    old.unlink()
+                torch.save({
+                    "probe_state_dict": probe.state_dict(),
+                    "resolution": cfg.resolution,
+                    "model": cfg.model,
+                    "best_miou": best_miou,
+                    "step": step,
+                    "config": asdict(cfg),
+                }, path)
+                log.info(f"  Saved best: {path}")
+            elif miou > best_miou:
+                best_miou = miou
+
+            val_time = time.perf_counter() - val_start
+            exp.log_metric("timing/val_seconds", val_time, step=step)
+
+        # === Training step ===
+        probe.train()
+        optimizer.zero_grad()
+
+        with amp_ctx:
+            feats = _extract_features(teacher, images, cfg.resolution)
+        logits = probe(feats.float())
+        loss = ce_loss(logits, masks)
+        loss.backward()
+        grad_norm = nn.utils.clip_grad_norm_(probe.parameters(), cfg.grad_clip)
+        optimizer.step()
+        scheduler.step()
+
+        loss_sum += loss.detach().item()
+        loss_count += 1
+
+        # Train IoU
+        with torch.no_grad():
+            preds = logits.detach().argmax(1)
+            preds_up = upsample_preds(preds, masks.shape[1], masks.shape[2])
+            train_iou.update(preds_up, masks)
+
+        step += 1
+        pbar.update(1)
+
+        # === Logging ===
+        if step % cfg.log_every == 0:
+            avg_loss = loss_sum / loss_count
+            train_miou = train_iou.compute()
+            exp.log_metrics({
+                "loss": avg_loss,
+                "grad_norm": grad_norm.item(),
+                "lr": scheduler.get_last_lr()[0],
+                "train_miou": train_miou,
+            }, step=step)
+            loss_sum = 0.0
+            loss_count = 0
+            train_iou.reset()
+
+    pbar.close()
+
+    # Final checkpoint
+    if run_dir:
+        path = run_dir / f"final_step{step}.pt"
+        torch.save({
+            "probe_state_dict": probe.state_dict(),
+            "resolution": cfg.resolution,
+            "model": cfg.model,
+            "best_miou": best_miou,
+            "step": step,
+            "config": asdict(cfg),
+        }, path)
+        log.info(f"Final checkpoint: {path}")
+
+    log.info("=" * 60)
+    log.info(f"Training complete. Best mIoU: {100*best_miou:.2f}%")
+    exp.log_metric("best/miou", best_miou)
+    log.info("=" * 60)
+
+
+def main() -> None:
+    cfg = tyro.cli(DINOv3ProbeTrainConfig)
+    train(cfg)

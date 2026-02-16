@@ -91,7 +91,11 @@ RecurrentState(
 uv run pypatree                              # structure
 uv run -m canvit_pretrain.train              # pretraining
 uv run -m canvit_eval.in1k                   # IN1k evaluation
-uv run -m canvit_eval.ade20k                 # ADE20k evaluation
+uv run -m canvit_eval.ade20k --help          # ADE20k (4 subcommands)
+uv run -m canvit_eval.ade20k train           # canvas probe training
+uv run -m canvit_eval.ade20k evaluate        # canvas probe eval (with policy)
+uv run -m canvit_eval.ade20k train-dinov3-probe --resolution 128  # DINOv3 baseline
+uv run -m canvit_eval.ade20k eval-dinov3-probe --probe-ckpt ...   # DINOv3 eval
 COMET_API_KEY=$(cat ~/comet_api_key.txt) uv run ...
 uv run ipython -c "..."                      # quick experiments
 ```
