@@ -42,9 +42,22 @@ def main() -> None:
 
     history = ckpt.get("training_config_history")
     if history:
-        print(f"\nconfig history: {len(history)} entries")
-        for ts in sorted(history):
-            print(f"  {ts}")
+        timestamps = sorted(history)
+        print(f"\nconfig history: {len(timestamps)} entries")
+        prev = None
+        for ts in timestamps:
+            cfg = history[ts]
+            if prev is None:
+                print(f"  {ts}  (initial)")
+            else:
+                changed = {k for k in cfg.keys() | prev.keys() if cfg.get(k) != prev.get(k)}
+                if changed:
+                    print(f"  {ts}  CHANGED:")
+                    for k in sorted(changed):
+                        print(f"    {k}: {prev.get(k)!r} -> {cfg.get(k)!r}")
+                else:
+                    print(f"  {ts}  (no changes)")
+            prev = cfg
 
 
 if __name__ == "__main__":
