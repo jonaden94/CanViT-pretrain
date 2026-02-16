@@ -27,6 +27,14 @@ def make_val_transform(
 ) -> Callable[[Image.Image, Image.Image], tuple[Tensor, Tensor]]:
     """Create joint (img, mask) transform for validation.
 
+    Unlike IN1k (which uses canvit_utils.transforms.preprocess()), segmentation
+    requires a JOINT image+mask transform — we can't reuse the classification
+    pipeline. The normalization (ImageNet mean/std) is intentionally identical.
+
+    "squish" (Resize to exact size) is the harder setting and should be the
+    default. "center_crop" is easier because it discards image edges.
+    Results are ONLY comparable across models using the same resize_mode.
+
     Handles reduce_zero_label: 0→255 (ignore), 1-150→0-149 (classes).
     """
     if mode == "center_crop":
