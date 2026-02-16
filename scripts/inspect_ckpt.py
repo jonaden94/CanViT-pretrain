@@ -15,7 +15,6 @@ def main() -> None:
     sched = ckpt.get("scheduler_state")
     step = sched["last_epoch"] if sched else ckpt.get("step")
     n_params = sum(p.numel() for p in ckpt["state_dict"].values()) / 1e6
-    has_optim = ckpt.get("optimizer_state") is not None
     git = ckpt.get("git_commit")
     git_str = f"{git[:8]}{'*' if ckpt.get('git_dirty') else ''}" if git else "n/a"
 
@@ -24,7 +23,8 @@ def main() -> None:
     print(f"step:       {step}")
     print(f"train_loss: {ckpt.get('train_loss', 'n/a')}")
     print(f"params:     {n_params:.1f}M")
-    print(f"resumable:  {'yes' if has_optim and sched else 'no (missing optimizer/scheduler)'}")
+    print(f"has_optim:  {'yes' if ckpt.get('optimizer_state') is not None else 'no'}")
+    print(f"has_sched:  {'yes' if sched else 'no'}")
     print()
     print(f"backbone:   {ckpt['backbone_name']}")
     print(f"teacher:    {ckpt['teacher_name']}")
