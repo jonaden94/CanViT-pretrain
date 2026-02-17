@@ -59,31 +59,32 @@ def _make_probe(name: str, dim: int, cfg: Config, device: torch.device, *, use_l
     return ProbeState(name, head, opt, scheduler)
 
 
-def _save_checkpoint(
+def _save_probe_checkpoint(
     run_dir: Path,
-    probes: dict[CanvasFeatureType, ProbeState],
+    feat_type: CanvasFeatureType,
+    probe: ProbeState,
     step: int,
     cfg: Config,
     *,
     is_best: bool,
 ) -> Path:
-    best_last = {name: p.best_last_miou for name, p in probes.items()}
-    best_last_avg = sum(best_last.values()) / len(best_last)
-
     t_last = cfg.n_timesteps - 1
-    filename = f"best_t{t_last}_miou{best_last_avg:.4f}_step{step}.pt" if is_best else f"final_step{step}.pt"
+    miou = probe.best_last_miou
+    prefix = f"{feat_type}_best_t{t_last}_miou{miou:.4f}_step{step}" if is_best else f"{feat_type}_final_step{step}"
+    filename = f"{prefix}.pt"
     path = run_dir / filename
     tmp_path = run_dir / f".{filename}.tmp"
     data = {
         "step": step,
-        "probe_state_dicts": {name: p.head.state_dict() for name, p in probes.items()},
-        "best_mious_per_t": {name: p.best_mious for name, p in probes.items()},
+        "feat_type": feat_type,
+        "probe_state_dict": probe.head.state_dict(),
+        "best_mious_per_t": probe.best_mious,
         "config": asdict(cfg),
     }
     run_dir.mkdir(parents=True, exist_ok=True)
 
     if is_best:
-        for old in run_dir.glob("best_*.pt"):
+        for old in run_dir.glob(f"{feat_type}_best_*.pt"):
             old.unlink()
 
     torch.save(data, tmp_path)
@@ -235,19 +236,17 @@ def train(cfg: Config) -> None:
                                 probes[feat_type].head, feat_t, vm, val_iou[feat_type][t],
                             )
 
-            any_improved = False
             for feat_type in cfg.features:
                 mious = [val_iou[feat_type][t].compute() for t in range(cfg.n_timesteps)]
                 improved = probes[feat_type].update_best(mious)
-                any_improved = any_improved or improved
 
                 for t, miou in enumerate(mious):
                     exp.log_metric(f"{feat_type}/val_miou_t{t}", miou, step=step)
                     exp.log_metric(f"{feat_type}/best_val_miou_t{t}", probes[feat_type].best_mious[t], step=step)
                 exp.log_curve(f"{feat_type}/val_miou_curve", x=list(range(cfg.n_timesteps)), y=mious, step=step)
 
-            if any_improved and run_dir:
-                _save_checkpoint(run_dir, probes, step, cfg, is_best=True)
+                if improved and run_dir:
+                    _save_probe_checkpoint(run_dir, feat_type, probes[feat_type], step, cfg, is_best=True)
 
             val_time = time.perf_counter() - val_start
             log.info(f"Step {step}: validation took {val_time:.1f}s")
@@ -330,7 +329,8 @@ def train(cfg: Config) -> None:
     pbar.close()
 
     if run_dir:
-        _save_checkpoint(run_dir, probes, step, cfg, is_best=False)
+        for feat_type, probe in probes.items():
+            _save_probe_checkpoint(run_dir, feat_type, probe, step, cfg, is_best=False)
 
     log.info("=" * 60)
     log.info("Training complete. Best val mIoU per timestep:")

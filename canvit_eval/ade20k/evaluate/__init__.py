@@ -66,25 +66,37 @@ def load_probes(
     canvas_dim: int,
     teacher_dim: int,
 ) -> dict[CanvasFeatureType, ProbeHead]:
+    """Load probes from checkpoint(s).
+
+    Supports two formats:
+    - New (per-feature): single feat_type + probe_state_dict per file
+    - Legacy (multi-probe): probe_state_dicts dict in one file
+    """
     log.info(f"Loading probes from {ckpt_path}")
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-
     dims = get_feature_dims(canvas_dim, teacher_dim)
     dropout = ckpt.get("config", {}).get("dropout", 0.0)
 
     probes: dict[CanvasFeatureType, ProbeHead] = {}
-    for name, state_dict in ckpt["probe_state_dicts"].items():
+
+    if "feat_type" in ckpt:
+        # New format: one probe per file
+        name = ckpt["feat_type"]
         probe = ProbeHead(dims[name], dropout=dropout, use_ln=CANVAS_FEATURES[name].needs_ln).to(device)
-        probe.load_state_dict(state_dict)
+        probe.load_state_dict(ckpt["probe_state_dict"])
         probe.eval()
         probes[name] = probe
-        best_per_t = ckpt.get("best_mious_per_t", {}).get(name)
-        if best_per_t:
-            best_str = f"best per-t={best_per_t}"
-        else:
+        best_per_t = ckpt.get("best_mious_per_t")
+        log.info(f"  {name}: loaded (best per-t={best_per_t})")
+    else:
+        # Legacy format: all probes in one file
+        for name, state_dict in ckpt["probe_state_dicts"].items():
+            probe = ProbeHead(dims[name], dropout=dropout, use_ln=CANVAS_FEATURES[name].needs_ln).to(device)
+            probe.load_state_dict(state_dict)
+            probe.eval()
+            probes[name] = probe
             old = ckpt.get("best_mean_mious", {}).get(name, "N/A")
-            best_str = f"best(legacy)={old}"
-        log.info(f"  {name}: loaded ({best_str})")
+            log.info(f"  {name}: loaded (best(legacy)={old})")
 
     return probes
 
