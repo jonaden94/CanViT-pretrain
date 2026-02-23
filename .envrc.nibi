@@ -24,6 +24,8 @@ export DINOV3_VITB16_CKPT="$CHECKPOINTS_DIR/dinov3/dinov3_vitb16_pretrain_lvd168
 export CANVIT_FLAGSHIP_CKPT="$CHECKPOINTS_DIR/CanViT-flagship.pt"
 
 # Credentials (optional)
-[ -f ~/comet_api_key.txt ] && export COMET_API_KEY=$(cat ~/comet_api_key.txt)
-[ -f ~/hf_token.txt ] && export HF_TOKEN=$(cat ~/hf_token.txt)
-[ -f "${HF_HOME:-}/token" ] && [ -z "${HF_TOKEN:-}" ] && export HF_TOKEN=$(cat "$HF_HOME/token")
+# NOTE: every line must be safe under `set -e`. A bare `cmd1 && cmd2` that
+# evaluates to false kills the shell.  Use `if` or `|| true`.
+if [ -f ~/comet_api_key.txt ]; then export COMET_API_KEY=$(cat ~/comet_api_key.txt); fi
+if [ -f ~/hf_token.txt ]; then export HF_TOKEN=$(cat ~/hf_token.txt); fi
+if [ -f "${HF_HOME:-}/token" ] && [ -z "${HF_TOKEN:-}" ]; then export HF_TOKEN=$(cat "$HF_HOME/token"); fi

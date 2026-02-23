@@ -84,21 +84,31 @@ def grad_norms_by_module(model: nn.Module, depth: int = 1) -> dict[str, float]:
     }
 
 
+_NORMALIZER_MAX_SAMPLES = 1024  # Enough for robust mean/var; keeps memory < 10 GB
+
+
 def init_normalizer_stats_from_shard(
     shard_path: Path,
     scene_norm: PatchStandardizer,
     cls_norm: CLSStandardizer,
     device: torch.device,
 ) -> None:
-    """Initialize normalizer stats from one precomputed shard."""
+    """Initialize normalizer stats from one precomputed shard.
+
+    Uses mmap + subset to avoid loading the full shard into memory.
+    SA-1B shards are ~70 GB; loading fully would OOM on any device.
+    """
     log.info(f"Computing normalizer stats from shard: {shard_path.name}")
-    shard = torch.load(shard_path, map_location=device, weights_only=False)
-    patches = shard["patches"].float()  # [N, n_tokens, D]
-    cls = shard["cls"].float()  # [N, D]
+    shard = torch.load(shard_path, map_location="cpu", weights_only=False, mmap=True)
+    n_total = shard["patches"].shape[0]
+    n = min(n_total, _NORMALIZER_MAX_SAMPLES)
+    # .clone() materializes from mmap; .float().to(device) for set_stats
+    patches = shard["patches"][:n].clone().float().to(device)  # [n, n_tokens, D]
+    cls = shard["cls"][:n].clone().float().to(device)  # [n, D]
     scene_norm.set_stats(patches)
-    cls_norm.set_stats(cls.unsqueeze(1))  # [N, 1, D] for n_tokens=1
-    log.info(f"  Scene/CLS stats from {patches.shape[0]} samples")
-    del shard
+    cls_norm.set_stats(cls.unsqueeze(1))  # [n, 1, D] for n_tokens=1
+    log.info(f"  Scene/CLS stats from {n}/{n_total} samples")
+    del shard, patches, cls
     torch.cuda.empty_cache()
 
 
