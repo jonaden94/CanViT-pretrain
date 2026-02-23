@@ -38,10 +38,6 @@ class CheckpointData(TypedDict):
     step: int | None
     train_loss: float | None
 
-    # --- Normalizer stats (required for correct inference) ---
-    scene_norm_state: dict[str, Tensor] | None
-    cls_norm_state: dict[str, Tensor] | None
-
     # --- Optimizer/scheduler state for resuming training ---
     optimizer_state: dict | None
     scheduler_state: dict | None
@@ -161,8 +157,6 @@ def save(
     step: int | None = None,
     train_loss: float | None = None,
     comet_id: str | None = None,
-    scene_norm_state: dict[str, Tensor] | None = None,
-    cls_norm_state: dict[str, Tensor] | None = None,
     optimizer_state: dict | None = None,
     scheduler_state: dict | None = None,
     training_config_history: dict[str, dict] | None = None,
@@ -186,8 +180,6 @@ def save(
         "scene_resolution": scene_resolution,
         "step": step,
         "train_loss": train_loss,
-        "scene_norm_state": scene_norm_state,
-        "cls_norm_state": cls_norm_state,
         "optimizer_state": optimizer_state,
         "scheduler_state": scheduler_state,
         "training_config_history": training_config_history,
@@ -242,8 +234,6 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
         "scene_resolution": raw["scene_resolution"],
         "step": raw["step"],
         "train_loss": raw["train_loss"],
-        "scene_norm_state": raw["scene_norm_state"],
-        "cls_norm_state": raw["cls_norm_state"],
         "optimizer_state": raw["optimizer_state"],
         "scheduler_state": raw["scheduler_state"],
         "training_config_history": raw["training_config_history"],
