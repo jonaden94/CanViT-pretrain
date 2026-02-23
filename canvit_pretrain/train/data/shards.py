@@ -6,6 +6,10 @@ Design:
 - Deterministic order: shard 0, 1, 2, ..., n-1, 0, 1, ... (no shuffling)
 - Resume via start_shard = start_step // batches_per_shard
 - Persistent workers work naturally (dataset controls iteration)
+
+Image sources:
+- image_root (IN21k): images on filesystem, loaded via PIL
+- tar_dir (SA-1B): images read directly from mmap'd tar files, no extraction
 """
 
 import logging
@@ -20,6 +24,8 @@ from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from canvit_utils.transforms import preprocess
 
+from .tar_images import TarImageReader
+
 log = logging.getLogger(__name__)
 
 
@@ -33,17 +39,26 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
     def __init__(
         self,
         shard_files: list[Path],
-        image_root: Path,
         image_size: int,
         start_shard: int = 0,
         expected_samples_per_shard: int | None = None,
+        *,
+        image_root: Path | None = None,
+        tar_dir: Path | None = None,
     ) -> None:
+        assert (image_root is None) != (tar_dir is None), \
+            "Exactly one of image_root or tar_dir must be set"
         self.shard_files = shard_files
-        self.image_root = Path(image_root)
+        self.image_root = Path(image_root) if image_root is not None else None
+        self.tar_dir = Path(tar_dir) if tar_dir is not None else None
         self.image_size = image_size
         self.start_shard = start_shard
         self.expected_samples_per_shard = expected_samples_per_shard
         self.transform = preprocess(image_size)
+
+    def _tar_path_for_shard(self, shard_path: Path) -> Path:
+        assert self.tar_dir is not None
+        return self.tar_dir / f"{shard_path.stem}.tar"
 
     def __iter__(self) -> Iterator[tuple[Tensor, Tensor, Tensor, int]]:
         worker_info = get_worker_info()
@@ -52,6 +67,7 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
 
         n_shards = len(self.shard_files)
         shard_counter = self.start_shard
+        tar_reader: TarImageReader | None = None
 
         while True:
             shard_idx = shard_counter % n_shards
@@ -62,6 +78,12 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
             t0 = time.perf_counter()
             shard = torch.load(shard_path, map_location="cpu", weights_only=False, mmap=True)
             t_load = time.perf_counter() - t0
+
+            # Open tar for this shard (mmap'd, shared across workers via fork COW)
+            if self.tar_dir is not None:
+                if tar_reader is not None:
+                    tar_reader.close()
+                tar_reader = TarImageReader(self._tar_path_for_shard(shard_path))
 
             n_samples = len(shard["paths"])
             failed_indices = set(shard.get("failed_indices", []))
@@ -87,8 +109,12 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
 
                 rel_path = shard["paths"][i]
                 try:
-                    with Image.open(self.image_root / rel_path) as f:
-                        img = f.convert("RGB")
+                    if tar_reader is not None:
+                        img = tar_reader.read_image(rel_path)
+                    else:
+                        assert self.image_root is not None
+                        with Image.open(self.image_root / rel_path) as f:
+                            img = f.convert("RGB")
                     img_tensor = self.transform(img)
                 except Exception as e:
                     log.warning(f"Worker {worker_id}: RUNTIME FAILURE {rel_path}: {e}")
@@ -119,14 +145,19 @@ class ShardedFeatureLoader:
     def __init__(
         self,
         shards_dir: Path,
-        image_root: Path,
         image_size: int,
         batch_size: int,
         num_workers: int,
         start_step: int,
+        *,
+        image_root: Path | None = None,
+        tar_dir: Path | None = None,
     ) -> None:
+        assert (image_root is None) != (tar_dir is None), \
+            "Exactly one of image_root or tar_dir must be set"
         self.shards_dir = Path(shards_dir)
-        self.image_root = Path(image_root)
+        self.image_root = image_root
+        self.tar_dir = tar_dir
         self.image_size = image_size
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -154,10 +185,11 @@ class ShardedFeatureLoader:
         """Create DataLoader with dataset starting at start_shard."""
         dataset = AllShardsDataset(
             shard_files=self.shard_files,
-            image_root=self.image_root,
             image_size=self.image_size,
             start_shard=self.start_shard,
             expected_samples_per_shard=self.samples_per_shard,
+            image_root=self.image_root,
+            tar_dir=self.tar_dir,
         )
         return DataLoader(
             dataset,

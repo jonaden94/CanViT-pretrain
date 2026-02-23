@@ -4,9 +4,10 @@ Reads checkpoint (if any) to determine start_step, computes shard range,
 outputs tar indices (one per line, zero-padded to 6 digits).
 
 Usage:
-    uv run python sa1b/plan_job.py RUN_DIR SHARDS_DIR BATCH_SIZE SHARDS_PER_JOB
+    uv run python sa1b/plan_job.py RUN_DIR SHARDS_DIR BATCH_SIZE SHARDS_PER_JOB STEPS_PER_JOB
 """
 
+import math
 import re
 import sys
 from pathlib import Path
@@ -19,6 +20,7 @@ def main() -> None:
     shards_dir = Path(sys.argv[2])
     batch_size = int(sys.argv[3])
     shards_per_job = int(sys.argv[4])
+    steps_per_job = int(sys.argv[5])
 
     # Determine start_step from checkpoint
     latest = run_dir / "latest.pt"
@@ -40,11 +42,16 @@ def main() -> None:
     del first
     batches_per_shard = samples_per_shard // batch_size
 
+    # Cap shards to what's actually needed for steps_per_job
+    shards_needed = math.ceil(steps_per_job / batches_per_shard)
+    n_shards = min(shards_per_job, shards_needed)
+
     start_shard = start_step // batches_per_shard
-    end_shard = min(start_shard + shards_per_job, len(shard_files))
+    end_shard = min(start_shard + n_shards, len(shard_files))
 
     # Print diagnostic info to stderr
     print(f"start_step={start_step}, batches_per_shard={batches_per_shard}, "
+          f"shards_needed={shards_needed}, n_shards={n_shards}, "
           f"start_shard={start_shard}, end_shard={end_shard}, "
           f"total_shards={len(shard_files)}", file=sys.stderr)
 
