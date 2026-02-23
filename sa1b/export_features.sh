@@ -1,24 +1,19 @@
 #!/bin/bash
 #SBATCH --account=rrg-skrishna_gpu
-#SBATCH --gres=gpu:nvidia_h100_80gb_hbm3_1g.10gb:1
+#SBATCH --gres=gpu:1
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=3:00:00
-#SBATCH --output=logs/export_sa1b_%j.out
-#SBATCH --error=logs/export_sa1b_%j.err
+#SBATCH --time=1:00:00
+#SBATCH --output=logs/export_sa1b_%A_%a.out
+#SBATCH --error=logs/export_sa1b_%A_%a.err
 
 # ==============================================================================
-# Export DINOv3 features for SA-1B images at 1024px.
-#
-# Single job: extracts ALL tars in $SA1B_TAR_DIR to SLURM_TMPDIR,
-# builds one parquet, runs export_features.py (untouched).
-# Features land in one flat shards/ dir — compatible with training loader.
-#
-# For 3 tars (~33k images, ~33GB extracted): fits on SLURM_TMPDIR.
-# For larger scale, will need a different approach.
+# Export DINOv3 features for SA-1B. Array job: 1 task = 1 tar = 1 shard.
 #
 # USAGE:
-#   sbatch sa1b/export_features.sh
+#   sbatch --array=0-999 sa1b/export_features.sh          # all 1000 tars
+#   sbatch --array=0-2   sa1b/export_features.sh          # first 3 tars
+#   sbatch --array=20    sa1b/export_features.sh          # single tar
 # ==============================================================================
 
 set -euo pipefail
@@ -26,101 +21,32 @@ set -euo pipefail
 source slurm/env.sh
 mkdir -p logs
 
-# ==============================================================================
-# CONFIG
-# ==============================================================================
-
+TAR_IDX=$(printf "%06d" "$SLURM_ARRAY_TASK_ID")
+TAR_PATH="$SA1B_TAR_DIR/sa_${TAR_IDX}.tar"
 IMAGE_SIZE=1024
-TEACHER_REPO_ID="facebook/dinov3-vitb16-pretrain-lvd1689m"
-SHARD_SIZE=4096
-BATCH_SIZE=32
-
-LOCAL_IMAGE_DIR="$SLURM_TMPDIR/sa1b_images"
-LOCAL_PARQUET="$SLURM_TMPDIR/sa1b_index.parquet"
-OUT_DIR="$SA1B_FEATURES_DIR/sa1b/dinov3_vitb16/${IMAGE_SIZE}"
-
-# ==============================================================================
-# LOGGING
-# ==============================================================================
+OUT_DIR="$SA1B_FEATURES_DIR/sa1b/dinov3_vitb16/${IMAGE_SIZE}/shards"
+EXTRACT_DIR="$SLURM_TMPDIR/sa1b_images"
 
 echo "========================================"
 echo "SLURM_JOB_ID:       $SLURM_JOB_ID"
+echo "SLURM_ARRAY_TASK_ID: $SLURM_ARRAY_TASK_ID"
 echo "Node:               $(hostname)"
 echo "Date:               $(date -Iseconds)"
 echo "Git commit:         $(git rev-parse HEAD 2>/dev/null || echo 'unknown')"
 echo "========================================"
-echo "GPU:                $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader)"
-echo "========================================"
-echo "SA1B_TAR_DIR:       $SA1B_TAR_DIR"
-echo "IMAGE_SIZE:         $IMAGE_SIZE"
+echo "TAR:                $TAR_PATH"
 echo "OUT_DIR:            $OUT_DIR"
-echo "BATCH_SIZE:         $BATCH_SIZE"
+echo "IMAGE_SIZE:         $IMAGE_SIZE"
 echo "========================================"
 
-# ==============================================================================
-# SANITY CHECKS
-# ==============================================================================
+[[ -f "$TAR_PATH" ]] || { echo "FATAL: Tar not found: $TAR_PATH" >&2; exit 1; }
 
-[[ -d "$SA1B_TAR_DIR" ]] || { echo "FATAL: Tar dir not found: $SA1B_TAR_DIR" >&2; exit 1; }
-
-TARS=("$SA1B_TAR_DIR"/*.tar)
-[[ ${#TARS[@]} -gt 0 ]] || { echo "FATAL: No .tar files in $SA1B_TAR_DIR" >&2; exit 1; }
-echo "Found ${#TARS[@]} tars"
-
-# ==============================================================================
-# STEP 1: Extract JPEGs from ALL tars to local SSD
-# ==============================================================================
-
-mkdir -p "$LOCAL_IMAGE_DIR"
-START_TIME=$(date +%s)
-
-# Tars are stored uncompressed on NFS — extract in parallel (NFS-bound, not CPU-bound).
-# Tar entries are ./sa_<id>.{jpg,json} — flat with ./ prefix, no subdirectories.
-# tar xf handles ./ transparently, files land directly in LOCAL_IMAGE_DIR.
-for tar in "${TARS[@]}"; do
-    echo "Extracting $(basename "$tar") ..."
-    tar xf "$tar" -C "$LOCAL_IMAGE_DIR" &
-done
-wait
-
-N_IMAGES=$(find "$LOCAL_IMAGE_DIR" -name '*.jpg' | wc -l)
-ELAPSED=$(($(date +%s) - START_TIME))
-echo "Extracted $N_IMAGES images from ${#TARS[@]} tars in ${ELAPSED}s"
-
-# ==============================================================================
-# STEP 2: Build parquet index
-# ==============================================================================
-
-echo "Building parquet index..."
-uv run python sa1b/build_parquet.py \
-    --image-dir "$LOCAL_IMAGE_DIR" \
-    --output "$LOCAL_PARQUET"
-
-# ==============================================================================
-# STEP 3: Export features
-# ==============================================================================
-
-echo "Exporting features..."
-START_TIME=$(date +%s)
-
-uv run python scripts/export_features.py \
-    --parquet "$LOCAL_PARQUET" \
-    --image-root "$LOCAL_IMAGE_DIR" \
+time uv run python sa1b/export_features.py \
+    --tar "$TAR_PATH" \
     --out-dir "$OUT_DIR" \
-    --teacher-repo-id "$TEACHER_REPO_ID" \
-    --image-size "$IMAGE_SIZE" \
-    --shard-size "$SHARD_SIZE" \
-    --batch-size "$BATCH_SIZE" \
-    --start-shard 0 \
-    --end-shard 1000
-
-EXIT_CODE=$?
-ELAPSED=$(($(date +%s) - START_TIME))
+    --extract-dir "$EXTRACT_DIR" \
+    --image-size "$IMAGE_SIZE"
 
 echo "========================================"
-echo "Exit code:          $EXIT_CODE"
-echo "Elapsed (export):   ${ELAPSED}s"
 echo "End time:           $(date -Iseconds)"
 echo "========================================"
-
-exit $EXIT_CODE
