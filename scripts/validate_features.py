@@ -4,7 +4,7 @@ Usage (in interactive session):
     source slurm/env.sh
     uv run python scripts/validate_features.py \
         --shard $FEATURES_DIR/dinov3_vitb16/512/shards/00000.pt \
-        --image-root $IN21K_DIR \
+        --image-root $IN21K_IMAGE_DIR \
         --teacher-ckpt $DINOV3_VITB16_CKPT \
         --idx 42
 """

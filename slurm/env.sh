@@ -26,9 +26,11 @@ export TORCH_COMPILE_CACHE_DIR="$SCRATCH/.torch_compile_cache"
 # DATASETS
 # ==============================================================================
 
-export IN21K_DIR=/datashare/imagenet/winter21_whole
-export IN1K_VAL_DIR=/datashare/imagenet/ILSVRC2012/val
+export IN21K_IMAGE_DIR=/datashare/imagenet/winter21_whole
+export IN1K_VAL_IMAGE_DIR=/datashare/imagenet/ILSVRC2012/val
 export ADE20K_ZIP=~/projects/def-skrishna/datasets/ade20k/ADEChallengeData2016.zip
+export SA1B_IMAGE_DIR=~/projects/def-akrish/datasets/sa1b/images
+export SA1B_LINKS="$SCRATCH/sa1b_links.txt"
 
 # ==============================================================================
 # STORAGE
@@ -37,6 +39,7 @@ export ADE20K_ZIP=~/projects/def-skrishna/datasets/ade20k/ADEChallengeData2016.z
 export INDEX_DIR="$SCRATCH/dataset_indexes"
 export CHECKPOINTS_DIR=~/projects/def-skrishna/checkpoints
 export FEATURES_DIR=~/projects/def-skrishna/dinov3_dense_features
+export SA1B_FEATURES_DIR=~/projects/def-akrish/dinov3_dense_features
 
 # ==============================================================================
 # KNOWN CHECKPOINTS

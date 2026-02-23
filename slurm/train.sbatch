@@ -58,8 +58,8 @@ RUN_NAME_ARG=()
 exec uv run python -m canvit_pretrain.train \
     "${RUN_NAME_ARG[@]}" \
     --feature-base-dir "$FEATURES_DIR/in21k" \
-    --feature-image-root "$IN21K_DIR" \
-    --val-dir "$IN1K_VAL_DIR" \
+    --feature-image-root "$IN21K_IMAGE_DIR" \
+    --val-dir "$IN1K_VAL_IMAGE_DIR" \
     --train-index-dir "$INDEX_DIR" \
     --ckpt-dir "$CHECKPOINTS_DIR" \
     "$@"
