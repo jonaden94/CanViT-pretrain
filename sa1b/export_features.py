@@ -159,9 +159,9 @@ def main(cfg: Config) -> None:
 
     # --- Phase 3: Inference ---
     # Accumulate on pinned CPU memory — full shard is ~66 GB in fp16, won't fit on GPU.
-    # Pinned + non_blocking=True avoids GPU sync on the CPU thread: the D2H copy
-    # runs on the GPU's copy engine while the CPU thread returns immediately to
-    # feed the DataLoader. Each write targets a unique slice, so no race.
+    # Pinned + non_blocking=True: D2H runs on GPU copy engine, CPU thread returns
+    # immediately to feed DataLoader. Each write targets a unique slice, no race.
+    # Requires ~70 GB RAM — request ≥96G from SLURM.
     patches_buf = torch.empty(n, n_patches, embed_dim, dtype=STORAGE_DTYPE).pin_memory()
     cls_buf = torch.empty(n, embed_dim, dtype=STORAGE_DTYPE).pin_memory()
     hashes: list[str] = [""] * n
