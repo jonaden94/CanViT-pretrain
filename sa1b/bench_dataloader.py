@@ -51,7 +51,7 @@ def bench_components(tar_path: Path, names: list[str], size: int, n: int) -> Non
     raw_buffers = []
     for name in names:
         offset, length = reader.index[name]
-        raw_buffers.append(reader._mmap[offset : offset + length])
+        raw_buffers.append(reader._mm[offset : offset + length])
     t_mmap = time.perf_counter() - t0
 
     # 2) PIL decode (bytes → Image)
