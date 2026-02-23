@@ -45,7 +45,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from canvit_pretrain.train.transforms import val_transform
+from canvit_utils.transforms import preprocess
 
 STORAGE_DTYPE = torch.float16
 NUMPY_DTYPE = np.float16  # Must match STORAGE_DTYPE
@@ -71,7 +71,7 @@ class Config:
 class ImageDataset(Dataset[tuple[Tensor, int, bool, str]]):
     def __init__(self, paths: list[Path], size: int) -> None:
         self.paths = paths
-        self.transform = val_transform(size)
+        self.transform = preprocess(size)
         self.size = size
 
     def __len__(self) -> int:
@@ -234,7 +234,7 @@ def main(cfg: Config) -> None:
     # through the storage linearly, OS pages in/out as needed. Peak RSS stays low.
     # (Raw numpy mmap would be pickled → materializes entire array. Don't do that.)
     shard_mb_est = (patches_buf.nbytes + cls_buf.nbytes) / 1e6
-    log.info(f"Saving shard to {shard_path} (~{shard_mb_est:.0f} MB)...")
+    log.info(f"Saving shard to {shard_path} (via .tmp, ~{shard_mb_est:.0f} MB)...")
     t0 = time.perf_counter()
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     filenames = [p.name for p in jpg_paths]
@@ -277,6 +277,13 @@ def main(cfg: Config) -> None:
         f"Timing: extract={t_extract:.0f}s teacher={t_teacher:.0f}s "
         f"inference={t_inference:.0f}s save={t_save:.0f}s total={t_total:.0f}s"
     )
+    try:
+        import resource
+        peak_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024  # Linux: KB → MB
+        peak_gpu_mb = torch.cuda.max_memory_allocated() / 1e6
+        log.info(f"Peak memory: GPU={peak_gpu_mb:.0f}MB CPU_RSS={peak_rss_mb:.0f}MB")
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

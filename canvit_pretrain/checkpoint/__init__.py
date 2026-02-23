@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -263,6 +264,30 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
     return data
 
 
+_STANDARDIZER_RE = re.compile(r"(cls|scene)_standardizers\.")
+
+
+def load_state_dict_flexible(
+    model: CanViTForPretraining,
+    state_dict: dict[str, Tensor],
+) -> None:
+    """Load state dict, allowing standardizer key mismatches for grid-size changes.
+
+    All non-standardizer keys must match exactly. Standardizer keys may differ
+    when the canvas grid size changed between checkpoint and current model.
+    """
+    result = model.load_state_dict(state_dict, strict=False)
+    bad_missing = [k for k in result.missing_keys if not _STANDARDIZER_RE.match(k)]
+    bad_unexpected = [k for k in result.unexpected_keys if not _STANDARDIZER_RE.match(k)]
+    assert not bad_missing, f"Missing core weights: {bad_missing}"
+    assert not bad_unexpected, f"Unexpected core weights: {bad_unexpected}"
+    if result.missing_keys or result.unexpected_keys:
+        log.warning(f"Standardizer key mismatch (grid size change): "
+                    f"missing={result.missing_keys}, unexpected={result.unexpected_keys}")
+    else:
+        log.info("Model state loaded (all keys matched)")
+
+
 def load_model(
     path: Path, device: torch.device | str = "cpu",
 ) -> tuple[CanViTForPretraining, CheckpointData]:
@@ -280,7 +305,7 @@ def load_model(
         backbone_name=backbone_name,
         canvas_patch_grid_sizes=ckpt["canvas_patch_grid_sizes"],
     )
-    model.load_state_dict(ckpt["state_dict"], strict=True)
+    load_state_dict_flexible(model, ckpt["state_dict"])
 
     if isinstance(device, str):
         device = torch.device(device)

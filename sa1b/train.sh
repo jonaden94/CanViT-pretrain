@@ -102,5 +102,6 @@ exec uv run python -m canvit_pretrain.train \
     --steps-per-job "$STEPS_PER_JOB" \
     --batch-size "$BATCH_SIZE" \
     --num-workers "$NUM_WORKERS" \
+    --warmup-steps 2000 \
     --dataset sa1b \
     "$@"

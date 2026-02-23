@@ -99,17 +99,19 @@ First run: get loss on Comet, verify the model works at higher resolution.
 ## What's PENDING
 
 ### 1. First training run
-- Job 9081051 submitted (`--array=0-0%1 --time=00:20:00 --mem=32G --steps-per-job 174`).
+- Job **9081569** submitted (`--array=0-0%1 --time=00:20:00 --mem=32G --steps-per-job 174`).
 - Runs 174 steps on 1 shard (sa_000020). Quick pipeline validation.
 - Monitor: Comet for loss, VRAM usage, no crashes.
-- Previous attempt (9079933) died silently — probably OOM with old 96G code + 70GB shard loaded into RAM.
+- Previous attempts: 9079933 (OOM), 9081051 (`.envrc` set-e bug).
 
 ### 2. Export jobs
-- Job 9081089 (47 shards, 32G mem). Pending H100 availability.
+- Job **9081570** (51 shards, 32G mem, MIG 1g.10gb).
+- Previous attempt 9081089 (47 tasks) died instantly from same `.envrc` bug.
 
 ### 3. Full training run
 - **REQUIRES HUMAN VALIDATION**: user must check Comet loss, VRAM, logs from first run before proceeding.
 - Once validated, user submits with `--array=0-N%1` for real training.
+- **Must pass `--warmup-steps`** (default 100K is way too long for continual pretraining).
 
 ---
 
@@ -132,6 +134,8 @@ First run: get loss on Comet, verify the model works at higher resolution.
 | 2026-02-23 | `956f501` | End-of-job `save_checkpoint()` passed removed `scene_norm_state`/`cls_norm_state` kwargs | Would crash with TypeError after every training job — ALL training wasted |
 | 2026-02-23 | `956f501` | `train.sh` tar extraction: `'*.jpg'` doesn't match `./sa_226692.jpg` without `--wildcards` | Zero images extracted, training crashes on first image load |
 | 2026-02-23 | `956f501` | `ShardedFeatureLoader.__init__` loaded first shard without `mmap=True` | ~70 GB loaded into RAM just to call `len()`, risking OOM on 96G nodes |
+| 2026-02-23 | `47b6c9c` | `.envrc` credential `&&` chains return exit 1 under `set -e` | ALL submitted jobs (train + 47 exports) died in <1s. Zero work done. |
+| 2026-02-23 | `47b6c9c` | `init_normalizer_stats_from_shard` loaded shard to GPU without mmap | Would OOM trying to load 70GB shard to H100. Even CPU would need 141GB float32. |
 
 ---
 
@@ -139,6 +143,8 @@ First run: get loss on Comet, verify the model works at higher resolution.
 
 | Date | Commit | What |
 |---|---|---|
+| 2026-02-23 | `5b1e45a` | Make normalizer_max_samples a config parameter |
+| 2026-02-23 | `47b6c9c` | Fix .envrc set-e crash + normalizer shard OOM |
 | 2026-02-23 | `a8813b6` | Reduce train.sh: workers 16→4, cpus 16→8, steps 4872→1218 |
 | 2026-02-23 | `8636703` | Mmap export buffers, reduce --mem 96G→32G (export+train) |
 | 2026-02-23 | `f3051a9` | Remove dead build_parquet.py |

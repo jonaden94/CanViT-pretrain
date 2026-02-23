@@ -8,7 +8,6 @@ torch._functorch.config.backward_pass_autocast = "off"  # type: ignore[attr-defi
 
 import logging
 import os
-import re
 import signal
 import subprocess
 import time
@@ -44,7 +43,7 @@ from canvit.backbone.vit import NormFeatures  # noqa: E402
 from ytch.model import count_parameters  # noqa: E402
 
 from canvit_pretrain import CanViTForPretrainingConfig  # noqa: E402
-from canvit_pretrain.checkpoint import CheckpointData, current_provenance, find_latest, update_symlink  # noqa: E402
+from canvit_pretrain.checkpoint import CheckpointData, current_provenance, find_latest, load_state_dict_flexible, update_symlink  # noqa: E402
 from canvit_pretrain.checkpoint import load as load_checkpoint  # noqa: E402
 from canvit_pretrain.checkpoint import save as save_checkpoint  # noqa: E402
 
@@ -315,19 +314,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         weights_to_load = hf_seed_state_dict
 
     if weights_to_load is not None:
-        result = model.load_state_dict(weights_to_load, strict=False)
-        # Standardizer key mismatches are expected when grid size changes.
-        # All other keys MUST match exactly.
-        std_re = re.compile(r"(cls|scene)_standardizers\.")
-        bad_missing = [k for k in result.missing_keys if not std_re.match(k)]
-        bad_unexpected = [k for k in result.unexpected_keys if not std_re.match(k)]
-        assert not bad_missing, f"Missing core weights: {bad_missing}"
-        assert not bad_unexpected, f"Unexpected core weights: {bad_unexpected}"
-        if result.missing_keys or result.unexpected_keys:
-            log.warning(f"Standardizer key mismatch (grid size change): "
-                        f"missing={result.missing_keys}, unexpected={result.unexpected_keys}")
-        else:
-            log.info("Model state loaded (all keys matched)")
+        load_state_dict_flexible(model, weights_to_load)
 
     # === RESTORE OPTIMIZER/SCHEDULER (RESUME mode only) ===
     if ckpt_data is not None and not is_seeding:

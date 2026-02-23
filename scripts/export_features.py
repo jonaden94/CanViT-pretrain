@@ -62,7 +62,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from canvit_pretrain.train.transforms import val_transform
+from canvit_utils.transforms import preprocess
 
 # -----------------------------------------------------------------------------
 # Constants
@@ -145,7 +145,7 @@ class ImageDataset(Dataset):
         self.root = root
         self.paths = paths
         self.size = size
-        self.transform = val_transform(size)
+        self.transform = preprocess(size)
 
     def __len__(self) -> int:
         return len(self.paths)

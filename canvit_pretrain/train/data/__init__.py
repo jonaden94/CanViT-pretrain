@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from drac_imagenet import IndexedImageFolder
 
-from ..transforms import val_transform
+from canvit_utils.transforms import preprocess
 from .shards import ShardedFeatureLoader
 
 log = logging.getLogger(__name__)
@@ -128,7 +128,7 @@ def create_loaders(cfg: "Config", start_step: int) -> Loaders:
     log.info(f"  {len(train_loader.shard_files)} shards, start_shard={train_loader.start_shard}")
 
     # Val loader
-    val_tf = val_transform(sz)
+    val_tf = preprocess(sz)
     if cfg.val_index_dir is not None:
         val_index_dir = cfg.val_index_dir
         log.info(f"Val: using provided val_index_dir={val_index_dir}")

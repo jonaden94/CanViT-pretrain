@@ -18,7 +18,7 @@ from PIL import Image
 from torch import Tensor
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
-from ..transforms import val_transform
+from canvit_utils.transforms import preprocess
 
 log = logging.getLogger(__name__)
 
@@ -36,12 +36,14 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
         image_root: Path,
         image_size: int,
         start_shard: int = 0,
+        expected_samples_per_shard: int | None = None,
     ) -> None:
         self.shard_files = shard_files
         self.image_root = Path(image_root)
         self.image_size = image_size
         self.start_shard = start_shard
-        self.transform = val_transform(image_size)
+        self.expected_samples_per_shard = expected_samples_per_shard
+        self.transform = preprocess(image_size)
 
     def __iter__(self) -> Iterator[tuple[Tensor, Tensor, Tensor, int]]:
         worker_info = get_worker_info()
@@ -63,6 +65,12 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
 
             n_samples = len(shard["paths"])
             failed_indices = set(shard.get("failed_indices", []))
+
+            if self.expected_samples_per_shard is not None and n_samples != self.expected_samples_per_shard:
+                log.warning(
+                    f"Shard {shard_path.name}: {n_samples} samples, expected {self.expected_samples_per_shard}. "
+                    f"Resume calculation may be off."
+                )
 
             if worker_id == 0:
                 log.info(f"Shard {shard_idx}/{n_shards} ({shard_path.name}): {n_samples} samples, loaded in {t_load:.3f}s")
@@ -149,6 +157,7 @@ class ShardedFeatureLoader:
             image_root=self.image_root,
             image_size=self.image_size,
             start_shard=self.start_shard,
+            expected_samples_per_shard=self.samples_per_shard,
         )
         return DataLoader(
             dataset,

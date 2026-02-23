@@ -23,7 +23,7 @@ def main() -> None:
     # Determine start_step from checkpoint
     latest = run_dir / "latest.pt"
     if latest.is_symlink() and latest.resolve().exists():
-        ckpt = torch.load(latest, weights_only=False, map_location="cpu")
+        ckpt = torch.load(latest, weights_only=False, map_location="cpu", mmap=True)
         sched = ckpt["scheduler_state"]
         assert sched is not None, "Checkpoint has no scheduler_state"
         start_step = sched["last_epoch"]
