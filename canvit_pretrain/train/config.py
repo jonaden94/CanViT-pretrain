@@ -50,7 +50,6 @@ class Config:
     enable_scene_cls_loss: bool = True  # Scene (global) CLS reconstruction loss
     ema_alpha: float = 0.1  # EMA smoothing for metrics
     grad_clip: float = 1.0
-    # Must be multiple of batches_per_shard (shard_size // batch_size) for clean resume
     steps_per_job: int = 4_992  # Steps this job does before exiting (for SLURM arrays)
     # Data
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")

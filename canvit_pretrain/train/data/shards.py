@@ -139,7 +139,7 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
 class ShardedFeatureLoader:
     """Infinite loader over shards with checkpoint/resume support.
 
-    Wraps AllShardsDataset + DataLoader. Resume via start_shard = start_step // batches_per_shard.
+    Resume is exact: jumps to the right shard, then skips partial-shard batches.
     """
 
     def __init__(
@@ -175,7 +175,11 @@ class ShardedFeatureLoader:
         del first_shard
         self.batches_per_shard = self.samples_per_shard // batch_size
         self.start_shard = start_step // self.batches_per_shard
-        log.info(f"  {self.samples_per_shard} samples/shard, {self.batches_per_shard} batches/shard, start_shard={self.start_shard}")
+        self._skip_batches = start_step % self.batches_per_shard
+        log.info(
+            f"  {self.samples_per_shard} samples/shard, {self.batches_per_shard} batches/shard, "
+            f"start_shard={self.start_shard}, skip={self._skip_batches}"
+        )
 
         # Will be created lazily on first iteration
         self.loader: DataLoader | None = None
@@ -206,6 +210,11 @@ class ShardedFeatureLoader:
             log.info(f"Creating DataLoader with {self.num_workers} workers, persistent={self.num_workers > 0}")
             self.loader = self._create_loader()
             self.loader_iter = iter(self.loader)
+            if self._skip_batches > 0:
+                log.info(f"Skipping {self._skip_batches} batches for exact resume")
+                for _ in range(self._skip_batches):
+                    next(self.loader_iter)
+                self._skip_batches = 0
 
         assert self.loader_iter is not None
         return next(self.loader_iter)

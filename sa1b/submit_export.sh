@@ -9,7 +9,7 @@ set -euo pipefail
 : "${SA1B_FEATURES_DIR:?SA1B_FEATURES_DIR not set (run from direnv-enabled dir)}"
 
 DRY_RUN=false
-MAX_CONCURRENT=""
+MAX_CONCURRENT="1"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run) DRY_RUN=true; shift ;;
