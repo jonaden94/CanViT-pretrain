@@ -97,18 +97,19 @@ First run: get loss on Comet, verify the model works at higher resolution.
 
 ## What's PENDING
 
-### 1. First training run (mmap tar reading)
-- Job **9084008** submitted (`--array=0-0%1 --time=00:20:00 --mem=48G --steps-per-job 174`).
-- First test of mmap tar reading (no extraction). Previous jobs wasted 8+ min on extraction.
-- Previous attempts: 9079933 (OOM), 9081051 (`.envrc` set-e bug), 9082081 (time limit — extraction ate all GPU time).
-- Monitor: Comet for loss, VRAM usage, no crashes.
+### 1. Re-export shards in tar order
+- Old shards used **alphabetical** path order → random I/O across 70GB tars during training.
+- New export (commit `d1bf94b`) saves paths in **tar file order** = sequential reads.
+- Old shards preserved in `shards.old_alphabetical/`. New shards dir ready for re-export.
+- **Job 9084285** (single shard sa_000020): PENDING. Verify output, then export remaining shards.
 
-### 2. Export jobs
-- 4 shards available (sa_000020 through sa_000023). 5th tar (sa_000024) downloaded but not exported yet.
-- Previous job 9081570 (51 shards, 32G mem, MIG 1g.10gb) — status unknown.
+### 2. Training smoketest with tar-ordered shards
+- Once export job completes, run training with new shard to compare data bottleneck.
+- **Job 9084008 result**: Ran 172/175 steps, loss 1.07→1.06. Crashed with FileNotFoundError because we `mv`'d the shards dir while the job was running. Not a code bug — self-inflicted.
+- Previous attempts: 9079933 (OOM), 9081051 (`.envrc` set-e bug), 9082081 (time limit — extraction ate all GPU time).
 
 ### 3. Full training run
-- **REQUIRES HUMAN VALIDATION**: user must check Comet loss, VRAM, logs from first run before proceeding.
+- **REQUIRES HUMAN VALIDATION**: user must check Comet loss, VRAM, logs from smoketest before proceeding.
 - Once validated, user submits with `--array=0-N%1` for real training.
 - Warmup set to 2000 steps in train.sh (down from default 100K).
 
@@ -122,7 +123,7 @@ First run: get loss on Comet, verify the model works at higher resolution.
 4. **Training memory**: 48G requested. Shards and tars are mmap'd (shared via COW). Export needs 32G (mmap buffers).
 5. **Export mmap optimization**: DONE (`8636703`). numpy.memmap on SLURM_TMPDIR, torch.from_numpy for save. `--mem` 96G → 32G.
 6. **Warmup for continual pretraining**: Config has 100K warmup steps. For seed from pretrained model, this is very long (LR stays near 1e-7 for ~100K steps). May want shorter warmup or no warmup.
-7. **No assertion for `scene_resolution == G * patch_size`**: Would silently break if these diverge.
+7. **`scene_resolution` vs `G * patch_size`**: These are independent. `scene_resolution` = pixel size of loaded training images. `G * patch_size` = teacher input resolution (baked at export time). They don't have to match — student sees images at `scene_resolution`, teacher features are precomputed.
 
 ---
 
@@ -130,6 +131,7 @@ First run: get loss on Comet, verify the model works at higher resolution.
 
 | Date | Commit | Bug | Impact |
 |---|---|---|---|
+| 2026-02-23 | `d1bf94b` | Export shards saved paths in alphabetical order (not tar order) | Random I/O across 70GB tars during training. Causes data loading bottleneck. |
 | 2026-02-23 | `956f501` | End-of-job `save_checkpoint()` passed removed `scene_norm_state`/`cls_norm_state` kwargs | Would crash with TypeError after every training job — ALL training wasted |
 | 2026-02-23 | `e1ef147` | Tar extraction blocked training for 8+ min on 10-min GPU job | Only 9 seconds of actual training before TIME LIMIT kill. Replaced with mmap tar reading. |
 | 2026-02-23 | `956f501` | `train.sh` tar extraction: `'*.jpg'` doesn't match `./sa_226692.jpg` without `--wildcards` | Zero images extracted, training crashes on first image load |
@@ -143,6 +145,7 @@ First run: get loss on Comet, verify the model works at higher resolution.
 
 | Date | Commit | What |
 |---|---|---|
+| 2026-02-23 | `d1bf94b` | Export shards in tar order (not alphabetical), add data/gpu timing |
 | 2026-02-23 | `e1ef147` | Read SA-1B images directly from mmap'd tars (no extraction) |
 | 2026-02-23 | `5b1e45a` | Make normalizer_max_samples a config parameter |
 | 2026-02-23 | `47b6c9c` | Fix .envrc set-e crash + normalizer shard OOM |

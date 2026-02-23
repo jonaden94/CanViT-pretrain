@@ -69,7 +69,7 @@ class Config:
     image_size: int = 1024
     teacher_repo_id: str = "facebook/dinov3-vitb16-pretrain-lvd1689m"
     batch_size: int = 32
-    num_workers: int = 8
+    num_workers: int = 4
 
 
 class TarImageDataset(Dataset[tuple[Tensor, int, bool, str]]):
