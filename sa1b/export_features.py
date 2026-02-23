@@ -133,6 +133,7 @@ def main(cfg: Config) -> None:
     log.info(f"teacher_repo_id: {cfg.teacher_repo_id}")
 
     # --- Phase 1: Index tar (no extraction) ---
+    # ~44s on cold NFS, ~2s warm cache (70 GB tar, 11k JPEGs)
     log.info(f"Indexing {cfg.tar.name} via mmap...")
     t0 = time.perf_counter()
     reader = TarImageReader(cfg.tar)
@@ -153,6 +154,7 @@ def main(cfg: Config) -> None:
     log.info(f"GPU after teacher: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
     # --- Phase 3: Inference ---
+    # ~195s for 11k images @ 1024px on H100 (~57 img/s)
     # Accumulate into mmap'd files — the full shard is ~66 GB in fp16,
     # won't fit in RAM. mmap lets the OS page to/from SSD as needed.
     scratch = Path(cfg.tmp_dir)
@@ -224,6 +226,7 @@ def main(cfg: Config) -> None:
         log.warning(f"{len(failed)} failed images")
 
     # --- Phase 4: Save ---
+    # ~231s for 70 GB shard to NFS (~305 MB/s observed on Nibi)
     # Paths in tar order (dataset.names = tar iteration order)
     filenames = dataset.names
     shard_mb_est = (patches_buf.nbytes + cls_buf.nbytes) / 1e6

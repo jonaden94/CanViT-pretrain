@@ -9,6 +9,7 @@
 
 # ==============================================================================
 # Export DINOv3 features for SA-1B. Array job: 1 task = 1 tar = 1 shard.
+# ~8 min/tar on H100 (index=44s, inference=195s, save=231s for 70GB shard).
 #
 # USAGE:
 #   sbatch --array=0-999 sa1b/export_features.sh          # all 1000 tars
