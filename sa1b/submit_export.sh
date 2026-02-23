@@ -3,7 +3,10 @@
 # Usage: bash sa1b/submit_export.sh [--dry-run]
 set -euo pipefail
 
-source slurm/env.sh
+# Requires direnv (SA1B_TAR_DIR, SA1B_FEATURES_DIR).
+# Do NOT source slurm/env.sh — that's for compute nodes.
+: "${SA1B_TAR_DIR:?SA1B_TAR_DIR not set (run from direnv-enabled dir)}"
+: "${SA1B_FEATURES_DIR:?SA1B_FEATURES_DIR not set (run from direnv-enabled dir)}"
 
 OUT_DIR="$SA1B_FEATURES_DIR/sa1b/dinov3_vitb16/1024/shards"
 
