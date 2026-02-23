@@ -80,4 +80,5 @@ exec uv run python -m canvit_pretrain.train \
     --num-workers "$NUM_WORKERS" \
     --warmup-steps 2000 \
     --dataset sa1b \
+    --comet-project canvit-sa1b \
     "$@"
