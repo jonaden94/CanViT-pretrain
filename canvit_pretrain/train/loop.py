@@ -3,10 +3,12 @@
 # backward() runs outside autocast (as PyTorch recommends). torch.compile's default
 # "same_as_forward" assumption silently corrupts gradients when that's the case.
 import torch._functorch.config
+
 torch._functorch.config.backward_pass_autocast = "off"  # type: ignore[attr-defined]
 
 import logging
 import os
+import re
 import signal
 import subprocess
 import time
@@ -287,8 +289,19 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             log.warning("Checkpoint config differs from current config!")
             log.warning(f"  Checkpoint: {ckpt_cfg}")
             log.warning(f"  Current:    {cfg.model}")
-        model.load_state_dict(ckpt_data["state_dict"], strict=True)
-        log.info("Model state loaded (strict=True)")
+        result = model.load_state_dict(ckpt_data["state_dict"], strict=False)
+        # Standardizer key mismatches are expected when grid size changes.
+        # All other keys MUST match exactly.
+        std_re = re.compile(r"(cls|scene)_standardizers\.")
+        bad_missing = [k for k in result.missing_keys if not std_re.match(k)]
+        bad_unexpected = [k for k in result.unexpected_keys if not std_re.match(k)]
+        assert not bad_missing, f"Missing core weights: {bad_missing}"
+        assert not bad_unexpected, f"Unexpected core weights: {bad_unexpected}"
+        if result.missing_keys or result.unexpected_keys:
+            log.warning(f"Standardizer key mismatch (grid size change): "
+                        f"missing={result.missing_keys}, unexpected={result.unexpected_keys}")
+        else:
+            log.info("Model state loaded (all keys matched)")
 
         # Load optimizer + scheduler state (RESUME mode only)
         if is_seeding:
@@ -328,25 +341,18 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             feats = teacher.forward_norm_features(images)
             return NormFeatures(patches=feats.patches.float(), cls=feats.cls.float())
 
-    scene_norm = PatchStandardizer(grid_size=G, embed_dim=teacher.embed_dim).to(cfg.device)
-    cls_norm = CLSStandardizer(embed_dim=teacher.embed_dim).to(cfg.device)
+    # Use model's own standardizers — their state is part of model.state_dict(),
+    # so it travels correctly with HF Hub upload/download and checkpoint save/load.
+    cls_norm, scene_norm = model.standardizers(G)
 
+    need_init = cfg.reset_normalizer or not scene_norm.initialized
+    if cfg.reset_normalizer:
+        log.info("Reset normalizer: will re-init from shard")
+    elif scene_norm.initialized:
+        log.info("Standardizer stats loaded from model state_dict")
 
-    norm_loaded = False
-    if ckpt_data is not None and not cfg.reset_normalizer:
-        scene_norm_state = ckpt_data["scene_norm_state"]
-        cls_norm_state = ckpt_data["cls_norm_state"]
-        assert scene_norm_state is not None, "Checkpoint missing scene_norm_state"
-        assert cls_norm_state is not None, "Checkpoint missing cls_norm_state"
-        scene_norm.load_state_dict(scene_norm_state)
-        cls_norm.load_state_dict(cls_norm_state)
-        norm_loaded = True
-        log.info("Loaded scene/cls normalizer states from checkpoint")
-    elif cfg.reset_normalizer:
-        log.info("Reset normalizer: will re-init stats")
-
-    if not norm_loaded:
-        assert cfg.feature_base_dir is not None, "feature_base_dir required for normalizer init"
+    if need_init:
+        assert cfg.feature_base_dir is not None, "feature_base_dir required for standardizer init"
         shards_dir = cfg.feature_base_dir / cfg.teacher_name / str(cfg.scene_resolution) / "shards"
         shard_files = sorted(shards_dir.glob("*.pt"))
         assert shard_files, f"No shards in {shards_dir}"
@@ -445,8 +451,6 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 scene_resolution=cfg.scene_resolution,
                 step=step, train_loss=ema_loss.item() if ema_loss is not None else None,
                 comet_id=exp.get_key(),
-                scene_norm_state=scene_norm.state_dict(),
-                cls_norm_state=cls_norm.state_dict(),
                 optimizer_state=optimizer.state_dict(),
                 scheduler_state=scheduler.state_dict(),
                 training_config_history=training_config_history,
