@@ -162,8 +162,10 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         return flat
 
     # Determine checkpoint source and load mode
-    # Priority: run_dir/latest.pt (RESUME) > seed_ckpt (SEED) > fresh start
+    # Priority: run_dir/latest.pt (RESUME) > seed_ckpt (SEED) > hf_seed_ckpt (HF SEED) > fresh
+    assert not (cfg.seed_ckpt and cfg.hf_seed_ckpt), "seed_ckpt and hf_seed_ckpt are mutually exclusive"
     ckpt_path_to_load: Path | None = None
+    hf_seed_state_dict: dict[str, Tensor] | None = None
     is_seeding = False  # True = seed mode (weights only), False = resume mode (full state)
     latest = find_latest(run_dir)
     if latest is not None:
@@ -174,6 +176,15 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         ckpt_path_to_load = cfg.seed_ckpt
         is_seeding = True
         log.info(f"SEED mode: loading weights from {ckpt_path_to_load} (fresh opt/sched/step)")
+    elif cfg.hf_seed_ckpt is not None:
+        from canvit.model.pretraining.hub import CanViTForPretrainingHFHub
+        log.info(f"HF SEED mode: loading from {cfg.hf_seed_ckpt}")
+        hf_model = CanViTForPretrainingHFHub.from_pretrained(cfg.hf_seed_ckpt)
+        hf_seed_state_dict = {k: v for k, v in hf_model.state_dict().items()}
+        cfg.model = hf_model.cfg
+        log.info(f"  Model config from HF: {cfg.model}")
+        del hf_model
+        is_seeding = True
     else:
         log.info("FRESH mode: no checkpoint, starting from scratch")
 
@@ -282,14 +293,21 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     log.info(f"AMP: {'bfloat16' if cfg.amp else 'disabled'}")
     log.info(f"Non-blocking transfers: {'enabled' if cfg.non_blocking_transfer else 'DISABLED (sync)'}")
 
-    # === RESTORE MODEL/OPTIMIZER STATE FROM CHECKPOINT ===
+    # === RESTORE MODEL WEIGHTS ===
+    # Two sources: .pt checkpoint (ckpt_data) or HF Hub seed (hf_seed_state_dict)
+    weights_to_load: dict[str, Tensor] | None = None
     if ckpt_data is not None:
         ckpt_cfg = dacite.from_dict(CanViTForPretrainingConfig, ckpt_data["model_config"])
         if ckpt_cfg != cfg.model:
             log.warning("Checkpoint config differs from current config!")
             log.warning(f"  Checkpoint: {ckpt_cfg}")
             log.warning(f"  Current:    {cfg.model}")
-        result = model.load_state_dict(ckpt_data["state_dict"], strict=False)
+        weights_to_load = ckpt_data["state_dict"]
+    elif hf_seed_state_dict is not None:
+        weights_to_load = hf_seed_state_dict
+
+    if weights_to_load is not None:
+        result = model.load_state_dict(weights_to_load, strict=False)
         # Standardizer key mismatches are expected when grid size changes.
         # All other keys MUST match exactly.
         std_re = re.compile(r"(cls|scene)_standardizers\.")
@@ -303,17 +321,17 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         else:
             log.info("Model state loaded (all keys matched)")
 
-        # Load optimizer + scheduler state (RESUME mode only)
-        if is_seeding:
-            log.info("SEED mode: fresh optimizer+scheduler (step=0)")
-        else:
-            opt_state = ckpt_data["optimizer_state"]
-            sched_state = ckpt_data["scheduler_state"]
-            assert opt_state is not None, "Checkpoint missing optimizer_state — cannot resume"
-            assert sched_state is not None, "Checkpoint missing scheduler_state — cannot resume"
-            optimizer.load_state_dict(opt_state)
-            scheduler.load_state_dict(sched_state)
-            log.info(f"RESUME mode: restored optimizer+scheduler (step={sched_state['last_epoch']})")
+    # === RESTORE OPTIMIZER/SCHEDULER (RESUME mode only) ===
+    if ckpt_data is not None and not is_seeding:
+        opt_state = ckpt_data["optimizer_state"]
+        sched_state = ckpt_data["scheduler_state"]
+        assert opt_state is not None, "Checkpoint missing optimizer_state — cannot resume"
+        assert sched_state is not None, "Checkpoint missing scheduler_state — cannot resume"
+        optimizer.load_state_dict(opt_state)
+        scheduler.load_state_dict(sched_state)
+        log.info(f"RESUME mode: restored optimizer+scheduler (step={sched_state['last_epoch']})")
+    elif is_seeding:
+        log.info("SEED mode: fresh optimizer+scheduler (step=0)")
 
     # Build training config history (tracks config across resumes)
     training_config_history: dict[str, dict] = {}
@@ -387,7 +405,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     # Scheduler last_epoch tracks gradient updates done so far
     start_step = scheduler.last_epoch
     end_step = start_step + cfg.steps_per_job
-    if ckpt_data is not None and start_step == 0:
+    if ckpt_data is not None and not is_seeding and start_step == 0:
         log.error("!!! CHECKPOINT LOADED BUT start_step=0 - optimizer/scheduler state was not restored !!!")
     log.info(f"Starting training loop: steps {start_step} → {end_step}")
     model.train()  # Explicit: validate() restores, but be clear about initial state

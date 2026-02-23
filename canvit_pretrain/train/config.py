@@ -68,8 +68,12 @@ class Config:
     ckpt_dir: Path = Path("checkpoints")
     """Directory for checkpoint storage. Run checkpoints go in {ckpt_dir}/{run_name}/."""
     seed_ckpt: Path | None = None
-    """Seed model weights from external checkpoint. Starts fresh (new experiment, step=0).
-    Only used if no checkpoint exists in run_dir. For forking runs with different config."""
+    """Seed model weights from external checkpoint (.pt in CheckpointData format).
+    Starts fresh (new experiment, step=0). Only used if no checkpoint exists in run_dir."""
+    hf_seed_ckpt: str | None = None
+    """Seed model weights from HF Hub repo (e.g. 'canvit/canvitb16-add-vpe-...'). Downloads
+    config.json + model.safetensors, overrides cfg.model with the checkpoint's config.
+    Mutually exclusive with seed_ckpt."""
     reset_normalizer: bool = False
     """Re-warmup normalizer stats when loading any checkpoint."""
     # Training
