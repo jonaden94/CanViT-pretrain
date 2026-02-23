@@ -25,7 +25,7 @@ TAR_IDX=$(printf "%06d" "$SLURM_ARRAY_TASK_ID")
 TAR_PATH="$SA1B_TAR_DIR/sa_${TAR_IDX}.tar"
 IMAGE_SIZE=1024
 OUT_DIR="$SA1B_FEATURES_DIR/sa1b/dinov3_vitb16/${IMAGE_SIZE}/shards"
-EXTRACT_DIR="$SLURM_TMPDIR/sa1b_images"
+TMPDIR="$SLURM_TMPDIR/export_tmp"
 
 echo "========================================"
 echo "SLURM_JOB_ID:       $SLURM_JOB_ID"
@@ -44,7 +44,7 @@ echo "========================================"
 time uv run python sa1b/export_features.py \
     --tar "$TAR_PATH" \
     --out-dir "$OUT_DIR" \
-    --extract-dir "$EXTRACT_DIR" \
+    --tmp-dir "$TMPDIR" \
     --image-size "$IMAGE_SIZE"
 
 echo "========================================"

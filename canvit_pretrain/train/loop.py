@@ -395,6 +395,10 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         norm_cls = cls_norm(raw_cls.unsqueeze(1)).squeeze(1)
         return TrainBatch(images, labels, norm_patches, norm_cls, raw_patches, raw_cls)
 
+    # Timing accumulators for data vs GPU bottleneck analysis
+    t_data_total = 0.0
+    t_gpu_total = 0.0
+
     # Step semantics: step S = model state after S gradient updates
     # step=0: before any gradient (initial model)
     # Scheduler last_epoch tracks gradient updates done so far
@@ -473,11 +477,14 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
         # === TRAINING PHASE (only for step < end_step) ===
         if step < end_step:
+            t_data_start = time.perf_counter()
             if batch is None:
                 batch = load_train_batch()
+            t_data = time.perf_counter() - t_data_start
+            t_data_total += t_data
 
             optimizer.zero_grad()
-            t_step_start = time.perf_counter()
+            t_gpu_start = time.perf_counter()
 
             step_metrics = training_step(
                 model=model,
@@ -502,12 +509,14 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 collect_viz=do_pca,
             )
 
-            if step == start_step:
-                log.info(f"First training_step took {time.perf_counter() - t_step_start:.1f}s (includes compile)")
-
             grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
             optimizer.step()
             scheduler.step()
+            t_gpu = time.perf_counter() - t_gpu_start
+            t_gpu_total += t_gpu
+
+            if step == start_step:
+                log.info(f"First training_step took {t_gpu:.1f}s (includes compile)")
 
             # Update EMA for all metrics
             ema.update("total_loss", step_metrics.total_loss)
@@ -534,11 +543,19 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 metrics["train/lr"] = lr
                 metrics["train/grad_norm"] = grad_norm
                 metrics["train/continue_prob"] = cfg.continue_prob
+                # Data vs GPU bottleneck: cumulative percentages
+                t_total_so_far = t_data_total + t_gpu_total
+                if t_total_so_far > 0:
+                    data_pct = t_data_total / t_total_so_far * 100
+                    gpu_pct = t_gpu_total / t_total_so_far * 100
+                    metrics["train/data_pct"] = data_pct
+                    metrics["train/gpu_pct"] = gpu_pct
                 exp.log_metrics(metrics, step=step)
 
                 ema_loss = ema.get("total_loss")
                 assert ema_loss is not None
-                pbar.set_postfix_str(f"loss={ema_loss.item():.2e} grad={grad_norm:.2e} lr={lr:.2e}")
+                data_str = f"d={data_pct:.0f}%" if t_total_so_far > 0 else ""
+                pbar.set_postfix_str(f"loss={ema_loss.item():.2e} grad={grad_norm:.2e} lr={lr:.2e} {data_str}")
 
             # Per-module grad norms (at val intervals, after training)
             if step % cfg.val_every == 0:

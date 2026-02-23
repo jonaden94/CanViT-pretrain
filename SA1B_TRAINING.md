@@ -22,17 +22,16 @@ First run: get loss on Comet, verify the model works at higher resolution.
 |---|---|---|
 | SA-1B tars (~10.5 GB each) | `~/projects/def-akrish/datasets/sa1b/tars/` (NFS) | Permanent |
 | SA-1B feature shards (~65 GB each) | `$SA1B_FEATURES_DIR/sa1b/dinov3_vitb16/1024/shards/` (NFS) | Permanent |
-| Extracted JPEGs (~10.3 GB/tar) | `$SLURM_TMPDIR/sa1b_images/` | Per-job |
 | Checkpoints | `$CHECKPOINTS_DIR/{run_name}/` (NFS) | Permanent |
 
-### Shard Loading Strategy
-- Feature `.pt` shards on NFS, read with `mmap=True` (cheap, no copy needed).
-- Images extracted from tars to SLURM_TMPDIR before training starts.
+### Data Loading Strategy
+- Feature `.pt` shards on NFS, read with `mmap=True` (cheap, no copy).
+- **Images read directly from mmap'd tar files** — no extraction step. `TarImageReader` builds a `{name: (offset, size)}` index via `tarfile` (~2s per 70 GB tar), then reads images via mmap slicing (~18ms/img).
+- All DataLoader workers share mmap pages via fork COW. No RAM duplication.
 - `--feature-base-dir "$SA1B_FEATURES_DIR/sa1b"` → shards path auto-constructed: `{base}/dinov3_vitb16/1024/shards/`.
-- `--feature-image-root "$SLURM_TMPDIR/sa1b_images"` → extracted JPEGs.
-- Shard loader iterates all shards on NFS, starts at `start_shard`, processes `steps_per_job` steps.
-- Only images from shards within [start_shard, start_shard + shards_per_job] are accessed.
-- **No symlinks needed.** Just extract the right tars.
+- `--tar-dir "$SA1B_TAR_DIR"` → images read directly from tar files.
+- Shard→tar mapping: `sa_000020.pt` → `sa_000020.tar` (via `shard_path.stem + ".tar"`).
+- Shard loader iterates all shards, starts at `start_shard`, processes `steps_per_job` steps.
 
 ### Image Resolution
 - **Teacher export**: 1024px input → features at 1024px (baked at export time).
@@ -43,15 +42,14 @@ First run: get loss on Comet, verify the model works at higher resolution.
 
 ### Tar Structure
 - SA-1B tars from Meta have `./` prefix: entries like `./sa_226692.jpg` (flat, no subdirectory).
-- **train.sh** must use `--wildcards` flag with `'*.jpg'` — without it, GNU tar's default glob doesn't match across `/` and extracts nothing. Also `--strip-components=1` to strip `./`.
+- `TarImageReader._build_index` strips the prefix: `member.name.split("/", 1)[-1]`.
 - **export_features.py** lists members with `tar tf` then extracts by exact path — unaffected by glob issues.
 
 ### Job Array Design
 - `%1` concurrency (1 job at a time, like IN21k).
 - `steps_per_job` = multiple of `batches_per_shard`. batches_per_shard = 11186 // 64 = **174**.
-- 174 × 28 = **4872 steps/job = 28 shards = 28 tars** (~288 GB extracted).
-- A helper script (`sa1b/plan_job.py`) reads the checkpoint to determine start_step, outputs tar indices.
-- Robust to failures: if task N fails mid-job, restart reads same checkpoint, re-extracts same tars.
+- Default: 1218 steps/job (7 shards). Override via `--steps-per-job`.
+- No extraction step — Python handles everything. Startup is near-instant.
 
 ### Key Numbers
 | Metric | Value | Source |
@@ -61,10 +59,10 @@ First run: get loss on Comet, verify the model works at higher resolution.
 | Feature shard size | ~65-70 GB | sa_000020.pt on def-areynaud |
 | batch_size | 64 | config default |
 | batches_per_shard | 174 | 11186 // 64 |
-| shards_per_job | 7 | Reduced from 28 (1024px is ~4x more expensive/step) |
+| shards_per_job | 7 | Default (1024px is ~4x more expensive/step) |
 | steps_per_job | 1218 | 174 × 7 |
-| SLURM_TMPDIR budget | ~375 GB | 3 TB / 8 GPUs |
-| Extracted size/job | ~72 GB | 7 × 10.3 |
+| Tar index build | ~2s | tarfile iteration on 70 GB tar |
+| Image read (mmap) | ~18ms/img | mmap slice → BytesIO → PIL decode |
 | Canvas grid size | 64 | 1024 / 16 |
 | Scene resolution | 1024px | Target for SA-1B |
 | VRAM estimate | <80 GB | 18.4 GB @ 512/32 × ~4x, plus constant factors |
@@ -73,9 +71,10 @@ First run: get loss on Comet, verify the model works at higher resolution.
 
 ## What's DONE
 
-### Training Pipeline (commit `956f501`)
-- `sa1b/train.sh` — SLURM array job. Extracts tars via `plan_job.py`, then trains.
-- `sa1b/plan_job.py` — reads checkpoint → computes which shards/tars needed → outputs tar indices.
+### Training Pipeline (commit `e1ef147`)
+- `sa1b/train.sh` — SLURM array job. No extraction — images read from mmap'd tars.
+- `canvit_pretrain/train/data/tar_images.py` — `TarImageReader`: tarfile index + mmap reads.
+- `canvit_pretrain/train/data/shards.py` — `AllShardsDataset` supports `tar_dir` (SA-1B) or `image_root` (IN21k).
 - `hf_seed_ckpt` config option in `loop.py` — downloads from HF, overrides cfg.model, seed mode.
 - `strict=False` + regex filter for grid-size-change standardizer mismatches.
 - Standardizers travel with model state_dict via `model.standardizers(G)`.
@@ -98,20 +97,20 @@ First run: get loss on Comet, verify the model works at higher resolution.
 
 ## What's PENDING
 
-### 1. First training run
-- Job **9081569** submitted (`--array=0-0%1 --time=00:20:00 --mem=32G --steps-per-job 174`).
-- Runs 174 steps on 1 shard (sa_000020). Quick pipeline validation.
+### 1. First training run (mmap tar reading)
+- Job **9084008** submitted (`--array=0-0%1 --time=00:20:00 --mem=48G --steps-per-job 174`).
+- First test of mmap tar reading (no extraction). Previous jobs wasted 8+ min on extraction.
+- Previous attempts: 9079933 (OOM), 9081051 (`.envrc` set-e bug), 9082081 (time limit — extraction ate all GPU time).
 - Monitor: Comet for loss, VRAM usage, no crashes.
-- Previous attempts: 9079933 (OOM), 9081051 (`.envrc` set-e bug).
 
 ### 2. Export jobs
-- Job **9081570** (51 shards, 32G mem, MIG 1g.10gb).
-- Previous attempt 9081089 (47 tasks) died instantly from same `.envrc` bug.
+- 4 shards available (sa_000020 through sa_000023). 5th tar (sa_000024) downloaded but not exported yet.
+- Previous job 9081570 (51 shards, 32G mem, MIG 1g.10gb) — status unknown.
 
 ### 3. Full training run
 - **REQUIRES HUMAN VALIDATION**: user must check Comet loss, VRAM, logs from first run before proceeding.
 - Once validated, user submits with `--array=0-N%1` for real training.
-- **Must pass `--warmup-steps`** (default 100K is way too long for continual pretraining).
+- Warmup set to 2000 steps in train.sh (down from default 100K).
 
 ---
 
@@ -120,7 +119,7 @@ First run: get loss on Comet, verify the model works at higher resolution.
 1. **Shuffling**: SA-1B images within a tar are geographically correlated (contiguous IDs = same region). No shuffle for now — verified visually that 4 sequential images look diverse enough. Revisit if loss curves show issues.
 2. **Variable shard sizes**: `ShardedFeatureLoader` assumes uniform shard sizes (line 132). SA-1B shards are ~11,186 but not guaranteed identical. Should be fine for first run.
 3. **Batch size at 1024px**: 64 @ 512px uses 18.4 GB. At 1024px/grid64, canvas is 4x larger. ~50-70 GB estimated. Should fit H100 80GB. May need to reduce if OOM.
-4. **Training memory**: 96G requested but probably only needs 32-48G (shards are mmap'd, images are small). Export genuinely needs 96G for the 66 GB accumulation buffer.
+4. **Training memory**: 48G requested. Shards and tars are mmap'd (shared via COW). Export needs 32G (mmap buffers).
 5. **Export mmap optimization**: DONE (`8636703`). numpy.memmap on SLURM_TMPDIR, torch.from_numpy for save. `--mem` 96G → 32G.
 6. **Warmup for continual pretraining**: Config has 100K warmup steps. For seed from pretrained model, this is very long (LR stays near 1e-7 for ~100K steps). May want shorter warmup or no warmup.
 7. **No assertion for `scene_resolution == G * patch_size`**: Would silently break if these diverge.
@@ -132,6 +131,7 @@ First run: get loss on Comet, verify the model works at higher resolution.
 | Date | Commit | Bug | Impact |
 |---|---|---|---|
 | 2026-02-23 | `956f501` | End-of-job `save_checkpoint()` passed removed `scene_norm_state`/`cls_norm_state` kwargs | Would crash with TypeError after every training job — ALL training wasted |
+| 2026-02-23 | `e1ef147` | Tar extraction blocked training for 8+ min on 10-min GPU job | Only 9 seconds of actual training before TIME LIMIT kill. Replaced with mmap tar reading. |
 | 2026-02-23 | `956f501` | `train.sh` tar extraction: `'*.jpg'` doesn't match `./sa_226692.jpg` without `--wildcards` | Zero images extracted, training crashes on first image load |
 | 2026-02-23 | `956f501` | `ShardedFeatureLoader.__init__` loaded first shard without `mmap=True` | ~70 GB loaded into RAM just to call `len()`, risking OOM on 96G nodes |
 | 2026-02-23 | `47b6c9c` | `.envrc` credential `&&` chains return exit 1 under `set -e` | ALL submitted jobs (train + 47 exports) died in <1s. Zero work done. |
@@ -143,6 +143,7 @@ First run: get loss on Comet, verify the model works at higher resolution.
 
 | Date | Commit | What |
 |---|---|---|
+| 2026-02-23 | `e1ef147` | Read SA-1B images directly from mmap'd tars (no extraction) |
 | 2026-02-23 | `5b1e45a` | Make normalizer_max_samples a config parameter |
 | 2026-02-23 | `47b6c9c` | Fix .envrc set-e crash + normalizer shard OOM |
 | 2026-02-23 | `a8813b6` | Reduce train.sh: workers 16→4, cpus 16→8, steps 4872→1218 |

@@ -3,15 +3,19 @@
 Designed for SLURM array jobs: 1 task = 1 tar = 1 shard.
 
 Each invocation:
-  1. Extracts one tar to a temp dir (SLURM_TMPDIR or specified)
+  1. Reads images directly from the tar via mmap (no extraction)
   2. Loads frozen DINOv3 teacher from HuggingFace Hub
   3. Runs batched inference on all JPEGs
   4. Saves one .pt shard (named after tar: sa_NNNNNN.pt)
 
+Images are iterated in TAR FILE ORDER (not alphabetical). This is critical:
+the training loader iterates the shard sequentially, so shard order must match
+tar order for sequential I/O during training.
+
 Shard format matches training loader expectations (shards.py):
   patches:        [N, n_patches, embed_dim] float16
-  cls:            [N, embed_dim] float16
-  paths:          list[str] — filenames relative to image dir
+  cls:            [N, embed_dim] float32
+  paths:          list[str] — filenames in TAR ORDER
   class_idxs:     [N] int32 (all 0 for SA-1B)
   failed_indices: list[int]
   image_hashes:   list[str] — xxh64 of decoded pixels
@@ -20,8 +24,7 @@ Usage:
   # Single tar (interactive)
   uv run python sa1b/export_features.py \
       --tar /path/to/sa_000020.tar \
-      --out-dir /path/to/shards \
-      --extract-dir $SLURM_TMPDIR/sa1b_images
+      --out-dir /path/to/shards
 
   # SLURM array job (see sa1b/export_features.sh)
   sbatch --array=0-999 sa1b/export_features.sh
@@ -45,6 +48,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+from canvit_pretrain.train.data.tar_images import TarImageReader
 from canvit_utils.transforms import preprocess
 
 STORAGE_DTYPE = torch.float16
@@ -61,36 +65,43 @@ log = logging.getLogger(__name__)
 class Config:
     tar: Path
     out_dir: Path
-    extract_dir: Path
+    tmp_dir: Path = Path("/tmp")  # For mmap accumulation buffers
     image_size: int = 1024
     teacher_repo_id: str = "facebook/dinov3-vitb16-pretrain-lvd1689m"
     batch_size: int = 32
     num_workers: int = 8
 
 
-class ImageDataset(Dataset[tuple[Tensor, int, bool, str]]):
-    def __init__(self, paths: list[Path], size: int) -> None:
-        self.paths = paths
+class TarImageDataset(Dataset[tuple[Tensor, int, bool, str]]):
+    """Map-style dataset reading images from an mmap'd tar file.
+
+    Images are indexed in tar file order (not alphabetical).
+    DataLoader workers share the mmap via fork COW.
+    """
+
+    def __init__(self, reader: TarImageReader, size: int) -> None:
+        self.reader = reader
+        # Dict preserves insertion order (Python 3.7+) = tar file order
+        self.names = list(reader.index.keys())
         self.transform = preprocess(size)
         self.size = size
 
     def __len__(self) -> int:
-        return len(self.paths)
+        return len(self.names)
 
     def __getitem__(self, idx: int) -> tuple[Tensor, int, bool, str]:
-        path = self.paths[idx]
+        name = self.names[idx]
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("error")
-                with Image.open(path) as f:
-                    img = f.convert("RGB")
-                    img.load()
+                img = self.reader.read_image(name)
+                img.load()
             img_hash = xxhash.xxh64(img.tobytes()).hexdigest()
             tensor = self.transform(img)
             assert isinstance(tensor, Tensor)
             return tensor, idx, True, img_hash
         except Exception as e:
-            log.warning(f"Bad image {path}: {e}")
+            log.warning(f"Bad image {name}: {e}")
             return torch.full((3, self.size, self.size), float("nan")), idx, False, ""
 
 
@@ -101,23 +112,6 @@ def get_git_commit() -> str:
         ).strip()
     except Exception:
         return "unknown"
-
-
-def extract_tar(tar: Path, dest: Path) -> None:
-    """Extract only JPEGs from tar to dest."""
-    dest.mkdir(parents=True, exist_ok=True)
-    # List tar contents, filter to .jpg, extract only those.
-    # This avoids extracting ~11k JSON mask files we don't need.
-    listing = subprocess.check_output(
-        ["tar", "tf", str(tar)], text=True
-    )
-    jpg_members = [line for line in listing.splitlines() if line.endswith(".jpg")]
-    assert jpg_members, f"No .jpg entries in {tar.name}"
-
-    subprocess.run(
-        ["tar", "xf", str(tar), "-C", str(dest)] + jpg_members,
-        check=True,
-    )
 
 
 def main(cfg: Config) -> None:
@@ -135,19 +129,17 @@ def main(cfg: Config) -> None:
 
     log.info(f"tar: {cfg.tar}")
     log.info(f"out_dir: {cfg.out_dir}")
-    log.info(f"extract_dir: {cfg.extract_dir}")
     log.info(f"image_size: {cfg.image_size}")
     log.info(f"teacher_repo_id: {cfg.teacher_repo_id}")
 
-    # --- Phase 1: Extract ---
-    log.info(f"Extracting JPEGs from {cfg.tar.name}...")
+    # --- Phase 1: Index tar (no extraction) ---
+    log.info(f"Indexing {cfg.tar.name} via mmap...")
     t0 = time.perf_counter()
-    extract_tar(cfg.tar, cfg.extract_dir)
-    jpg_paths = sorted(cfg.extract_dir.glob("*.jpg"))
-    n = len(jpg_paths)
-    assert n > 0, f"No JPEGs found in {cfg.extract_dir}"
-    t_extract = time.perf_counter() - t0
-    log.info(f"Extract: {n} JPEGs in {t_extract:.1f}s")
+    reader = TarImageReader(cfg.tar)
+    n = len(reader.index)
+    assert n > 0, f"No JPEGs in {cfg.tar}"
+    t_index = time.perf_counter() - t0
+    log.info(f"Index: {n} JPEGs in {t_index:.1f}s")
 
     # --- Phase 2: Load teacher ---
     t0 = time.perf_counter()
@@ -161,11 +153,12 @@ def main(cfg: Config) -> None:
     log.info(f"GPU after teacher: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
     # --- Phase 3: Inference ---
-    # Accumulate into mmap'd files on SLURM_TMPDIR — the full shard is ~66 GB
-    # in fp16, which won't fit in RAM on most nodes. mmap lets the OS page
-    # data to/from the local SSD as needed, keeping RSS at a few GB.
-    patches_mmap_path = cfg.extract_dir / f"{tar_stem}_patches.mmap"
-    cls_mmap_path = cfg.extract_dir / f"{tar_stem}_cls.mmap"
+    # Accumulate into mmap'd files — the full shard is ~66 GB in fp16,
+    # won't fit in RAM. mmap lets the OS page to/from SSD as needed.
+    scratch = Path(cfg.tmp_dir)
+    scratch.mkdir(parents=True, exist_ok=True)
+    patches_mmap_path = scratch / f"{tar_stem}_patches.mmap"
+    cls_mmap_path = scratch / f"{tar_stem}_cls.mmap"
     patches_buf = np.memmap(patches_mmap_path, dtype=NUMPY_DTYPE, mode="w+", shape=(n, n_patches, embed_dim))
     cls_buf = np.memmap(cls_mmap_path, dtype=np.float32, mode="w+", shape=(n, embed_dim))
     log.info(f"Mmap buffers: patches={patches_buf.nbytes/1e9:.1f}GB cls={cls_buf.nbytes/1e6:.0f}MB")
@@ -173,10 +166,11 @@ def main(cfg: Config) -> None:
     hashes: list[str] = [""] * n
     failed: list[int] = []
 
+    dataset = TarImageDataset(reader, cfg.image_size)
     loader = DataLoader(
-        ImageDataset(jpg_paths, cfg.image_size),
+        dataset,
         batch_size=cfg.batch_size,
-        shuffle=False,
+        shuffle=False,  # CRITICAL: preserve tar order
         num_workers=cfg.num_workers,
         pin_memory=True,
     )
@@ -230,14 +224,12 @@ def main(cfg: Config) -> None:
         log.warning(f"{len(failed)} failed images")
 
     # --- Phase 4: Save ---
-    # torch.from_numpy shares the mmap pointer — PyTorch's serializer streams
-    # through the storage linearly, OS pages in/out as needed. Peak RSS stays low.
-    # (Raw numpy mmap would be pickled → materializes entire array. Don't do that.)
+    # Paths in tar order (dataset.names = tar iteration order)
+    filenames = dataset.names
     shard_mb_est = (patches_buf.nbytes + cls_buf.nbytes) / 1e6
     log.info(f"Saving shard to {shard_path} (via .tmp, ~{shard_mb_est:.0f} MB)...")
     t0 = time.perf_counter()
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
-    filenames = [p.name for p in jpg_paths]
 
     tmp = shard_path.with_suffix(".tmp")
     torch.save(
@@ -269,12 +261,14 @@ def main(cfg: Config) -> None:
     patches_mmap_path.unlink(missing_ok=True)
     cls_mmap_path.unlink(missing_ok=True)
 
+    reader.close()
+
     shard_mb = shard_path.stat().st_size / 1e6
     t_total = time.perf_counter() - t_start
 
     log.info(f"Saved {shard_path.name} ({shard_mb:.0f} MB, {n} images)")
     log.info(
-        f"Timing: extract={t_extract:.0f}s teacher={t_teacher:.0f}s "
+        f"Timing: index={t_index:.0f}s teacher={t_teacher:.0f}s "
         f"inference={t_inference:.0f}s save={t_save:.0f}s total={t_total:.0f}s"
     )
     try:
