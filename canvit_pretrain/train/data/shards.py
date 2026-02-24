@@ -159,6 +159,7 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
                 log.info(
                     f"w{worker_id} shard {shard_idx}: {yielded} imgs, "
                     f"read={t_read/yielded*1e3:.1f}ms(max={max_read*1e3:.0f}) "
+                    f"transform={t_transform/yielded*1e3:.1f}ms "
                     f"patches={t_patches/yielded*1e3:.1f}ms(max={max_patches*1e3:.0f}) "
                     f"slow_patches={n_slow_patches} "
                     f"total={total/yielded*1e3:.1f}ms/img ({yielded/total:.0f} img/s)"
