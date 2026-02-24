@@ -92,5 +92,12 @@ class TarImageReader:
         return Image.open(io.BytesIO(self._mm[data_offset : data_offset + size])).convert("RGB")
 
     def close(self) -> None:
-        self._mm.close()
-        self._fd.close()
+        if self._mm is not None:
+            self._mm.close()
+            self._mm = None  # type: ignore[assignment]
+        if self._fd is not None:
+            self._fd.close()
+            self._fd = None  # type: ignore[assignment]
+
+    def __del__(self) -> None:
+        self.close()
