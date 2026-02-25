@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --account=rrg-skrishna_gpu
 #SBATCH --gres=gpu:h100:1
-#SBATCH --mem=32G
+#SBATCH --mem=48G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=0:20:00
 #SBATCH --output=logs/export_sa1b_%A_%a.out
