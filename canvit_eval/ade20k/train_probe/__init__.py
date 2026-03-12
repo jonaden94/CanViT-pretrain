@@ -168,11 +168,12 @@ def train(cfg: Config) -> None:
     feats_str = "+".join(cfg.features)
     model_slug = cfg.model_repo.split("/")[-1]
     ts = time.strftime("%Y-%m-%d-%H%M%S-%Z")
-    exp_name = f"canvit_{model_slug}_{feats_str}_{cfg.n_timesteps}t_{cfg.glimpse_px}g_{ts}"
+    exp_name = f"canvit_{model_slug}_{feats_str}_{cfg.n_timesteps}t_{cfg.glimpse_px}g_s{cfg.scene_size}_c{canvas_grid}_{ts}"
     exp.set_name(exp_name)
     exp.log_parameters(asdict(cfg))
     exp.add_tag("canvas-probe")
     exp.add_tag(model_slug)
+    exp.add_tag(f"s{cfg.scene_size}_c{canvas_grid}")
     log.info(f"Comet: {cfg.comet_workspace}/{cfg.comet_project}/{exp.get_key()} ({exp_name})")
 
     job_id = os.environ.get("SLURM_JOB_ID", "local")
