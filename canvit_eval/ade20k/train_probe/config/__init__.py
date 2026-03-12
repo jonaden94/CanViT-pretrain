@@ -48,7 +48,7 @@ class ProbeTrainBase:
     """Shared training hyperparameters for all ADE20K probe types."""
 
     ade20k_root: Path = field(default_factory=_default_ade20k_root)
-    image_size: int = 512
+    scene_size: int = 512
 
     # Training (defaults match DINOv3 linear probing, Appendix D.1)
     batch_size: int = 16
@@ -89,6 +89,7 @@ class Config(ProbeTrainBase):
     features: list[CanvasFeatureType] = field(default_factory=lambda: ["canvas_hidden"])
     n_timesteps: int = 10
     glimpse_px: int = 128
+    canvas_grid: int | None = None
 
     # Viewpoint policy for TRAINING: pure IID random by default
     min_vp_scale: float = 0.05

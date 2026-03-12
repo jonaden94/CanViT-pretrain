@@ -118,8 +118,9 @@ def train(cfg: Config) -> None:
     log.info(f"  teacher: {cfg.teacher_repo}, dim={teacher.embed_dim}")
 
     patch_size = model.backbone.patch_size_px
-    canvas_grid = cfg.image_size // patch_size
-    log.info(f"  canvas: {canvas_grid}x{canvas_grid}, glimpse: {cfg.glimpse_px}px")
+    canvas_grid = cfg.canvas_grid if cfg.canvas_grid is not None else cfg.scene_size // patch_size
+    cfg.canvas_grid = canvas_grid  # resolve for logging/checkpointing
+    log.info(f"  scene: {cfg.scene_size}px, canvas: {canvas_grid}x{canvas_grid}, glimpse: {cfg.glimpse_px}px")
 
     # Probes
     dims = get_feature_dims(model.canvas_dim, teacher.embed_dim)
@@ -143,9 +144,9 @@ def train(cfg: Config) -> None:
 
     # Data
     _train_aug = make_segmentation_train_transforms(
-        img_size=cfg.image_size,
+        img_size=cfg.scene_size,
         random_img_size_ratio_range=list(cfg.aug_scale_range),
-        crop_size=(cfg.image_size, cfg.image_size),
+        crop_size=(cfg.scene_size, cfg.scene_size),
         flip_prob=cfg.aug_flip_prob,
         reduce_zero_label=True,
     )
@@ -155,7 +156,7 @@ def train(cfg: Config) -> None:
         return img_t, mask_t.squeeze(0)
 
     train_ds = ADE20kDataset(root=cfg.ade20k_root, split="training", transform=train_transform)
-    val_transform = make_val_transform(cfg.image_size, "squish")
+    val_transform = make_val_transform(cfg.scene_size, "squish")
     val_ds = ADE20kDataset(root=cfg.ade20k_root, split="validation", transform=val_transform)
     train_loader = DataLoader(
         train_ds, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True, drop_last=True

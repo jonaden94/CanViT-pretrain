@@ -47,8 +47,9 @@ class EvalConfig:
     policy: PolicyName = "coarse_to_fine"
     resize_mode: ResizeMode = "squish"
     n_timesteps: int = 16
-    image_size: int = 512
+    scene_size: int = 512
     glimpse_px: int = 128
+    canvas_grid: int | None = None
 
     min_scale: float = 0.05
     max_scale: float = 1.0
@@ -123,7 +124,8 @@ def evaluate(cfg: EvalConfig) -> Path:
     log.info(f"  canvas_dim={model.canvas_dim}, teacher_dim={teacher.embed_dim}")
 
     patch_size = model.backbone.patch_size_px
-    canvas_grid = cfg.image_size // patch_size
+    canvas_grid = cfg.canvas_grid if cfg.canvas_grid is not None else cfg.scene_size // patch_size
+    cfg.canvas_grid = canvas_grid  # resolve for logging
 
     # Load probes
     probes = load_probes(cfg.probe_ckpt, device, model.canvas_dim, teacher.embed_dim)
@@ -133,7 +135,7 @@ def evaluate(cfg: EvalConfig) -> Path:
     # Dataset
     dataset = ADE20kDataset(
         root=cfg.ade20k_root, split="validation",
-        transform=make_val_transform(cfg.image_size, cfg.resize_mode),
+        transform=make_val_transform(cfg.scene_size, cfg.resize_mode),
     )
     loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=True)
 

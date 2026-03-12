@@ -38,7 +38,7 @@ class DINOv3ProbeEvalConfig:
     ade20k_root: Path = field(default_factory=_default_ade20k_root)
     output: Path = field(default_factory=_default_output)
     resize_mode: ResizeMode = "squish"
-    image_size: int = 512
+    scene_size: int = 512
     batch_size: int = 32
     num_workers: int = 8
     device: str = "cuda"
@@ -81,7 +81,7 @@ def evaluate(cfg: DINOv3ProbeEvalConfig) -> Path:
     # Dataset
     dataset = ADE20kDataset(
         root=cfg.ade20k_root, split="validation",
-        transform=make_val_transform(cfg.image_size, cfg.resize_mode),
+        transform=make_val_transform(cfg.scene_size, cfg.resize_mode),
     )
     loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=True)
 
