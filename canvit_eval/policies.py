@@ -9,7 +9,9 @@ This matches the convention in canvit.viewpoint.
 """
 
 import logging
-from typing import Protocol
+from typing import Literal, Protocol
+
+PolicyName = Literal["coarse_to_fine", "c2f", "random", "iid", "full_then_random", "fullrand", "entropy_c2f"]
 
 import torch
 from canvit import RecurrentState, Viewpoint
