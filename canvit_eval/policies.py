@@ -71,37 +71,45 @@ def _level_viewpoints(level: int) -> list[tuple[float, float, float]]:
     return result
 
 
-def _tile_mean_uncertainty(
-    uncertainty_map: Tensor,
+def _build_tile_masks(
     crop_centers: list[tuple[float, float, float]],
     canvas_grid: int,
+    device: torch.device,
 ) -> Tensor:
-    """Compute mean uncertainty per tile.
+    """Precompute boolean tile masks. Returns [n_tiles, G, G]."""
+    G = canvas_grid
+    coords = torch.linspace(-1 + 1 / G, 1 - 1 / G, G, device=device)
+    crops_t = torch.tensor(crop_centers, device=device)  # [n_tiles, 3] = (y, x, s)
+    cy = crops_t[:, 0]  # [n_tiles]
+    cx = crops_t[:, 1]
+    s = crops_t[:, 2]
+    # [n_tiles, G]: does each canvas row/col fall within each tile?
+    row_in = (coords.unsqueeze(0) - cy.unsqueeze(1)).abs() <= s.unsqueeze(1)
+    col_in = (coords.unsqueeze(0) - cx.unsqueeze(1)).abs() <= s.unsqueeze(1)
+    # [n_tiles, G, G]
+    return row_in.unsqueeze(2) & col_in.unsqueeze(1)
+
+
+def _tile_mean_uncertainty(
+    uncertainty_map: Tensor,
+    tile_masks: Tensor,
+) -> Tensor:
+    """Mean uncertainty per tile, averaged across the tile's spatial cells.
+
+    Fully vectorized, no Python loops or GPU syncs.
 
     Args:
-        uncertainty_map: [B, G, G] — higher = more uncertain
-        crop_centers: list of (y, x, scale) tuples
-        canvas_grid: G
+        uncertainty_map: [B, G, G] — per-canvas-cell uncertainty (higher = more uncertain)
+        tile_masks: [n_tiles, G, G] — precomputed boolean masks (which cells belong to each tile)
 
     Returns:
-        [B, n_tiles] mean uncertainty per tile
+        [B, n_tiles] — for each image and each tile, the mean uncertainty
+        across the canvas cells covered by that tile
     """
-    B, G = uncertainty_map.shape[0], canvas_grid
-    device = uncertainty_map.device
-
-    # Canvas cell coordinates in [-1, 1]
-    coords = torch.linspace(-1 + 1 / G, 1 - 1 / G, G, device=device)
-
-    scores = torch.zeros(B, len(crop_centers), device=device)
-    for i, (cy, cx, s) in enumerate(crop_centers):
-        # Boolean mask: which canvas cells fall within this crop
-        row_in = (coords - cy).abs() <= s
-        col_in = (coords - cx).abs() <= s
-        mask = row_in[:, None] & col_in[None, :]  # [G, G]
-        n_cells = mask.sum().clamp(min=1)
-        scores[:, i] = (uncertainty_map * mask.unsqueeze(0)).sum(dim=(1, 2)) / n_cells
-
-    return scores
+    # [B, 1, G, G] * [1, n_tiles, G, G] → sum over (G, G) → [B, n_tiles]
+    n_cells = tile_masks.sum(dim=(1, 2)).clamp(min=1).float()  # [n_tiles]
+    masked = uncertainty_map.unsqueeze(1) * tile_masks.unsqueeze(0).float()  # [B, n_tiles, G, G]
+    return masked.sum(dim=(2, 3)) / n_cells.unsqueeze(0)
 
 
 class EntropyGuidedC2F:
@@ -142,7 +150,13 @@ class EntropyGuidedC2F:
         self._total = t
         assert self._total == 21, f"Expected 21 viewpoints (1+4+16), got {self._total}"
 
-        self._orderings: list[list[int]] = [[] for _ in self._levels]
+        # Precompute tile masks for levels 1 and 2
+        self._tile_masks: list[Tensor | None] = [None]  # level 0 has no tiles
+        for lvl in range(1, 3):
+            self._tile_masks.append(_build_tile_masks(self._levels[lvl], canvas_grid, device))
+
+        # Per-image visited mask: [B, n_tiles] per level
+        self._visited: list[Tensor | None] = [None for _ in self._levels]
 
     @property
     def name(self) -> str:
@@ -161,40 +175,48 @@ class EntropyGuidedC2F:
         entropy = -(probs * log_probs).sum(dim=1)  # [B, G, G]
         return entropy
 
-    def _pick_best_unvisited(self, entropy: Tensor, level_idx: int) -> int:
-        """Pick the unvisited crop with highest mean entropy (majority vote across batch)."""
-        crops = self._levels[level_idx]
-        scores = _tile_mean_uncertainty(entropy, crops, self._canvas_grid)
-        visited = set(self._orderings[level_idx])
-        remaining = [i for i in range(len(crops)) if i not in visited]
-        assert remaining, f"No remaining crops at level {level_idx}"
-        mask = torch.full((len(crops),), float("-inf"), device=self._device)
-        for i in remaining:
-            mask[i] = 0.0
-        # Majority vote: average scores across batch, then argmax
-        return int((scores.mean(dim=0) + mask).argmax().item())
+    def _pick_per_image(self, entropy: Tensor, level_idx: int) -> Tensor:
+        """Per-image best unvisited crop. Returns [B] crop indices."""
+        masks = self._tile_masks[level_idx]
+        assert masks is not None
+        scores = _tile_mean_uncertainty(entropy, masks)  # [B, n_tiles]
+        visited = self._visited[level_idx]
+        assert visited is not None
+        # -inf for visited tiles so they're never picked
+        scores = scores.masked_fill(visited, float("-inf"))
+        chosen = scores.argmax(dim=1)  # [B]
+        # Mark as visited
+        visited.scatter_(1, chosen.unsqueeze(1), True)
+        return chosen
 
     def step(self, t: int, state: RecurrentState | None) -> Viewpoint:
-        # Determine level
         level_idx = 0
         for i in range(len(self._level_starts) - 1):
             if t >= self._level_starts[i + 1]:
                 level_idx = i + 1
         pos_in_level = t - self._level_starts[level_idx]
 
-        if level_idx == 0 or state is None:
-            crop_idx = 0
-        else:
-            if pos_in_level == 0:
-                self._orderings[level_idx] = []
-            entropy = self._compute_entropy(state)
-            crop_idx = self._pick_best_unvisited(entropy, level_idx)
-            self._orderings[level_idx].append(crop_idx)
+        crops = self._levels[level_idx]
+        B = self._batch_size
 
-        cy, cx, s = self._levels[level_idx][crop_idx]
-        centers = torch.tensor([[cy, cx]], device=self._device).expand(self._batch_size, -1)
-        scales = torch.full((self._batch_size,), s, device=self._device)
-        return Viewpoint(centers=centers, scales=scales)
+        if level_idx == 0 or state is None:
+            # Level 0: full scene, deterministic
+            cy, cx, s = crops[0]
+            centers = torch.tensor([[cy, cx]], device=self._device).expand(B, -1)
+            scales = torch.full((B,), s, device=self._device)
+            return Viewpoint(centers=centers, scales=scales)
+
+        # Reset visited mask at start of each level
+        if pos_in_level == 0:
+            self._visited[level_idx] = torch.zeros(B, len(crops), dtype=torch.bool, device=self._device)
+
+        entropy = self._compute_entropy(state)
+        chosen = self._pick_per_image(entropy, level_idx)  # [B]
+
+        # Build per-image viewpoints
+        all_crops = torch.tensor(crops, device=self._device)  # [n_tiles, 3]
+        selected = all_crops[chosen]  # [B, 3]
+        return Viewpoint(centers=selected[:, :2], scales=selected[:, 2])
 
 
 # ── Factory ────────────────────────────────────────────────────────

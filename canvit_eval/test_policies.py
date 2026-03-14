@@ -4,7 +4,7 @@ import torch
 import pytest
 from canvit_eval.policies import (
     StaticPolicy, EntropyGuidedC2F, make_eval_policy,
-    _level_viewpoints, _tile_mean_uncertainty,
+    _level_viewpoints, _tile_mean_uncertainty, _build_tile_masks,
 )
 
 
@@ -77,11 +77,30 @@ def test_make_eval_policy_unknown_raises():
         make_eval_policy("nonexistent", 2, torch.device("cpu"), 5)
 
 
+def test_tile_masks_shape():
+    crops = _level_viewpoints(1)
+    masks = _build_tile_masks(crops, canvas_grid=32, device=torch.device("cpu"))
+    assert masks.shape == (4, 32, 32)
+    assert masks.dtype == torch.bool
+
+
+def test_tile_masks_partition():
+    """Level tiles should partition the canvas without overlap or gaps."""
+    for level in range(3):
+        crops = _level_viewpoints(level)
+        G = 32
+        masks = _build_tile_masks(crops, G, torch.device("cpu"))
+        total = masks.sum(dim=0)  # [G, G]
+        # Every cell covered exactly once
+        assert (total == 1).all(), f"Level {level}: not a partition (min={total.min()}, max={total.max()})"
+
+
 def test_tile_mean_uncertainty_shape():
     B, G = 3, 8
     uncertainty = torch.randn(B, G, G)
-    crops = _level_viewpoints(1)  # 4 crops
-    scores = _tile_mean_uncertainty(uncertainty, crops, G)
+    crops = _level_viewpoints(1)
+    masks = _build_tile_masks(crops, G, torch.device("cpu"))
+    scores = _tile_mean_uncertainty(uncertainty, masks)
     assert scores.shape == (B, 4)
 
 
@@ -90,8 +109,38 @@ def test_tile_mean_uncertainty_uniform():
     B, G = 2, 32
     uncertainty = torch.ones(B, G, G)
     crops = _level_viewpoints(1)
-    scores = _tile_mean_uncertainty(uncertainty, crops, G)
+    masks = _build_tile_masks(crops, G, torch.device("cpu"))
+    scores = _tile_mean_uncertainty(uncertainty, masks)
     assert torch.allclose(scores, scores[:, :1].expand_as(scores), atol=0.01)
+
+
+def test_tile_mean_uncertainty_localized():
+    """High uncertainty in one quadrant should give that tile the highest score."""
+    B, G = 1, 32
+    uncertainty = torch.zeros(B, G, G)
+    # Put high uncertainty in top-left quadrant
+    uncertainty[:, :16, :16] = 10.0
+    crops = _level_viewpoints(1)  # 4 quadrants at scale=0.5
+    masks = _build_tile_masks(crops, G, torch.device("cpu"))
+    scores = _tile_mean_uncertainty(uncertainty, masks)
+    # The tile covering the top-left should have the highest score
+    best_tile = scores[0].argmax().item()
+    best_cy, best_cx, _ = crops[best_tile]
+    assert best_cy < 0 and best_cx < 0, f"Expected top-left tile, got center ({best_cy}, {best_cx})"
+
+
+def test_tile_mean_uncertainty_per_image():
+    """Different images should get different scores."""
+    B, G = 2, 32
+    uncertainty = torch.zeros(B, G, G)
+    uncertainty[0, :16, :16] = 10.0  # image 0: top-left
+    uncertainty[1, 16:, 16:] = 10.0  # image 1: bottom-right
+    crops = _level_viewpoints(1)
+    masks = _build_tile_masks(crops, G, torch.device("cpu"))
+    scores = _tile_mean_uncertainty(uncertainty, masks)
+    best_0 = scores[0].argmax().item()
+    best_1 = scores[1].argmax().item()
+    assert best_0 != best_1, "Different images should pick different tiles"
 
 
 def test_entropy_c2f_needs_21_viewpoints():
