@@ -83,10 +83,15 @@ def _make_repo_id(owner: str, config: dict, is_dinov3: bool) -> str:
             f"Unknown model_repo '{model_repo}' — add to _MODEL_SHORT. "
             f"Known: {sorted(_MODEL_SHORT)}"
         )
-        scene = config.get("image_size", config.get("scene_size"))
-        assert scene is not None
-        grid = scene // 16
-        return f"{owner}/probe-ade20k-{steps_k}k-s{scene}-c{grid}-{short}"
+        # scene_size and canvas_grid are INDEPENDENT (commit 0244496).
+        # canvas_grid may be None in older probes → derive from scene_size.
+        scene = config.get("scene_size", config.get("image_size"))
+        assert scene is not None, f"No scene_size in config: {sorted(config)}"
+        canvas_grid = config.get("canvas_grid")
+        if canvas_grid is None:
+            canvas_grid = scene // 16  # legacy fallback only
+            log.warning("  canvas_grid not in config, derived from scene_size=%d → %d", scene, canvas_grid)
+        return f"{owner}/probe-ade20k-{steps_k}k-s{scene}-c{canvas_grid}-{short}"
 
 
 def main(args: Args) -> None:
