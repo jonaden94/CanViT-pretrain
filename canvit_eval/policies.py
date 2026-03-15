@@ -9,6 +9,7 @@ This matches the convention in canvit.viewpoint.
 """
 
 import logging
+from collections.abc import Callable
 from typing import Literal, Protocol
 
 PolicyName = Literal[
@@ -23,6 +24,10 @@ import torch
 from canvit import RecurrentState, Viewpoint
 from canvit_utils.policies import coarse_to_fine_viewpoints, random_viewpoints
 from torch import Tensor
+
+# Type for the function that extracts spatial features from the canvas.
+# Signature: (canvas: Tensor[B, N, D]) -> Tensor[B, N, D_spatial]
+GetSpatialFn = Callable[[Tensor], Tensor]
 
 log = logging.getLogger(__name__)
 
@@ -123,8 +128,12 @@ def _build_tile_masks(
     canvas_grid: int,
     device: torch.device,
 ) -> Tensor:
-    """Precompute boolean tile masks. Returns [n_tiles, G, G]."""
+    """Precompute boolean tile masks. Returns [n_tiles, G, G].
+
+    Only correct for power-of-2 canvas grids (8, 16, 32, 64, ...).
+    """
     G = canvas_grid
+    assert G > 0 and (G & (G - 1)) == 0, f"canvas_grid must be a power of 2, got {G}"
     coords = torch.linspace(-1 + 1 / G, 1 - 1 / G, G, device=device)
     crops_t = torch.tensor(crop_centers, device=device)  # [n_tiles, 3] = (y, x, s)
     cy = crops_t[:, 0]  # [n_tiles]
@@ -180,7 +189,7 @@ class EntropyGuidedC2F:
         canvas_grid: int,
         *,
         probe: torch.nn.Module,
-        get_spatial_fn: object,
+        get_spatial_fn: GetSpatialFn,
     ) -> None:
         self._batch_size = batch_size
         self._device = device
@@ -215,8 +224,7 @@ class EntropyGuidedC2F:
         B = spatial.shape[0]
         G = self._canvas_grid
         features = spatial.view(B, G, G, -1)
-        with torch.no_grad():
-            logits = self._probe(features.float())  # [B, C, G, G]
+        logits = self._probe(features.float())  # [B, C, G, G]
         log_probs = torch.log_softmax(logits, dim=1)
         probs = log_probs.exp()
         entropy = -(probs * log_probs).sum(dim=1)  # [B, G, G]
@@ -270,7 +278,7 @@ class EntropyGuidedC2F:
 
 
 def make_eval_policy(
-    policy_name: str,
+    policy_name: PolicyName | str,
     batch_size: int,
     device: torch.device,
     n_viewpoints: int,
@@ -280,7 +288,7 @@ def make_eval_policy(
     max_scale: float = 1.0,
     start_with_full_scene: bool = True,
     probe: torch.nn.Module | None = None,
-    get_spatial_fn: object | None = None,
+    get_spatial_fn: GetSpatialFn | None = None,
 ) -> EvalPolicy:
     """Create an evaluation policy by name.
 

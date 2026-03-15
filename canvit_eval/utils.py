@@ -4,14 +4,13 @@ import os
 import subprocess
 from dataclasses import asdict
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any
 
 import torch
 from canvit import Viewpoint
 from canvit_utils.policies import coarse_to_fine_viewpoints, random_viewpoints
 
-PolicyName = Literal["coarse_to_fine", "random", "full_then_random"]
-POLICY_ALIASES: dict[str, PolicyName] = {"c2f": "coarse_to_fine", "fullrand": "full_then_random", "iid": "random"}
+from canvit_eval.policies import PolicyName
 
 
 def get_git_commit() -> str | None:

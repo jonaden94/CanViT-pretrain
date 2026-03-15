@@ -165,6 +165,39 @@ def test_f2c_covers_all_levels():
     assert scales[20] == 1.0
 
 
+def test_c2f_and_f2c_visit_same_centers():
+    """C2F and F2C should visit the exact same set of (y, x) centers."""
+    B, T = 1, 21
+    dev = torch.device("cpu")
+    torch.manual_seed(0)
+    pol_c2f = make_eval_policy("coarse_to_fine", B, dev, T)
+    torch.manual_seed(0)
+    pol_f2c = make_eval_policy("fine_to_coarse", B, dev, T)
+    c2f_centers = {(pol_c2f.step(t, None).scales[0].item(),) for t in range(T)}
+    f2c_centers = {(pol_f2c.step(t, None).scales[0].item(),) for t in range(T)}
+    # Both visit 1 crop at scale 1.0, 4 at 0.5, 16 at 0.25
+    c2f_scale_counts = {}
+    f2c_scale_counts = {}
+    torch.manual_seed(0)
+    pol_c2f2 = make_eval_policy("coarse_to_fine", B, dev, T)
+    torch.manual_seed(0)
+    pol_f2c2 = make_eval_policy("fine_to_coarse", B, dev, T)
+    for t in range(T):
+        s = pol_c2f2.step(t, None).scales[0].item()
+        c2f_scale_counts[s] = c2f_scale_counts.get(s, 0) + 1
+    for t in range(T):
+        s = pol_f2c2.step(t, None).scales[0].item()
+        f2c_scale_counts[s] = f2c_scale_counts.get(s, 0) + 1
+    assert c2f_scale_counts == f2c_scale_counts
+
+
+def test_tile_masks_reject_non_power_of_2():
+    """_build_tile_masks should reject non-power-of-2 grids."""
+    crops = _level_viewpoints(1)
+    with pytest.raises(AssertionError, match="power of 2"):
+        _build_tile_masks(crops, canvas_grid=31, device=torch.device("cpu"))
+
+
 def test_entropy_coarse_to_fine_needs_21_viewpoints():
     with pytest.raises(AssertionError, match="n_viewpoints=21"):
         make_eval_policy("entropy_coarse_to_fine", 2, torch.device("cpu"), 10,

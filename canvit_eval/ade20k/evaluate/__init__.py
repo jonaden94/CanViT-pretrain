@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import torch
-from canvit import CanViTForPretrainingHFHub, sample_at_viewpoint
+from canvit import CanViTForPretrainingHFHub, Viewpoint, sample_at_viewpoint
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -96,7 +96,7 @@ def load_probe(ckpt_path: Path, device: torch.device, embed_dim: int) -> ProbeHe
     return probe
 
 
-def _viewpoint_to_dict(vp: "torch.Tensor", t: int) -> dict:
+def _viewpoint_to_dict(vp: "Viewpoint", t: int) -> dict:
     """Serialize first batch element's viewpoint for logging."""
     return {
         "t": t,
