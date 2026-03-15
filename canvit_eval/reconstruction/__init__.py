@@ -182,7 +182,7 @@ def evaluate(cfg: ReconstructionEvalConfig) -> dict:
             )
 
             # Step-by-step recurrent forward pass
-            state: RecurrentState | None = None
+            state = model.init_state(batch_size=B, canvas_grid_size=canvas_grid)
             for t, vp in enumerate(viewpoints):
                 glimpse = sample_at_viewpoint(
                     spatial=images, viewpoint=vp, glimpse_size_px=cfg.glimpse_px,
