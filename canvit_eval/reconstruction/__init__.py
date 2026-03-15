@@ -14,6 +14,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
@@ -63,6 +64,7 @@ class ReconstructionEvalConfig:
     image_dir: Path
     output: Path
 
+    policy: Literal["coarse_to_fine", "random", "full_then_random"] = "random"
     scene_size: int = 512
     canvas_grid: int = 32
     glimpse_px: int = 128
@@ -184,7 +186,7 @@ def evaluate(cfg: ReconstructionEvalConfig) -> dict:
             norm_cls = cls_std(raw_cls.unsqueeze(1)).squeeze(1)
 
             viewpoints = make_viewpoints(
-                "coarse_to_fine", B, device, T,
+                cfg.policy, B, device, T,
             )
 
             # Step-by-step recurrent forward pass
