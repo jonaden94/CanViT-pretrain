@@ -286,7 +286,6 @@ def make_eval_policy(
     canvas_grid: int = 32,
     min_scale: float = 0.05,
     max_scale: float = 1.0,
-    start_with_full_scene: bool = True,
     probe: torch.nn.Module | None = None,
     get_spatial_fn: GetSpatialFn | None = None,
 ) -> EvalPolicy:
@@ -321,11 +320,18 @@ def make_eval_policy(
     if resolved == "fine_to_coarse":
         return StaticPolicy(resolved, fine_to_coarse_viewpoints(batch_size, device, n_viewpoints))
 
-    if resolved in ("random", "full_then_random"):
+    if resolved == "full_then_random":
         return StaticPolicy(resolved, random_viewpoints(
             batch_size, device, n_viewpoints,
             min_scale=min_scale, max_scale=max_scale,
-            start_with_full_scene=(resolved == "full_then_random" or start_with_full_scene),
+            start_with_full_scene=True,
+        ))
+
+    if resolved == "random":
+        return StaticPolicy(resolved, random_viewpoints(
+            batch_size, device, n_viewpoints,
+            min_scale=min_scale, max_scale=max_scale,
+            start_with_full_scene=False,
         ))
 
     raise ValueError(f"Unknown policy: {policy_name!r}")

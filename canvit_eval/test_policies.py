@@ -198,6 +198,20 @@ def test_tile_masks_reject_non_power_of_2():
         _build_tile_masks(crops, canvas_grid=31, device=torch.device("cpu"))
 
 
+def test_random_never_starts_full_scene():
+    """R-IID (random) should NOT start with a full-scene viewpoint."""
+    pol = make_eval_policy("random", 4, torch.device("cpu"), 21)
+    vp = pol.step(0, None)
+    assert not (vp.scales == 1.0).all(), "random policy should not start with full-scene (scale=1.0)"
+
+
+def test_full_then_random_always_starts_full_scene():
+    """F-IID (full_then_random) should ALWAYS start with full-scene."""
+    pol = make_eval_policy("full_then_random", 4, torch.device("cpu"), 21)
+    vp = pol.step(0, None)
+    assert (vp.scales == 1.0).all(), "full_then_random must start with full-scene (scale=1.0)"
+
+
 def test_entropy_coarse_to_fine_needs_21_viewpoints():
     with pytest.raises(AssertionError, match="n_viewpoints=21"):
         make_eval_policy("entropy_coarse_to_fine", 2, torch.device("cpu"), 10,

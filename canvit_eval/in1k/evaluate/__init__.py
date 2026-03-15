@@ -60,10 +60,9 @@ class Config:
     device: str = "cuda"
     save_logits: bool = True
     save_cls: bool = True
-    # Random policy params (ignored for coarse_to_fine)
+    # Random policy params (ignored for coarse_to_fine/fine_to_coarse)
     random_min_scale: float = 0.05
     random_max_scale: float = 1.0
-    random_start_full: bool = True
 
 
 # === Pure helpers ===
@@ -286,7 +285,6 @@ def evaluate(cfg: Config) -> Path:
             canvas_grid=cfg.canvas_grid,
             min_scale=cfg.random_min_scale,
             max_scale=cfg.random_max_scale,
-            start_with_full_scene=cfg.random_start_full,
         )
         state = model.init_state(batch_size=B, canvas_grid_size=cfg.canvas_grid)
 

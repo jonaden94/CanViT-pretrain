@@ -60,7 +60,6 @@ class EvalConfig:
 
     min_scale: float = 0.05
     max_scale: float = 1.0
-    start_full: bool = True
 
     batch_size: int = 32
     num_workers: int = 8
@@ -161,7 +160,6 @@ def evaluate(cfg: EvalConfig) -> Path:
             cfg.policy, B, device, T,
             canvas_grid=canvas_grid,
             min_scale=cfg.min_scale, max_scale=cfg.max_scale,
-            start_with_full_scene=cfg.start_full,
             probe=probe, get_spatial_fn=model.get_spatial,
         )
 
