@@ -75,23 +75,20 @@ class ReconstructionEvalConfig:
 
 @dataclass
 class TimestepMetrics:
-    """Accumulated cosine similarities for one timestep."""
-    scene_cos_sum: float = 0.0
-    cls_cos_sum: float = 0.0
+    """Accumulated cosine similarities for one timestep (raw + normalized)."""
+    scene_raw_sum: float = 0.0
+    cls_raw_sum: float = 0.0
+    scene_norm_sum: float = 0.0
+    cls_norm_sum: float = 0.0
     n_images: int = 0
 
-    def update(self, scene_cos: float, cls_cos: float, batch_size: int) -> None:
-        self.scene_cos_sum += scene_cos * batch_size
-        self.cls_cos_sum += cls_cos * batch_size
+    def update(self, *, scene_raw: float, cls_raw: float,
+               scene_norm: float, cls_norm: float, batch_size: int) -> None:
+        self.scene_raw_sum += scene_raw * batch_size
+        self.cls_raw_sum += cls_raw * batch_size
+        self.scene_norm_sum += scene_norm * batch_size
+        self.cls_norm_sum += cls_norm * batch_size
         self.n_images += batch_size
-
-    @property
-    def scene_cos_mean(self) -> float:
-        return self.scene_cos_sum / self.n_images
-
-    @property
-    def cls_cos_mean(self) -> float:
-        return self.cls_cos_sum / self.n_images
 
 
 def _cache_teacher_features(
@@ -128,6 +125,11 @@ def evaluate(cfg: ReconstructionEvalConfig) -> dict:
 
     canvas_grid = cfg.canvas_grid
     has_cls = model.scene_cls_head is not None
+    cls_std, scene_std = model.standardizers(canvas_grid)
+    assert scene_std.initialized, (
+        f"Standardizer not initialized for grid {canvas_grid}. "
+        "Run scripts/migrate_ablation_checkpoints.py first."
+    )
 
     # Dataset — just images, no labels needed
     transform = preprocess(cfg.scene_size)
@@ -173,9 +175,13 @@ def evaluate(cfg: ReconstructionEvalConfig) -> dict:
             images = images.to(device)
 
             # Slice pre-cached teacher features for this batch
-            target_scene = teacher_patches[img_idx:img_idx + B].to(device).float()
-            target_cls = teacher_cls[img_idx:img_idx + B].to(device).float()
+            raw_patches = teacher_patches[img_idx:img_idx + B].to(device).float()
+            raw_cls = teacher_cls[img_idx:img_idx + B].to(device).float()
             img_idx += B
+
+            # Standardized targets (for normalized cosine sim)
+            norm_patches = scene_std(raw_patches)
+            norm_cls = cls_std(raw_cls.unsqueeze(1)).squeeze(1)
 
             viewpoints = make_viewpoints(
                 "coarse_to_fine", B, device, T,
@@ -191,18 +197,20 @@ def evaluate(cfg: ReconstructionEvalConfig) -> dict:
                 state = out.state
 
                 pred_scene = model.predict_teacher_scene(state.canvas)
-                scene_cos = F.cosine_similarity(
-                    pred_scene, target_scene, dim=-1,
-                ).mean().item()
+                scene_raw = F.cosine_similarity(pred_scene, raw_patches, dim=-1).mean().item()
+                scene_norm = F.cosine_similarity(pred_scene, norm_patches, dim=-1).mean().item()
 
-                cls_cos = 0.0
+                cls_raw = cls_norm_val = 0.0
                 if has_cls:
                     pred_cls = model.predict_scene_teacher_cls(state.recurrent_cls)
-                    cls_cos = F.cosine_similarity(
-                        pred_cls, target_cls, dim=-1,
-                    ).mean().item()
+                    cls_raw = F.cosine_similarity(pred_cls, raw_cls, dim=-1).mean().item()
+                    cls_norm_val = F.cosine_similarity(pred_cls, norm_cls, dim=-1).mean().item()
 
-                metrics[t].update(scene_cos, cls_cos, B)
+                metrics[t].update(
+                    scene_raw=scene_raw, cls_raw=cls_raw,
+                    scene_norm=scene_norm, cls_norm=cls_norm_val,
+                    batch_size=B,
+                )
 
     elapsed = time.perf_counter() - start_time
     log.info("Evaluation done: %d images in %.1fs (%.1f img/s)",
@@ -212,8 +220,10 @@ def evaluate(cfg: ReconstructionEvalConfig) -> dict:
     per_timestep = [
         {
             "t": t,
-            "scene_cos": round(m.scene_cos_mean, 6),
-            "cls_cos": round(m.cls_cos_mean, 6),
+            "scene_cos_raw": round(m.scene_raw_sum / m.n_images, 6),
+            "cls_cos_raw": round(m.cls_raw_sum / m.n_images, 6),
+            "scene_cos_norm": round(m.scene_norm_sum / m.n_images, 6),
+            "cls_cos_norm": round(m.cls_norm_sum / m.n_images, 6),
         }
         for t, m in enumerate(metrics)
     ]
@@ -241,6 +251,8 @@ def evaluate(cfg: ReconstructionEvalConfig) -> dict:
 
     # Print summary
     for p in per_timestep:
-        log.info("  t=%d  scene_cos=%.4f  cls_cos=%.4f", p["t"], p["scene_cos"], p["cls_cos"])
+        log.info("  t=%d  scene_raw=%.4f  cls_raw=%.4f  scene_norm=%.4f  cls_norm=%.4f",
+                 p["t"], p["scene_cos_raw"], p["cls_cos_raw"],
+                 p["scene_cos_norm"], p["cls_cos_norm"])
 
     return result
