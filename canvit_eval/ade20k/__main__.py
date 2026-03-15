@@ -1,10 +1,10 @@
 """ADE20K probe training and evaluation.
 
 Usage:
-    python -m canvit_eval.ade20k train ...                        # CanViT canvas probes
-    python -m canvit_eval.ade20k evaluate --probe-ckpt ...        # CanViT probe eval
-    python -m canvit_eval.ade20k train-dinov3-probe ...           # DINOv3 baseline probe
-    python -m canvit_eval.ade20k eval-dinov3-probe --probe-ckpt . # DINOv3 probe eval
+    python -m canvit_eval.ade20k train ...                         # CanViT canvas probes
+    python -m canvit_eval.ade20k evaluate --probe-repo ...         # CanViT probe eval
+    python -m canvit_eval.ade20k train-dinov3-probe ...            # DINOv3 baseline probe
+    python -m canvit_eval.ade20k eval-dinov3-probe --probe-repo .. # DINOv3 probe eval
 """
 
 from typing import Annotated
