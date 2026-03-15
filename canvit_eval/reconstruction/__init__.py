@@ -127,7 +127,6 @@ def evaluate(cfg: ReconstructionEvalConfig) -> dict:
     model.eval()
 
     canvas_grid = cfg.canvas_grid
-    cls_std, scene_std = model.standardizers(canvas_grid)
     has_cls = model.scene_cls_head is not None
 
     # Dataset — just images, no labels needed
@@ -174,13 +173,9 @@ def evaluate(cfg: ReconstructionEvalConfig) -> dict:
             images = images.to(device)
 
             # Slice pre-cached teacher features for this batch
-            t_patches = teacher_patches[img_idx:img_idx + B].to(device).float()
-            t_cls = teacher_cls[img_idx:img_idx + B].to(device).float()
+            target_scene = teacher_patches[img_idx:img_idx + B].to(device).float()
+            target_cls = teacher_cls[img_idx:img_idx + B].to(device).float()
             img_idx += B
-
-            # Standardize teacher targets (same as training)
-            target_scene = scene_std(t_patches)
-            target_cls = cls_std(t_cls.unsqueeze(1)).squeeze(1)
 
             viewpoints = make_viewpoints(
                 "coarse_to_fine", B, device, T,
