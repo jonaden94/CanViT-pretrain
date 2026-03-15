@@ -109,7 +109,7 @@ def main(args: Args) -> None:
 
         step = raw["step"]
         ts = datetime.fromisoformat(raw["timestamp"])
-        date_str = ts.strftime("%Y%m%d")
+        date_str = ts.strftime("%Y-%m-%d")
         repo_id = f"{args.owner}/canvitb16-abl-{slug}-{date_str}"
 
         log.info("  %s → %s (step=%d, %s)", stem, repo_id, step, ts.date())
