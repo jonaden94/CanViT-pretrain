@@ -20,9 +20,9 @@ import torch.nn.functional as F
 from canvit import CanViTOutput, RecurrentState, Viewpoint, sample_at_viewpoint
 from canvit_utils.teacher import DINOv3Teacher, load_teacher
 from canvit_utils.transforms import preprocess
+from PIL import Image
 from torch import Tensor
-from torch.utils.data import DataLoader
-from torchvision.datasets import ImageFolder
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from canvit_pretrain import CanViTForPretraining
@@ -33,6 +33,28 @@ from canvit_eval.utils import collect_metadata, make_viewpoints
 log = logging.getLogger(__name__)
 
 TEACHER_REPO = "facebook/dinov3-vitb16-pretrain-lvd1689m"
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+
+
+class FlatImageDataset(Dataset):
+    """Load images from a flat directory (no subdirectories required)."""
+
+    def __init__(self, root: Path, transform: object = None) -> None:
+        self.paths = sorted(
+            p for p in root.iterdir()
+            if p.suffix.lower() in IMAGE_EXTENSIONS
+        )
+        assert len(self.paths) > 0, f"No images found in {root}"
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.paths)
+
+    def __getitem__(self, idx: int) -> Tensor:
+        img = Image.open(self.paths[idx]).convert("RGB")
+        if self.transform is not None:
+            img = self.transform(img)
+        return img
 
 
 @dataclass
@@ -83,7 +105,7 @@ def _cache_teacher_features(
     all_cls: list[Tensor] = []
     log.info("Caching teacher features for %d batches...", len(loader))
     with torch.inference_mode():
-        for images, _ in tqdm(loader, desc="Teacher features"):
+        for images in tqdm(loader, desc="Teacher features"):
             images = images.to(device)
             feats = teacher.forward_norm_features(images)
             all_patches.append(feats.patches.cpu().half())
@@ -108,9 +130,9 @@ def evaluate(cfg: ReconstructionEvalConfig) -> dict:
     cls_std, scene_std = model.standardizers(canvas_grid)
     has_cls = model.scene_cls_head is not None
 
-    # Dataset — just images, labels are ignored
+    # Dataset — just images, no labels needed
     transform = preprocess(cfg.scene_size)
-    dataset = ImageFolder(str(cfg.image_dir), transform=transform)
+    dataset = FlatImageDataset(cfg.image_dir, transform=transform)
     loader = DataLoader(
         dataset,
         batch_size=cfg.batch_size,
@@ -147,7 +169,7 @@ def evaluate(cfg: ReconstructionEvalConfig) -> dict:
     img_idx = 0
 
     with torch.inference_mode():
-        for images, _ in tqdm(loader, desc="Reconstruction eval"):
+        for images in tqdm(loader, desc="Reconstruction eval"):
             B = images.shape[0]
             images = images.to(device)
 
