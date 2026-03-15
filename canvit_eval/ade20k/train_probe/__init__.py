@@ -29,7 +29,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset, make_val_transform
-from canvit_eval.ade20k.probe import ProbeHead, eval_probe_on_batch
+from canvit_eval.ade20k.probe import eval_probe_on_batch
+from canvit_utils.probes import SegmentationProbe
 from canvit_eval.metrics import IoUAccumulator
 from canvit_eval.utils import make_viewpoints
 
@@ -42,7 +43,7 @@ log = logging.getLogger(__name__)
 
 
 def _make_probe(name: str, dim: int, cfg: Config, device: torch.device, *, use_ln: bool) -> ProbeState:
-    head = ProbeHead(dim, dropout=cfg.dropout, use_ln=use_ln).to(device)
+    head = SegmentationProbe(embed_dim=dim, num_classes=NUM_CLASSES, dropout=cfg.dropout, use_ln=use_ln).to(device)
     opt = AdamW(head.parameters(), lr=cfg.peak_lr, weight_decay=cfg.weight_decay)
     scheduler = WarmupOneCycleLR(
         opt,

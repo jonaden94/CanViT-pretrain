@@ -24,7 +24,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset, make_val_transform
-from canvit_eval.ade20k.probe import ProbeHead, eval_probe_on_batch
+from canvit_eval.ade20k.probe import eval_probe_on_batch
+from canvit_utils.probes import SegmentationProbe
 from canvit_eval.ade20k.train_probe.config import ProbeTrainBase
 from canvit_eval.ade20k.train_probe.loss import ce_loss, upsample_preds
 from canvit_eval.ade20k.viz import log_probe_viz
@@ -73,7 +74,7 @@ def train(cfg: DINOv3ProbeTrainConfig) -> None:
     log.info(f"  embed_dim={teacher.embed_dim}, patch_size={patch_size}, grid={grid}x{grid}")
 
     # Probe (no LN needed — teacher features are already post-LN)
-    probe = ProbeHead(teacher.embed_dim, dropout=cfg.dropout, use_ln=False).to(device)
+    probe = SegmentationProbe(embed_dim=teacher.embed_dim, num_classes=NUM_CLASSES, dropout=cfg.dropout, use_ln=False).to(device)
     optimizer = AdamW(probe.parameters(), lr=cfg.peak_lr, weight_decay=cfg.weight_decay)
     scheduler = WarmupOneCycleLR(
         optimizer,

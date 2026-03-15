@@ -6,7 +6,7 @@ from typing import Any
 from torch import Tensor
 from torch.optim import AdamW
 
-from canvit_eval.ade20k.probe import ProbeHead
+from canvit_utils.probes import SegmentationProbe
 
 
 @dataclass
@@ -14,7 +14,7 @@ class ProbeState:
     """Training state for one probe."""
 
     name: str
-    head: ProbeHead
+    head: SegmentationProbe
     optimizer: AdamW
     scheduler: Any  # WarmupOneCycleLR or other LR scheduler
     n_timesteps: int = 0

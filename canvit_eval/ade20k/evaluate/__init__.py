@@ -178,7 +178,7 @@ def evaluate(cfg: EvalConfig) -> Path:
             **collect_metadata(cfg),
             "wall_time_seconds": wall_time,
             "n_images": len(dataset),
-            "feature_type": FEATURE_TYPE,
+            "feature_type": "canvas_hidden",
         },
     }
 
