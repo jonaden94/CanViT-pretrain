@@ -84,7 +84,7 @@ class ProbeTrainBase:
 class Config(ProbeTrainBase):
     """Canvas probe training configuration."""
 
-    model_repo: str = "canvit/canvit-vitb16-pretrain-512px-in21k"
+    model_repo: str = "canvit/canvitb16-add-vpe-pretrain-g128px-s512px-in21k-dv3b16-2026-02-02"
     teacher_repo: str = "facebook/dinov3-vitb16-pretrain-lvd1689m"
     features: list[CanvasFeatureType] = field(default_factory=lambda: ["canvas_hidden"])
     n_timesteps: int = 10
