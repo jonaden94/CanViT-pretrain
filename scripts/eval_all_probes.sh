@@ -36,13 +36,13 @@ for res in 128 144 160 192 256 384 512; do
 done
 
 # CanViT canvas probes (t=0 only = 1 timestep, C2F policy)
-for spec in "s512-c32-in21k:512:32" "s1024-c64-in21k:1024:64" "s1024-c64-sa1b:1024:64"; do
-  IFS=: read -r slug scene grid <<< "$spec"
-  model_repo="canvit/canvitb16-add-vpe-pretrain-g128px-s${scene}px-in21k-dv3b16-2026-02-02"
-  # SA1B has a different model repo
-  if [[ "$slug" == *"sa1b"* ]]; then
-    model_repo="canvit/canvitb16-add-vpe-pretrain-g128px-s1024px-sa1b-dv3b16-2026-02-26-from-in21k-2026-02-02"
-  fi
+# NOTE: model_repo is the TRAINING checkpoint, not the eval resolution.
+# The IN21K model is always s512px (trained at 512); it's EVALUATED at different scene sizes.
+CANVIT_IN21K="canvit/canvitb16-add-vpe-pretrain-g128px-s512px-in21k-dv3b16-2026-02-02"
+CANVIT_SA1B="canvit/canvitb16-add-vpe-pretrain-g128px-s1024px-sa1b-dv3b16-2026-02-26-from-in21k-2026-02-02"
+
+for spec in "s512-c32-in21k:512:32:$CANVIT_IN21K" "s1024-c64-in21k:1024:64:$CANVIT_IN21K" "s1024-c64-sa1b:1024:64:$CANVIT_SA1B"; do
+  IFS=: read -r slug scene grid model_repo <<< "$spec"
   out="$OUT_DIR/canvit_${slug}.pt"
   if [ -f "$out" ]; then echo "SKIP $out"; continue; fi
   echo "$(date +%H:%M:%S) CanViT $slug (scene=${scene}, grid=${grid})"
