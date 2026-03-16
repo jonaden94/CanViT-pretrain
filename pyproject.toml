@@ -22,13 +22,10 @@ dependencies = [
     "omegaconf",
     "dacite",
     "optuna",
-    "albumentations",
-    "pandas",
     "pyarrow",
     "polars",
     "torchmetrics",
     "matplotlib",
-    "plotly",
     "xxhash",
     "opencv-python-headless>=4.13.0.90",
 ]
