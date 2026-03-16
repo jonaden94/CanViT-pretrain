@@ -88,9 +88,10 @@ def _make_repo_id(owner: str, config: dict, is_dinov3: bool) -> str:
         scene = config.get("scene_size", config.get("image_size"))
         assert scene is not None, f"No scene_size in config: {sorted(config)}"
         canvas_grid = config.get("canvas_grid")
-        if canvas_grid is None:
-            canvas_grid = scene // 16  # legacy fallback only
-            log.warning("  canvas_grid not in config, derived from scene_size=%d → %d", scene, canvas_grid)
+        assert canvas_grid is not None, (
+            f"canvas_grid not in config for {probe_path.name}. "
+            f"canvas_grid is independent of scene_size — cannot be derived."
+        )
         return f"{owner}/probe-ade20k-{steps_k}k-s{scene}-c{canvas_grid}-{short}"
 
 
