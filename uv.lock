@@ -117,7 +117,7 @@ wheels = [
 [[package]]
 name = "canvit"
 version = "0.1.0"
-source = { git = "ssh://git@github.com/yberreby/CanViT-PyTorch-Next.git?branch=main#5cd973f17ff46212612d5a1c55e4a8c430ed3f75" }
+source = { git = "ssh://git@github.com/yberreby/CanViT-PyTorch-Next.git?branch=main#f951a1c5f03dada91301c6a972494886cab4f8d9" }
 dependencies = [
     { name = "dinov3-in1k-probes" },
     { name = "huggingface-hub" },
@@ -131,12 +131,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "canvit-train"
+name = "canvit-pretrain"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "albumentations" },
     { name = "canvit" },
+    { name = "canvit-probes" },
     { name = "comet-ml" },
     { name = "dacite" },
     { name = "dinov3" },
@@ -175,6 +176,7 @@ dev = [
 requires-dist = [
     { name = "albumentations" },
     { name = "canvit", git = "ssh://git@github.com/yberreby/CanViT-PyTorch-Next.git?branch=main" },
+    { name = "canvit-probes", git = "ssh://git@github.com/m2b3/CanViT-probes.git?branch=main" },
     { name = "comet-ml" },
     { name = "dacite" },
     { name = "dinov3", git = "https://github.com/yberreby/dinov3.git" },
@@ -207,6 +209,19 @@ dev = [
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-cov" },
     { name = "ruff", specifier = ">=0.15.0" },
+]
+
+[[package]]
+name = "canvit-probes"
+version = "0.1.0"
+source = { git = "ssh://git@github.com/m2b3/CanViT-probes.git?branch=main#f084052ec4e13a4926329ba95982a752a961c36d" }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "pillow" },
+    { name = "safetensors" },
+    { name = "timm" },
+    { name = "torch" },
+    { name = "torchvision" },
 ]
 
 [[package]]

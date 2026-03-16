@@ -1,12 +1,13 @@
 [project]
-name = "canvit-train"
+name = "canvit-pretrain"
 version = "0.1.0"
-description = "CanViT pretraining and evaluation"
+description = "CanViT pretraining (passive-to-active dense distillation)"
 authors = [{ name = "Yohaï-Eliel BERREBY", email = "me@yberreby.com" }]
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "canvit",
+    "canvit-probes",
     "dinov3",
     "dinov3-in1k-probes",
     "ybml",
@@ -40,10 +41,11 @@ build-backend = "hatchling.build"
 packages = ["canvit_pretrain", "canvit_eval", "drac_imagenet"]
 
 [tool.uv.sources]
-dinov3 = { git = "https://github.com/yberreby/dinov3.git" }
-ybml = { git = "https://github.com/yberreby/ybml.git", rev = "b161368" }
 canvit = { git = "ssh://git@github.com/yberreby/CanViT-PyTorch-Next.git", branch = "main" }
+canvit-probes = { git = "ssh://git@github.com/m2b3/CanViT-probes.git", branch = "main" }
+dinov3 = { git = "https://github.com/yberreby/dinov3.git" }
 dinov3-in1k-probes = { git = "https://github.com/yberreby/dinov3-in1k-probes.git" }
+ybml = { git = "https://github.com/yberreby/ybml.git", rev = "b161368" }
 
 [dependency-groups]
 dev = [
