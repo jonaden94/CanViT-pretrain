@@ -19,7 +19,6 @@ from pathlib import Path
 
 import torch
 import tyro
-from torch import Tensor
 
 from canvit.model.pretraining.hub import upload_to_hf
 from canvit.model.pretraining.impl import CanViTForPretraining
