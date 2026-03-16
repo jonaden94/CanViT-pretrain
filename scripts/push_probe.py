@@ -21,7 +21,7 @@ import tyro
 from huggingface_hub import HfApi
 from safetensors.torch import save_file
 
-from canvit_utils.probes import SegmentationProbe
+from canvit_probes import SegmentationProbe
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)

@@ -1,6 +1,6 @@
 """Segmentation probe utilities for ADE20K evaluation.
 
-The probe class (SegmentationProbe) lives in canvit_utils.probes.
+The probe class (SegmentationProbe) lives in canvit-probes package.
 This module provides eval-specific helpers that depend on IoUAccumulator.
 """
 

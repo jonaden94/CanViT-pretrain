@@ -3,7 +3,7 @@
 import torch
 
 from canvit_eval.ade20k.dataset import NUM_CLASSES
-from canvit_utils.probes import SegmentationProbe
+from canvit_probes import SegmentationProbe
 
 
 def test_forward_shape() -> None:

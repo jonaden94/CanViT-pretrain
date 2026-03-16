@@ -25,7 +25,7 @@ from tqdm import tqdm
 
 from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset, make_val_transform
 from canvit_eval.ade20k.probe import eval_probe_on_batch
-from canvit_utils.probes import SegmentationProbe
+from canvit_probes import SegmentationProbe
 from canvit_eval.ade20k.train_probe.config import ProbeTrainBase
 from canvit_eval.ade20k.train_probe.loss import ce_loss, upsample_preds
 from canvit_eval.ade20k.viz import log_probe_viz
