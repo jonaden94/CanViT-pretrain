@@ -48,7 +48,7 @@ class EvalConfig:
     ade20k_root: Path = field(default_factory=_default_ade20k_root)
     output: Path = field(default_factory=_default_output)
 
-    model_repo: str = "canvit/canvit-vitb16-pretrain-512px-in21k"
+    model_repo: str = "canvit/canvitb16-add-vpe-pretrain-g128px-s512px-in21k-dv3b16-2026-02-02"
     policy: PolicyName = "coarse_to_fine"
     resize_mode: ResizeMode = "squish"
     n_timesteps: int = 16
