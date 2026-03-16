@@ -23,7 +23,7 @@
 # Quick test (1 shard = 174 steps):
 #   sbatch --array=0-0%1 --time=00:20:00 sa1b/train.sh --steps-per-job 174
 
-set -eux
+set -eu  # NOT -x: would trace secret exports into logs
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 

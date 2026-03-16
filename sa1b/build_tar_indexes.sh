@@ -10,7 +10,7 @@
 # Build .idx files for all SA-1B tars. CPU-only, no GPU.
 # ~40s per tar (2s scan + 35s SHA), 130 tars / 8 workers ≈ 11 min.
 
-set -eux
+set -eu  # NOT -x: env.sh may contain secrets
 
 source slurm/env.sh
 mkdir -p logs

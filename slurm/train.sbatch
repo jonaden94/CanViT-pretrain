@@ -25,7 +25,7 @@
 # Quick test:
 #   sbatch --array=0-2%1 --time=00:10:00 slurm/train.sbatch --steps-per-job 10
 
-set -eux
+set -eu  # NOT -x: would trace secret exports (HF_TOKEN, COMET_API_KEY) into logs
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 timed() { local start=$SECONDS; "$@"; log "  ↳ $((SECONDS - start))s"; }
