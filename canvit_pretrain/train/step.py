@@ -14,7 +14,6 @@ from torch import Tensor
 
 from canvit_pretrain import CanViTForPretraining
 
-from .loss import mse_loss
 from .viewpoint import Viewpoint as NamedViewpoint
 from .viewpoint import ViewpointType
 from .viz.image import imagenet_denormalize
@@ -163,9 +162,9 @@ def training_step(
         scene_cls_loss = torch.zeros((), device=device)
 
         if enable_scene_patches_loss:
-            scene_patches_loss = mse_loss(scene_pred, scene_target)
+            scene_patches_loss = F.mse_loss(scene_pred, scene_target)
         if enable_scene_cls_loss:
-            scene_cls_loss = mse_loss(cls_pred, cls_target)
+            scene_cls_loss = F.mse_loss(cls_pred, cls_target)
 
         active: list[Tensor] = []
         if enable_scene_patches_loss:
