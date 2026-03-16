@@ -51,7 +51,7 @@ class EvalConfig:
     model_repo: str = "canvit/canvitb16-add-vpe-pretrain-g128px-s512px-in21k-dv3b16-2026-02-02"
     policy: PolicyName = "coarse_to_fine"
     resize_mode: ResizeMode = "squish"
-    n_timesteps: int = 16
+    n_timesteps: int = 21
     scene_size: int = 512
     glimpse_px: int = 128
     canvas_grid: int | None = None
