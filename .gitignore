@@ -14,9 +14,12 @@ wheels/
 .ruff_cache/
 .coverage
 
-# Outputs
+# Outputs + checkpoints + debug images
 outputs/
+checkpoints/
 *.pth
+*.pt
+*.png
 
 # macOS
 *.DS_Store
