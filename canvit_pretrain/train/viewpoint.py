@@ -108,7 +108,8 @@ class Viewpoint(CoreViewpoint):
         Constraint: |x| + s ≤ 1 and |y| + s ≤ 1 (viewpoint must fit in scene).
         Given scale s, valid centers form a "safe box": [-(1-s), (1-s)]² with area A = 4·(1-s)².
 
-        We sample UNIFORMLY OVER SAFE-BOX AREA because large scales have fewer valid centers.
+        We weight each scale by its safe-box half-side-length (1-s) via the L²-uniform trick,
+        yielding p(s) ∝ (1-s). This favors zoomed-in glimpses while accounting for geometry.
         """
         assert 0.0 <= min_scale <= max_scale <= 1.0
 
