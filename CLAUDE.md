@@ -1,12 +1,16 @@
-# CanViT-train Development Guide
+# CanViT-pretrain Development Guide
 
 ## Context
 
 Research project, started September 2024. Mostly one person. High cognitive load.
 
-This repo contains CanViT pretraining (`canvit_pretrain/`) and evaluation (`canvit_eval/`) code.
+This repo contains CanViT pretraining code (`canvit_pretrain/`). Evaluation was extracted to a separate repo (see below).
 
-`canvit` (separate repo, in venv) is the core architecture - stabler, cleaner API, geared for future public release. **Will not merge back.** The split is intentional: core arch evolves slower than experiment code.
+`canvit` (separate repo, in venv) is the core architecture package — stabler, cleaner API, geared for future public release. **Will not merge back.** The split is intentional: core arch evolves slower than experiment code.
+
+**Repo ecosystem** (split from the original monolith):
+- **CanViT-eval** (github.com/m2b3/CanViT-eval) — evaluation: batch runs, episode eval, features, tasks, CLI.
+- **CanViT-probes** (github.com/m2b3/CanViT-probes) — probes, datasets, metrics, probe training.
 
 Everything can change. Be ready.
 
@@ -52,11 +56,11 @@ print(dir(bb))  # see available attributes
 "
 ```
 
-Or read source: `.venv/lib/python3.12/site-packages/dinov3/` and `canvit/backbone/dinov3.py`.
+Or read source: `.venv/lib/python3.13/site-packages/dinov3/` and `canvit/backbone/dinov3.py`.
 
 ## CanViT Model Architecture
 
-**⚠️ VERIFY THIS SECTION AGAINST SOURCE CODE** — it can go stale. Check `canvit_pretrain/__init__.py` and canvit source in `.venv/lib/python3.12/site-packages/canvit/`.
+**⚠️ VERIFY THIS SECTION AGAINST SOURCE CODE** — it can go stale. Check `canvit_pretrain/__init__.py` and canvit source in `.venv/lib/python3.13/site-packages/canvit/`.
 
 **Class hierarchy**:
 ```
@@ -90,15 +94,11 @@ RecurrentState(
 ```bash
 uv run pypatree                              # structure
 uv run -m canvit_pretrain.train              # pretraining
-uv run -m canvit_eval.in1k                   # IN1k evaluation
-uv run -m canvit_eval.ade20k --help          # ADE20k (4 subcommands)
-uv run -m canvit_eval.ade20k train           # canvas probe training
-uv run -m canvit_eval.ade20k evaluate        # canvas probe eval (with policy)
-uv run -m canvit_eval.ade20k train-dinov3-probe --resolution 128  # DINOv3 baseline
-uv run -m canvit_eval.ade20k eval-dinov3-probe --probe-ckpt ...   # DINOv3 eval
 COMET_API_KEY=$(cat ~/comet_api_key.txt) uv run ...
 uv run ipython -c "..."                      # quick experiments
 ```
+
+**Evaluation commands live in CanViT-eval** (github.com/m2b3/CanViT-eval). All `canvit_eval.*` modules were extracted there.
 
 ## Conventions
 
