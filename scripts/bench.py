@@ -28,6 +28,7 @@ import torch
 import tyro
 from canvit import create_backbone
 from canvit.viewpoint import Viewpoint
+from canvit_utils.teacher import DINOv3Teacher, load_teacher
 from rich.console import Console
 from rich.table import Table
 from tqdm import tqdm
@@ -97,6 +98,7 @@ class BenchConfig:
     glimpse_grid: int | None = None
     canvas_grid: int | None = None
     backbone_name: str | None = None
+    teacher_repo_id: str | None = None
 
     # Model config - exposed for ablations
     model: CanViTForPretrainingConfig = field(default_factory=_default_model_config)
@@ -122,6 +124,8 @@ class BenchConfig:
             self.canvas_grid = train_cfg.canvas_patch_grid_size
         if self.backbone_name is None:
             self.backbone_name = train_cfg.backbone_name
+        if self.teacher_repo_id is None:
+            self.teacher_repo_id = train_cfg.teacher_repo_id
 
         # Latency mode: BS=1 by DEFINITION
         if self.latency:
@@ -321,14 +325,14 @@ def main(cfg: BenchConfig) -> None:
     assert cfg.batch_size is not None
     assert cfg.glimpse_grid is not None
     assert cfg.canvas_grid is not None
+    assert cfg.teacher_repo_id is not None
 
-    log.info("Creating teacher (ViT backbone for throughput comparison)...")
-    teacher = create_backbone(cfg.backbone_name).to(device).eval()
+    log.info("Loading DINOv3 teacher (for throughput comparison)...")
+    teacher = load_teacher(cfg.teacher_repo_id, device)
     log.info(f"  {teacher.n_blocks} blocks, dim={teacher.embed_dim}")
 
     log.info("Creating CanViT...")
     backbone = create_backbone(cfg.backbone_name)
-    # Update teacher_dim to match actual teacher (in case default 768 differs)
     cfg.model.teacher_dim = teacher.embed_dim
     model = CanViTForPretraining(
         backbone=backbone,
@@ -342,20 +346,20 @@ def main(cfg: BenchConfig) -> None:
     log.info("")
     log.info("Model config:")
     default_cfg = _default_model_config()
-    default_cfg.teacher_dim = teacher.embed_dim  # Fair comparison
+    default_cfg.teacher_dim = teacher.embed_dim
     _log_config_diff(cfg.model, default_cfg)
 
     # Compile
     if not cfg.no_compile:
         log.info("Compiling teacher...")
-        teacher.compile()
+        teacher.model = torch.compile(teacher.model)  # type: ignore[assignment]
         log.info("Compiling CanViT...")
         model.compile()
     else:
         log.info("Skipping compilation (--no-compile)")
 
     # Create inputs
-    patch_size = teacher.patch_size_px
+    patch_size = backbone.patch_size_px
     glimpse_px = cfg.glimpse_grid * patch_size
 
     glimpse = torch.randn(cfg.batch_size, 3, glimpse_px, glimpse_px, device=device)
