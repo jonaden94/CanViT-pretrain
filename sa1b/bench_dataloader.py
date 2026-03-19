@@ -18,11 +18,11 @@ from pathlib import Path
 
 import torch
 import tyro
+from canvit_utils.transforms import preprocess
 from torch.utils.data import DataLoader
 
 from canvit_pretrain.train.data.shards import AllShardsDataset
 from canvit_pretrain.train.data.tar_images import TarImageReader, scan_tar_headers
-from canvit_utils.transforms import preprocess
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
@@ -189,7 +189,7 @@ def main(cfg: Config) -> None:
         bench_serial(shard_path, tar_path, size, cfg.n_serial)
 
     # --- Pipelined DataLoader ---
-    log.info(f"\n--- DataLoader (pipelined) ---")
+    log.info("\n--- DataLoader (pipelined) ---")
     for size in cfg.image_sizes:
         for nw in cfg.workers:
             bench_dataloader(cfg, size, nw, shard_files)

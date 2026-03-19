@@ -43,13 +43,13 @@ import torch
 import tyro
 import xxhash
 from canvit_utils.teacher import load_teacher
-from PIL import Image, ImageFile
+from canvit_utils.transforms import preprocess
+from PIL import ImageFile
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from canvit_pretrain.train.data.tar_images import TarImageReader, scan_tar_headers
-from canvit_utils.transforms import preprocess
 
 STORAGE_DTYPE = torch.float16
 NUMPY_DTYPE = np.float16  # Must match STORAGE_DTYPE

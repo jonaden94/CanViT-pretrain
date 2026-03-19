@@ -100,10 +100,10 @@ def main() -> None:
     if args.limit > 0:
         rows = rows[: args.limit]
 
-    print(f"=== SA-1B Download ===")
+    print("=== SA-1B Download ===")
     print(f"TAR_DIR: {tar_dir}")
     print(f"LINKS:   {links} ({len(rows)} tars to process)")
-    print(f"======================")
+    print("======================")
 
     # Also download sa_images_ids.txt (canonical list of all image IDs) if not present
     with open(links) as f:
@@ -126,7 +126,7 @@ def main() -> None:
                         check=True,
                     )
                 else:
-                    print(f"[skip] sa_images_ids.txt (already exists)")
+                    print("[skip] sa_images_ids.txt (already exists)")
                 break
 
     # --- Cleanup: remove orphaned temp files from interrupted runs ---

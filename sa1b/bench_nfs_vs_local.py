@@ -21,11 +21,11 @@ from pathlib import Path
 
 import torch
 import tyro
+from canvit_utils.transforms import preprocess
 from torch.utils.data import DataLoader
 
 from canvit_pretrain.train.data.shards import AllShardsDataset
 from canvit_pretrain.train.data.tar_images import TarImageReader, scan_tar_headers
-from canvit_utils.transforms import preprocess
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)

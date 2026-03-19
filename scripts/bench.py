@@ -28,7 +28,7 @@ import torch
 import tyro
 from canvit import create_backbone
 from canvit.viewpoint import Viewpoint
-from canvit_utils.teacher import DINOv3Teacher, load_teacher
+from canvit_utils.teacher import load_teacher
 from rich.console import Console
 from rich.table import Table
 from tqdm import tqdm
