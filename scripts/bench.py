@@ -119,7 +119,7 @@ class BenchConfig:
         if self.glimpse_grid is None:
             self.glimpse_grid = train_cfg.glimpse_grid_size
         if self.canvas_grid is None:
-            self.canvas_grid = train_cfg.grid_size
+            self.canvas_grid = train_cfg.canvas_patch_grid_size
         if self.backbone_name is None:
             self.backbone_name = train_cfg.backbone_name
 
@@ -334,7 +334,7 @@ def main(cfg: BenchConfig) -> None:
         backbone=backbone,
         cfg=cfg.model,
         backbone_name=cfg.backbone_name,
-        grid_sizes=[cfg.canvas_grid],
+        canvas_patch_grid_sizes=[cfg.canvas_grid],
     ).to(device).eval()
     log.info(f"  canvas_dim={cfg.model.canvas_dim}, read_after={model.read_after_blocks}")
 
