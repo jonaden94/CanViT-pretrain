@@ -19,7 +19,7 @@ from canvit_pretrain.train.viewpoint import (
     random_viewpoint,
     viewpoint_to_pixel_box,
 )
-from canvit_pretrain.train.viz import imagenet_denormalize, timestep_colors
+from canvit_pretrain.train.viz import imagenet_denormalize_to_numpy, timestep_colors
 
 # === Data Tests ===
 
@@ -250,11 +250,11 @@ class TestPixelBox:
 
 # === Viz Tests ===
 
-class TestImagenetDenormalize:
+class TestImagenetDenormalizeToNumpy:
     def test_output_range(self) -> None:
-        # Input is [3, H, W], output is [H, W, 3]
+        # Input is [3, H, W], output is [H, W, 3] numpy
         x = torch.zeros(3, 4, 4)
-        out = imagenet_denormalize(x)
+        out = imagenet_denormalize_to_numpy(x)
         assert out.shape == (4, 4, 3)
 
 

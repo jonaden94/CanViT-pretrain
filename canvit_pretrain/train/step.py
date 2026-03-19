@@ -16,7 +16,7 @@ from canvit_pretrain import CanViTForPretraining
 
 from .viewpoint import Viewpoint as NamedViewpoint
 from .viewpoint import ViewpointType
-from .viz.image import imagenet_denormalize
+from .viz.image import imagenet_denormalize_to_numpy
 from .viz.sample import VizSampleData, extract_sample0_viz
 
 
@@ -191,7 +191,7 @@ def training_step(
             init_scene = model.predict_teacher_scene(state_init.canvas)
             init_spatial = model.get_spatial(state_init.canvas[0:1])[0]
             viz_data = TrainVizData(
-                image=imagenet_denormalize(images[0].cpu()).numpy(),
+                image=imagenet_denormalize_to_numpy(images[0]),
                 teacher_features=scene_target[0].cpu().float().numpy(),
                 viewpoints=[],
                 viz_samples=[],

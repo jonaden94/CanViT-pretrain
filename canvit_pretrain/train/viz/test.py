@@ -3,7 +3,7 @@
 import numpy as np
 import torch
 
-from canvit_pretrain.train.viz.image import imagenet_denormalize
+from canvit_pretrain.train.viz.image import imagenet_denormalize_to_numpy
 from canvit_pretrain.train.viz.metrics import compute_spatial_stats, cosine_dissimilarity
 from canvit_pretrain.train.viz.pca import fit_pca, pca_rgb
 from canvit_pretrain.train.viz.plot import timestep_colors
@@ -42,15 +42,15 @@ class TestPcaRgb:
         assert np.allclose(rgb, 0.5)
 
 
-class TestImagenetDenormalize:
+class TestImagenetDenormalizeToNumpy:
     def test_output_shape(self) -> None:
         t = torch.zeros(3, 4, 4)
-        out = imagenet_denormalize(t)
+        out = imagenet_denormalize_to_numpy(t)
         assert out.shape == (4, 4, 3)
 
     def test_output_range(self) -> None:
         t = torch.randn(3, 8, 8)
-        out = imagenet_denormalize(t)
+        out = imagenet_denormalize_to_numpy(t)
         assert out.min() >= 0.0
         assert out.max() <= 1.0
 

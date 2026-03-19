@@ -38,7 +38,7 @@ from canvit_pretrain.train.viewpoint import (
 from canvit_pretrain.train.viz import (
     TimestepPredictions,
     fit_pca,
-    imagenet_denormalize,
+    imagenet_denormalize_to_numpy,
     pca_rgb,
     plot_multistep_pca,
     plot_pca_grid,
@@ -78,7 +78,7 @@ __all__ = [
     # Viz
     "TimestepPredictions",
     "fit_pca",
-    "imagenet_denormalize",
+    "imagenet_denormalize_to_numpy",
     "pca_rgb",
     "plot_multistep_pca",
     "plot_pca_grid",

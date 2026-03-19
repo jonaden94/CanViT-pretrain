@@ -1,7 +1,7 @@
 """Visualization utilities for training."""
 
 from .comet import log_curve, log_figure
-from .image import imagenet_denormalize
+from .image import imagenet_denormalize_to_numpy
 from .metrics import compute_spatial_stats, cosine_dissimilarity
 from .pca import fit_pca, pca_rgb
 from .plot import (
@@ -20,7 +20,7 @@ __all__ = [
     "log_curve",
     "log_figure",
     # image
-    "imagenet_denormalize",
+    "imagenet_denormalize_to_numpy",
     # metrics
     "compute_spatial_stats",
     "cosine_dissimilarity",

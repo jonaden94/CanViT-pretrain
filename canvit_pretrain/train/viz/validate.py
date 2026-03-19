@@ -27,7 +27,7 @@ from ..probe import (
 )
 from ..viewpoint import make_eval_viewpoints
 from .comet import log_curve, log_figure
-from .image import imagenet_denormalize
+from .image import imagenet_denormalize_to_numpy
 from .plot import TimestepPredictions, plot_multistep_pca
 from .sample import VizSampleData, extract_sample0_viz
 
@@ -288,7 +288,7 @@ def validate(
                 H, W = images.shape[-2], images.shape[-1]
                 boxes = [vp.to_pixel_box(0, H, W) for vp in viewpoints]
                 names = [vp.name for vp in viewpoints]
-                full_img = imagenet_denormalize(images[0].cpu()).numpy()
+                full_img = imagenet_denormalize_to_numpy(images[0])
                 glimpse_grid_size = glimpse_size_px // model.backbone.patch_size_px
 
                 _log_pca(
