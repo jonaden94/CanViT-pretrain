@@ -83,7 +83,10 @@ def bench_mmap_sequential(path: Path, label: str, chunk_bytes: int = 6_291_456, 
     mm.close()
     fd.close()
     mb_s = total_bytes / elapsed / 1e6
-    log.info(f"  {label}: {n_chunks} × {chunk_bytes/1e6:.1f}MB = {total_bytes/1e6:.0f}MB in {elapsed:.2f}s → {mb_s:.0f} MB/s")
+    log.info(
+        f"  {label}: {n_chunks} \u00d7 {chunk_bytes/1e6:.1f}MB = {total_bytes/1e6:.0f}MB"
+        f" in {elapsed:.2f}s \u2192 {mb_s:.0f} MB/s"
+    )
     return mb_s
 
 
@@ -142,7 +145,10 @@ def bench_serial_breakdown(shard_path: Path, tar_path: Path, size: int, n: int, 
     log.info(f"  Serial [{label}] ({n} imgs @ {size}px):")
     log.info(f"    read_image:    {t_read/n*1000:.1f}ms/img  {t_read/total*100:.0f}%  {jpeg_bytes/t_read/1e6:.0f} MB/s")
     log.info(f"    transform:     {t_transform/n*1000:.1f}ms/img  {t_transform/total*100:.0f}%")
-    log.info(f"    patches clone: {t_patches/n*1000:.1f}ms/img  {t_patches/total*100:.0f}%  {n*patch_bytes_each/t_patches/1e6:.0f} MB/s")
+    log.info(
+        f"    patches clone: {t_patches/n*1000:.1f}ms/img  {t_patches/total*100:.0f}%"
+        f"  {n*patch_bytes_each/t_patches/1e6:.0f} MB/s"
+    )
     log.info(f"    TOTAL: {n/total:.1f} img/s serial")
 
 

@@ -307,7 +307,10 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             optimizer, cfg.warmup_steps, cfg.cosine_total_steps, cfg.peak_lr,
             start_lr=cfg.start_lr,
         )
-        log.info(f"Optimizer: AdamW, lr={start_lr:.2e}→{cfg.peak_lr:.2e}→0 (cosine, {cfg.cosine_total_steps} steps), wd={cfg.weight_decay:.2e}")
+        log.info(
+            f"Optimizer: AdamW, lr={start_lr:.2e}\u2192{cfg.peak_lr:.2e}\u21920 "
+            f"(cosine, {cfg.cosine_total_steps} steps), wd={cfg.weight_decay:.2e}"
+        )
     else:
         scheduler = warmup_constant_scheduler(
             optimizer, cfg.warmup_steps, cfg.peak_lr,

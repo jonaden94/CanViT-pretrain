@@ -102,7 +102,10 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
                 )
 
             if worker_id == 0:
-                log.info(f"Shard {shard_idx}/{n_shards} ({shard_path.name}): {n_samples} samples, loaded in {t_load:.3f}s")
+                log.info(
+                    f"Shard {shard_idx}/{n_shards} ({shard_path.name}): "
+                    f"{n_samples} samples, loaded in {t_load:.3f}s"
+                )
                 if failed_indices:
                     log.warning(f"  {len(failed_indices)} pre-marked failures")
 

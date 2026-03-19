@@ -101,9 +101,18 @@ def bench_serial(shard_path: Path, tar_path: Path, size: int, n: int) -> None:
 
     total = t_read + t_transform + t_patches + t_cls
     log.info(f"  Serial breakdown ({n} imgs @ {size}px):")
-    log.info(f"    read_image (mmap+decode): {t_read:.2f}s  {t_read/n*1000:.1f}ms/img  {t_read/total*100:.0f}%  {jpeg_bytes_total/t_read/1e6:.0f} MB/s")
-    log.info(f"    transform (resize+crop):  {t_transform:.2f}s  {t_transform/n*1000:.1f}ms/img  {t_transform/total*100:.0f}%")
-    log.info(f"    patches clone (mmap→RAM): {t_patches:.2f}s  {t_patches/n*1000:.1f}ms/img  {t_patches/total*100:.0f}%  {patches_bytes_total/t_patches/1e6:.0f} MB/s")
+    log.info(
+        f"    read_image (mmap+decode): {t_read:.2f}s  {t_read/n*1000:.1f}ms/img"
+        f"  {t_read/total*100:.0f}%  {jpeg_bytes_total/t_read/1e6:.0f} MB/s"
+    )
+    log.info(
+        f"    transform (resize+crop):  {t_transform:.2f}s"
+        f"  {t_transform/n*1000:.1f}ms/img  {t_transform/total*100:.0f}%"
+    )
+    log.info(
+        f"    patches clone (mmap\u2192RAM): {t_patches:.2f}s  {t_patches/n*1000:.1f}ms/img"
+        f"  {t_patches/total*100:.0f}%  {patches_bytes_total/t_patches/1e6:.0f} MB/s"
+    )
     log.info(f"    cls clone:               {t_cls:.2f}s  {t_cls/n*1000:.1f}ms/img")
     log.info(f"    TOTAL:                   {total:.2f}s  {n/total:.1f} img/s serial")
     log.info(f"    JPEG input: {jpeg_bytes_total/1e6:.0f} MB total, avg {jpeg_bytes_total/n/1e3:.0f} KB/img")
@@ -162,7 +171,10 @@ def bench_dataloader(cfg: Config, size: int, num_workers: int, shard_files: list
     log.info(f"    Creation:    {t_create:.2f}s")
     log.info(f"    First batch: {t_first:.2f}s ({cfg.batch_size} imgs)")
     if t_steady > 0:
-        log.info(f"    Steady-state: {steady_imgs} imgs in {t_steady:.2f}s → {steady_imgs/t_steady:.1f} img/s, {steady_mb/t_steady:.0f} MB/s output")
+        log.info(
+            f"    Steady-state: {steady_imgs} imgs in {t_steady:.2f}s "
+            f"\u2192 {steady_imgs/t_steady:.1f} img/s, {steady_mb/t_steady:.0f} MB/s output"
+        )
     log.info(f"    Shapes: img={list(img_t.shape)}, patches={list(patches_t.shape)}, cls={list(cls_t.shape)}")
     log.info(f"    RSS (main+workers): {rss:.0f} MB")
 

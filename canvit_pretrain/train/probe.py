@@ -28,7 +28,9 @@ PROBE_REGISTRY: dict[str, ProbeInfo] = {
 # Verify registry consistency at import time
 for teacher_name, info in PROBE_REGISTRY.items():
     expected_res_str = f"{info.resolution}x{info.resolution}"
-    assert expected_res_str in info.repo, f"Probe {teacher_name}: resolution {info.resolution} not in repo name {info.repo}"
+    assert expected_res_str in info.repo, (
+        f"Probe {teacher_name}: resolution {info.resolution} not in repo name {info.repo}"
+    )
 
 
 class TopKPrediction(NamedTuple):
