@@ -1,7 +1,7 @@
 """Tests for canvit_pretrain.train module."""
 
 import torch
-from canvit_utils.transforms import preprocess
+from canvit_pytorch.preprocess import preprocess
 from PIL import Image
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torch import Tensor

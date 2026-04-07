@@ -17,7 +17,7 @@ import torch
 
 # Import exact same dataset class as export
 sys.path.insert(0, str(Path(__file__).parent))
-from canvit_utils.teacher import load_teacher
+from canvit_pytorch.teacher import load_teacher
 from export_in21k_features import ImageDataset
 
 

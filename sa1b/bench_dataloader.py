@@ -18,7 +18,7 @@ from pathlib import Path
 
 import torch
 import tyro
-from canvit_utils.transforms import preprocess
+from canvit_pytorch.preprocess import preprocess
 from torch.utils.data import DataLoader
 
 from canvit_pretrain.train.data.shards import AllShardsDataset

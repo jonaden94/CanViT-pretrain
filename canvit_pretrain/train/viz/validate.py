@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from canvit_pytorch import CanViTOutput, CLSStandardizer, PatchStandardizer, RecurrentState
 from canvit_pytorch.backbone.vit import NormFeatures
 from canvit_pytorch.viewpoint import Viewpoint as CanvitViewpoint
-from canvit_utils.teacher import DINOv3Teacher
+from canvit_pytorch.teacher import DINOv3Teacher
 from dinov3_in1k_probes import DINOv3LinearClassificationHead
 from torch import Tensor
 from ytch.correctness import assert_shape

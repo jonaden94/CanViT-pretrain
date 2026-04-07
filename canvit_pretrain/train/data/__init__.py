@@ -10,7 +10,7 @@ from torch import Tensor
 
 if TYPE_CHECKING:
     from ..config import Config
-from canvit_utils.transforms import preprocess
+from canvit_pytorch.preprocess import preprocess
 from torch.utils.data import DataLoader, Dataset
 
 from drac_imagenet import IndexedImageFolder

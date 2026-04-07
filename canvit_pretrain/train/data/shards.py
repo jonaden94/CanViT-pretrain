@@ -19,7 +19,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import torch
-from canvit_utils.transforms import preprocess
+from canvit_pytorch.preprocess import preprocess
 from PIL import Image
 from torch import Tensor
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
