@@ -119,7 +119,7 @@ Check Comet, logs, and cluster state to confirm current status.
 ## Tensions / Open Questions
 
 1. **Shuffling**: SA-1B images within a tar are geographically correlated (contiguous IDs = same region). No shuffle for now — verified visually that 4 sequential images look diverse enough. Revisit if loss curves show issues.
-2. **Variable shard sizes**: `ShardedFeatureLoader` assumes uniform shard sizes (line 132). SA-1B shards are ~11,186 but not guaranteed identical. Should be fine for first run.
+2. **Variable shard sizes**: `ShardedFeatureLoader` assumes uniform shard sizes — grep for the `shard_size` multiplication in the class. SA-1B shards are ~11,186 but not guaranteed identical. Should be fine for first run.
 3. **Batch size at 1024px**: 64 @ 512px uses 18.4 GB. At 1024px/grid64, canvas is 4x larger. ~50-70 GB estimated. Should fit H100 80GB. May need to reduce if OOM.
 4. **Training memory**: 256G requested (tuned up from 48G through multiple OOM rounds). Shards and tars are mmap'd (shared via COW). Export needs 48G.
 5. **Warmup for continual pretraining**: Set to 2000 steps in `sa1b/train.sh` (down from default 100K).
