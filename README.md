@@ -88,14 +88,12 @@ Every field in `canvit_pretrain.train.config.Config` becomes a `--kebab-case-fla
 
 ### Hyperparameters
 
-The `Config` dataclass in `canvit_pretrain/train/config.py` is the source of truth for every hyperparameter, with inline comments documenting provenance (e.g. `weight_decay = 1e-4` is annotated as "used for the published 2M-step flagship run").
-
-Read defaults + CLI flag names directly:
+Every field of `canvit_pretrain.train.config.Config` is a `--kebab-case-flag`. Introspect defaults via:
 ```bash
 uv run python -m canvit_pretrain.train --help
 ```
 
-Teacher features for a new teacher / scene resolution / dataset combination require re-running Phase 1 first.
+New teacher / scene resolution / dataset → re-run Phase 1 first.
 
 ## Interactive dev
 

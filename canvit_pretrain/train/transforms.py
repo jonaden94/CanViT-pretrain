@@ -1,6 +1,6 @@
 """ImageNet transforms for pretraining."""
 
-from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from canvit_pytorch.preprocess import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torchvision import transforms
 
 

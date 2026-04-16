@@ -3,7 +3,7 @@
 import torch
 from canvit_pytorch.preprocess import preprocess
 from PIL import Image
-from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from canvit_pytorch.preprocess import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torch import Tensor
 from torchvision import transforms
 
