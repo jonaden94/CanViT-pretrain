@@ -86,36 +86,14 @@ sbatch --array=0-2%1 --time=00:10:00 slurm/train.sbatch --steps-per-job 10
 
 Every field in `canvit_pretrain.train.config.Config` becomes a `--kebab-case-flag` via `tyro`; the sbatch passes `"$@"` through to the Python command.
 
-### Flagship hyperparameters
+### Hyperparameters
 
-Defaults in `canvit_pretrain/train/config.py` (`Config` dataclass) for the published 2 M-step CanViT-B pretraining:
+The `Config` dataclass in `canvit_pretrain/train/config.py` is the source of truth for every hyperparameter, with inline comments documenting provenance (e.g. `weight_decay = 1e-4` is annotated as "used for the published 2M-step flagship run").
 
-| Field | Default |
-|---|---|
-| `teacher_repo_id` | `facebook/dinov3-vitb16-pretrain-lvd1689m` |
-| `backbone_name` | `vitb16` |
-| `glimpse_grid_size` | 8 (so $128^2$ px glimpses at 16 px patches) |
-| `canvas_patch_grid_size` | 32 |
-| `scene_resolution` | 512 |
-| `batch_size` | 64 |
-| `peak_lr` | 4e-4 |
-| `warmup_steps` | 100 000 |
-| `cosine_total_steps` | `None` (constant LR after warmup; set to enable cosine decay) |
-| `weight_decay` | 1e-4 (note in config: `1e-4` was used for the published 2M-step flagship run) |
-| `min_viewpoint_scale` | 0.05 |
-| `n_full_start_branches` | 1 (F-IID branch) |
-| `n_random_start_branches` | 1 (R-IID branch) |
-| `chunk_size` | 2 |
-| `continue_prob` | 0.5 |
-| `enable_scene_patches_loss` | True |
-| `enable_scene_cls_loss` | True |
-| `grad_clip` | 1.0 |
-| `steps_per_job` | 4992 |
-| `compile` | True |
-| `amp` | True (bf16 autocast) |
-| `val_every` | 1000 |
-| `log_every` | 20 |
-| `comet_project` | `canvit-pretrain` |
+Read defaults + CLI flag names directly:
+```bash
+uv run python -m canvit_pretrain.train --help
+```
 
 Teacher features for a new teacher / scene resolution / dataset combination require re-running Phase 1 first.
 
@@ -129,23 +107,14 @@ Inside the allocation, `.envrc` is loaded by `source slurm/env.sh` (which is wha
 
 ## Repository layout
 
+```bash
+uv run pypatree    # full current module tree
 ```
-canvit_pretrain/train/
-  __main__.py, config.py, loop.py, step.py, model.py, scheduler.py,
-  probe.py, transforms.py, viewpoint.py, ema.py, data/, viz/
-canvit_pretrain/checkpoint/     # CheckpointData format
-scripts/
-  export_in21k_features.py      # Phase 1 entry
-  push_ablation_checkpoints.py
-  bench.py, bench_dataloader.py, inspect_ckpt.py, validate_features.py
-slurm/
-  train.sbatch                  # Phase 2 entry (array job)
-  export_features.sh            # Phase 1 entry (array job)
-  env.sh                        # sources .envrc, uv cache/venv, uv sync
-  interactive.sh                # salloc wrapper
-  ablations/                    # per-ablation sbatch variants
-.envrc.nibi                     # env-var template (copy to .envrc on Nibi)
-```
+
+Entry points (invariant enough to name here):
+- `canvit_pretrain.train` — Phase 2 entry, called by `slurm/train.sbatch`.
+- `scripts/export_in21k_features.py` — Phase 1 entry, called by `slurm/export_features.sh`.
+- `.envrc.nibi` — env-var template (copy to `.envrc` on Nibi).
 
 ## Related repos
 
