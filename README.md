@@ -53,6 +53,21 @@ The sbatch passes `"$@"` straight through. See `slurm/train.sbatch`'s header for
 
 Switching teacher / resolution / dataset requires re-running Phase 1.
 
+### Phase 2b — Ablations
+
+Each ablation is a variant of the flagship run (same harness, one parameter
+changed). Submit individually:
+
+```bash
+bash slurm/ablations/baseline.sh
+bash slurm/ablations/no-bptt.sh
+# ... one script per variant
+```
+
+Shared config (array size, warmup, run-name prefix) lives in
+`slurm/ablations/common.sh`; each variant script documents what it changes
+in a one-line header comment.
+
 ## Interactive dev
 
 ```bash
