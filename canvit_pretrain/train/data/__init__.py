@@ -1,5 +1,3 @@
-"""Data loading utilities for AVP training."""
-
 import logging
 import tempfile
 from collections.abc import Iterator

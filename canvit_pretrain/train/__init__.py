@@ -1,9 +1,3 @@
-"""Training utilities for AVP-ViT.
-
-This module provides the main training loop and supporting utilities.
-Entry point: python -m canvit_pretrain.train
-"""
-
 from canvit_pretrain.train.data import (
     Batch,
     InfiniteLoader,
