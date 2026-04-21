@@ -66,9 +66,8 @@ exclude = ["throwaway", "misc"]
 select = ["E", "F", "I", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
-# These files set torch._functorch.config before imports (required).
+# Sets torch._functorch.config before imports (required).
 "canvit_pretrain/train/loop.py" = ["E402"]
-"scripts/bench.py" = ["E402"]
 
 [tool.basedpyright]
 typeCheckingMode = "standard"
