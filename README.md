@@ -91,7 +91,7 @@ uv run pypatree
 | Repo | Role |
 |------|------|
 | [CanViT-PyTorch](https://github.com/m2b3/CanViT-PyTorch) (public, canonical) | Core model + policies |
-| [CanViT-specialize](https://github.com/m2b3/CanViT-specialize) | Probes, datasets, IoU metrics, IN1K finetuning |
+| [CanViT-specialize](https://github.com/m2b3/CanViT-specialize) | Probes, datasets, IoU metrics, IN1k finetuning |
 | [CanViT-eval](https://github.com/m2b3/CanViT-eval) | Evaluation (produces `.pt` result files) |
-| [dinov3-in1k-probes](https://github.com/yberreby/dinov3-in1k-probes) | DINOv3 IN1K linear probes (baselines) |
+| [dinov3-in1k-probes](https://github.com/yberreby/dinov3-in1k-probes) | DINOv3 IN1k linear probes (baselines) |
 | [CanViT-Toward-AVFMs](https://github.com/m2b3/CanViT-Toward-AVFMs) | Paper pipeline |
