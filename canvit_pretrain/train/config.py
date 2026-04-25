@@ -66,7 +66,7 @@ class Config:
     """Seed model weights from external checkpoint (.pt in CheckpointData format).
     Starts fresh (new experiment, step=0). Only used if no checkpoint exists in run_dir."""
     hf_seed_ckpt: str | None = None
-    """Seed model weights from HF Hub repo (e.g. 'canvit/canvitb16-add-vpe-...'). Downloads
+    """Seed model weights from HF Hub repo (e.g. '<org>/canvitb16-add-vpe-...'). Downloads
     config.json + model.safetensors, overrides cfg.model with the checkpoint's config.
     Mutually exclusive with seed_ckpt."""
     reset_normalizer: bool = False
