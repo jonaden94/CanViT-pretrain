@@ -211,7 +211,7 @@ def save(
 
 
 def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
-    """Load checkpoint data. All fields are required — no silent fallbacks."""
+    """Load checkpoint data. All fields are required."""
     log.info(f"Loading checkpoint: {path}")
     raw = torch.load(path, weights_only=False, map_location=device)
 
