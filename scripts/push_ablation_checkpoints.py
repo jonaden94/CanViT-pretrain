@@ -1,15 +1,13 @@
-"""Push ablation checkpoints to private HuggingFace Hub repos.
+"""Push ablation checkpoints to HuggingFace Hub.
 
-Handles legacy standardizer migration in-memory — works on both raw
-(un-migrated) and migrated checkpoints. No separate migration step needed.
+Migrates legacy standardizers in-memory, so the same script handles raw
+and migrated checkpoints uniformly.
 
 Naming: {owner}/canvitb16-abl-{slug}-{YYYYMMDD}
   Date from checkpoint timestamp. Slug from registry.
 
 Usage:
-    uv run python scripts/push_ablation_checkpoints.py \
-        --ckpt-dir ~/projects/canvit-eval-workspace/ablation_checkpoints/ \
-        --dry-run
+    uv run python scripts/push_ablation_checkpoints.py --ckpt-dir <path> --dry-run
 """
 
 import logging
