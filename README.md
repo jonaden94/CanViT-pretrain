@@ -1,16 +1,8 @@
 # CanViT-pretrain
 
-Passive-to-active dense latent distillation
-of CanViT
+Passive-to-active dense latent distillation of [CanViT](https://github.com/m2b3/CanViT-PyTorch) from [DINOv3](https://github.com/facebookresearch/dinov3) ([paper](https://arxiv.org/abs/2508.10104)).
 
-
-from DINOv3.
-
-Model lives in [CanViT-PyTorch](https://github.com/m2b3/CanViT-PyTorch).
-
-This repository
-was originally designed to run on [the Nibi SLURM cluster](https://docs.alliancecan.ca/wiki/Nibi)
-using its [hosted ImageNet-21k `winter21_whole` replica](https://docs.alliancecan.ca/wiki/ImageNet).
+Originally designed to run on [the Nibi SLURM cluster](https://docs.alliancecan.ca/wiki/Nibi) using its [hosted ImageNet-21k `winter21_whole` replica](https://docs.alliancecan.ca/wiki/ImageNet).
 
 ## Setup
 
