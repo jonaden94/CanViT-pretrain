@@ -119,7 +119,7 @@ requires-dist = [
     { name = "comet-ml" },
     { name = "dacite" },
     { name = "dinov3", git = "https://github.com/yberreby/dinov3.git" },
-    { name = "dinov3-in1k-probes", git = "https://github.com/yberreby/dinov3-in1k-probes.git" },
+    { name = "dinov3-in1k-probes", git = "https://github.com/m2b3/dinov3-in1k-probes.git" },
     { name = "huggingface-hub" },
     { name = "matplotlib" },
     { name = "omegaconf" },
@@ -152,7 +152,7 @@ dev = [
 [[package]]
 name = "canvit-pytorch"
 version = "0.1.9"
-source = { git = "https://github.com/m2b3/CanViT-PyTorch.git#10deb59d708354fa13a3b0aa4db6226729fc7fd6" }
+source = { git = "https://github.com/m2b3/CanViT-PyTorch.git#7937b73b97a8896ba10b89b3c70af5f38247f22f" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "numpy" },
@@ -585,7 +585,7 @@ dependencies = [
 [[package]]
 name = "dinov3-in1k-probes"
 version = "0.1.0"
-source = { git = "https://github.com/yberreby/dinov3-in1k-probes.git#09bbd8c84816daf61b61e735025d0cf0a4cbd517" }
+source = { git = "https://github.com/m2b3/dinov3-in1k-probes.git#fafeee148616895c4e8071fb84f86cf4c1cb50f4" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "numpy" },

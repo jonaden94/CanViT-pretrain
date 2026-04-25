@@ -6,6 +6,7 @@ from typing import NamedTuple
 import torch
 import torch.nn.functional as F
 from dinov3_in1k_probes import DINOv3LinearClassificationHead
+from dinov3_in1k_probes.repos import probe_repo
 from torch import Tensor
 from torchvision.models import ResNet50_Weights
 
@@ -18,19 +19,12 @@ class ProbeInfo(NamedTuple):
     resolution: int  # Image resolution the probe was trained at (pixels)
 
 
-# All probes trained at 512x512 - resolution is in the repo name for verification
+# All probes trained at 512x512.
 PROBE_REGISTRY: dict[str, ProbeInfo] = {
-    "dinov3_vits16": ProbeInfo("yberreby/dinov3-vits16-lvd1689m-in1k-512x512-linear-clf-probe", 512),
-    "dinov3_vitb16": ProbeInfo("yberreby/dinov3-vitb16-lvd1689m-in1k-512x512-linear-clf-probe", 512),
-    "dinov3_vitl16": ProbeInfo("yberreby/dinov3-vitl16-lvd1689m-in1k-512x512-linear-clf-probe", 512),
+    "dinov3_vits16": ProbeInfo(probe_repo("vits16"), 512),
+    "dinov3_vitb16": ProbeInfo(probe_repo("vitb16"), 512),
+    "dinov3_vitl16": ProbeInfo(probe_repo("vitl16"), 512),
 }
-
-# Verify registry consistency at import time
-for teacher_name, info in PROBE_REGISTRY.items():
-    expected_res_str = f"{info.resolution}x{info.resolution}"
-    assert expected_res_str in info.repo, (
-        f"Probe {teacher_name}: resolution {info.resolution} not in repo name {info.repo}"
-    )
 
 
 class TopKPrediction(NamedTuple):
