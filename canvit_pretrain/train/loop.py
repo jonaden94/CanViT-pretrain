@@ -98,8 +98,8 @@ def init_normalizer_stats_from_shard(
 ) -> None:
     """Initialize normalizer stats from one precomputed shard.
 
-    Uses mmap + subset to avoid loading the full shard into memory.
-    SA-1B shards are ~70 GB; loading fully would OOM on any device.
+    Uses mmap + subset to avoid loading the full shard into memory
+    (shards may be tens of GB).
     """
     log.info(f"Computing normalizer stats from shard: {shard_path.name}")
     shard = torch.load(shard_path, map_location="cpu", weights_only=False, mmap=True)

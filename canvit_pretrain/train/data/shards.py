@@ -8,8 +8,8 @@ Design:
 - Persistent workers work naturally (dataset controls iteration)
 
 Image sources:
-- image_root (IN21k): images on filesystem, loaded via PIL
-- tar_dir (SA-1B): images read directly from mmap'd tar files, no extraction
+- image_root: images on filesystem, loaded via PIL
+- tar_dir: images read directly from mmap'd tar files, no extraction
 """
 
 import logging
@@ -216,7 +216,7 @@ class ShardedFeatureLoader:
         assert self.shard_files, f"No usable shards in {shards_dir}"
 
         # Read first shard to get samples_per_shard (all shards same size)
-        # mmap=True: SA-1B shards are ~70 GB, don't load into RAM just to count samples
+        # mmap=True: shards may be tens of GB, don't load into RAM just to count samples
         first_shard = torch.load(self.shard_files[0], map_location="cpu", weights_only=False, mmap=True)
         self.samples_per_shard = len(first_shard["paths"])
         del first_shard

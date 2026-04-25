@@ -1,15 +1,12 @@
-"""Read images directly from mmap'd SA-1B tar files. No extraction needed.
+"""Read images directly from mmap'd tar files. No extraction needed.
 
-Each SA-1B tar (~70 GB) contains ~11k JPEGs + ~11k JSONs. We scan headers
-to build a {name: (offset, size)} index, then read images via mmap slicing.
-Forked DataLoader workers share mmap'd pages (copy-on-write).
+Scan tar headers to build a {name: (offset, size)} index, then read images
+via mmap slicing. Forked DataLoader workers share mmap'd pages (copy-on-write).
 
-Two ways to get a TarIndex:
-  scan_tar_headers(tar_path)  — scan tar file (~56s). For export/bench.
-  load_tar_index(tar_path)    — load .idx file (~0.01s). For training.
+scan_tar_headers(tar_path) — slow header scan; for export/bench.
+load_tar_index(tar_path)   — instant load from .idx file; for training.
 
-.idx files are created by sa1b/build_tar_indexes.py and include SHA256
-and file size for integrity. Training asserts they exist.
+.idx files are produced by sa1b/build_tar_indexes.py with SHA256 + size.
 """
 
 import io
@@ -31,7 +28,7 @@ TarIndex = dict[str, tuple[int, int]]
 def scan_tar_headers(tar_path: Path) -> TarIndex:
     """Scan tar headers → {stripped_name: (data_offset, data_size)}.
 
-    Slow (~56s for 70 GB tar). Use for export scripts and benchmarks.
+    Slow on large tars. Use for export scripts and benchmarks.
     For training, use load_tar_index() instead.
     """
     t0 = time.perf_counter()
