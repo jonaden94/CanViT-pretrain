@@ -1,4 +1,4 @@
-"""CanViT pretraining training loop: data, probe, scheduler, transforms, viewpoint, viz."""
+"""CanViT pretraining training loop: data, probe, scheduler, viewpoint, viz."""
 
 from canvit_pretrain.train.data import (
     Batch,
