@@ -36,3 +36,7 @@ bash slurm/ablations/baseline.sh
 bash slurm/ablations/no-bptt.sh
 # ...
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE) for details.
