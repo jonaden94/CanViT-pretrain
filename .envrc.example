@@ -1,5 +1,5 @@
-# Nibi cluster environment variables.
-# Copy to .envrc: cp .envrc.nibi .envrc && direnv allow
+# Copy to .envrc and tailor for your cluster: cp .envrc.example .envrc && direnv allow
+# Values below are the Nibi defaults.
 
 # Caches
 export HF_HOME="$SCRATCH/.huggingface"
@@ -22,6 +22,10 @@ export SA1B_FEATURES_DIR=~/projects/def-areynaud/dinov3_dense_features
 # Known checkpoints
 export DINOV3_VITB16_CKPT="$CHECKPOINTS_DIR/dinov3/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth"
 export CANVIT_FLAGSHIP_CKPT="$CHECKPOINTS_DIR/CanViT-flagship.pt"
+
+# Comet
+export COMET_WORKSPACE=m2b3-ava
+export COMET_PROJECT=canvit-pretrain
 
 # Credentials (optional)
 # NOTE: every line must be safe under `set -e`. A bare `cmd1 && cmd2` that
