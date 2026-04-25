@@ -24,7 +24,7 @@ export DINOV3_VITB16_CKPT="$CHECKPOINTS_DIR/dinov3/dinov3_vitb16_pretrain_lvd168
 export CANVIT_FLAGSHIP_CKPT="$CHECKPOINTS_DIR/CanViT-flagship.pt"
 
 # Comet
-export COMET_WORKSPACE=m2b3-ava
+export COMET_WORKSPACE=your-workspace
 export COMET_PROJECT_NAME=canvit-pretrain
 
 # Credentials (optional)
