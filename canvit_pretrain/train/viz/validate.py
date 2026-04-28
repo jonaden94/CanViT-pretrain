@@ -4,7 +4,6 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-import comet_ml
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -25,6 +24,7 @@ from ..probe import (
     get_top_k_predictions,
     labels_are_in1k,
 )
+from ..tracker import Tracker
 from ..viewpoint import make_eval_viewpoints
 from .comet import log_curve, log_figure
 from .image import imagenet_denormalize_to_numpy
@@ -56,7 +56,7 @@ class ValAccumulator:
 
 def _log_pca(
     *,
-    exp: comet_ml.CometExperiment,
+    exp: Tracker,
     step: int,
     prefix: str,
     acc: ValAccumulator,
@@ -135,7 +135,7 @@ def _log_pca(
 
 def validate(
     *,
-    exp: comet_ml.CometExperiment,
+    exp: Tracker,
     step: int,
     model: CanViTForPretraining,
     compute_raw_targets: Callable[[Tensor, int], "NormFeatures"],

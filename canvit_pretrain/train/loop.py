@@ -17,7 +17,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
 
-import comet_ml
 import dacite
 import optuna
 import torch
@@ -64,6 +63,7 @@ from .model import compile_model, compile_teacher, create_model, load_student_ba
 from .probe import load_probe  # noqa: E402
 from .scheduler import warmup_constant_scheduler, warmup_cosine_scheduler  # noqa: E402
 from .step import training_step  # noqa: E402
+from .tracker import make_tracker  # noqa: E402
 from .utils import count_parameters  # noqa: E402
 from .viz import log_figure, plot_multistep_pca, validate  # noqa: E402
 
@@ -214,12 +214,14 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     else:
         log.info("FRESH mode: no checkpoint, starting from scratch")
 
-    # Load checkpoint BEFORE creating Comet experiment
+    # Load checkpoint BEFORE creating tracker
     ckpt_data: CheckpointData | None = None
     prev_comet_id: str | None = None
+    prev_wandb_id: str | None = None
     if ckpt_path_to_load is not None:
         ckpt_data = load_checkpoint(ckpt_path_to_load, cfg.device)
         prev_comet_id = ckpt_data["comet_id"]
+        prev_wandb_id = ckpt_data.get("wandb_run_id")
         # Override cfg.model from checkpoint — model arch MUST match saved weights.
         # Without this, CLI defaults (e.g. convex) override the checkpoint's config
         # (e.g. additive), causing missing/unexpected keys on load_state_dict.
@@ -229,26 +231,21 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                         f"now {ckpt_model_cfg.canvas_update_mode})")
             cfg.model = ckpt_model_cfg
 
-    # === COMET EXPERIMENT ===
-    # RESUME mode: continue existing experiment. SEED/FRESH mode: new experiment.
-    # Non-main ranks get a no-op DummyExperiment so all loop calls remain
-    # unconditional below (no rank guards on `exp.log_*`).
-    if ddp.is_main():
-        comet_cfg = comet_ml.ExperimentConfig(auto_metric_logging=False)
-        if prev_comet_id is not None and not is_seeding:
-            log.info(f"Continuing Comet experiment: {prev_comet_id}")
-            exp = comet_ml.start(
-                experiment_key=prev_comet_id,
-                experiment_config=comet_cfg,
-            )
-        else:
-            if is_seeding and prev_comet_id:
-                log.info(f"SEED mode: creating new experiment (seed source had {prev_comet_id})")
-            else:
-                log.info("Creating NEW Comet experiment")
-            exp = comet_ml.start(experiment_config=comet_cfg)
-    else:
-        exp = ddp.DummyExperiment()
+    # === EXPERIMENT TRACKER ===
+    # RESUME mode: continue existing run on the active backend. SEED/FRESH: new run.
+    # Non-main ranks (and tracker='none') get a no-op Tracker so all `exp.log_*`
+    # calls below remain unconditional.
+    exp = make_tracker(
+        tracker=cfg.tracker,
+        is_main=ddp.is_main(),
+        is_seeding=is_seeding,
+        run_name=run_name,
+        wandb_project=cfg.wandb_project,
+        wandb_entity=cfg.wandb_entity,
+        wandb_dir=cfg.wandb_dir,
+        prev_comet_id=prev_comet_id,
+        prev_wandb_id=prev_wandb_id,
+    )
 
     exp.log_parameters(flatten_dict(asdict(cfg)))
     exp.log_parameters({"trial_number": trial.number, "run_name": run_name})
@@ -547,8 +544,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                     )
             except Exception:
                 log.error(f"!!! VALIDATION FAILED at step {step} !!!\n{traceback.format_exc()}")
-            # All ranks barrier so non-main ranks (which run validate but skip
-            # comet logging via DummyExperiment) stay synchronised with rank 0.
+            # All ranks barrier so non-main ranks (which run validate but log
+            # into a no-op Tracker) stay synchronised with rank 0.
             ddp.barrier()
 
         # === SIGUSR1 CHECKPOINT ===
@@ -567,7 +564,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                     glimpse_grid_size=cfg.glimpse_grid_size,
                     scene_resolution=cfg.scene_resolution,
                     step=step, train_loss=ema_loss.item() if ema_loss is not None else None,
-                    comet_id=exp.get_key(),
+                    comet_id=exp.get_comet_id(),
+                    wandb_run_id=exp.get_wandb_id(),
                     optimizer_state=optimizer.state_dict(),
                     scheduler_state=scheduler.state_dict(),
                     training_config_history=training_config_history,
@@ -720,7 +718,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             glimpse_grid_size=cfg.glimpse_grid_size,
             scene_resolution=cfg.scene_resolution,
             step=end_step, train_loss=ema_loss.item() if ema_loss is not None else None,
-            comet_id=exp.get_key(),
+            comet_id=exp.get_comet_id(),
+            wandb_run_id=exp.get_wandb_id(),
             optimizer_state=optimizer.state_dict(),
             scheduler_state=scheduler.state_dict(),
             training_config_history=training_config_history,

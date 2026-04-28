@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -113,44 +112,3 @@ def all_reduce_mean(t: Tensor) -> Tensor:
     dist.all_reduce(out, op=dist.ReduceOp.SUM)
     out /= _world_size
     return out
-
-
-class DummyExperiment:
-    """No-op stand-in for comet_ml.CometExperiment used on non-main ranks.
-
-    Mirrors the surface of the real Comet experiment object that loop.py touches:
-    log_parameters, log_metric, log_metrics, log_figure, log_curve, get_key, end.
-    """
-
-    def __init__(self) -> None:
-        self._key = "dummy-experiment"
-
-    def log_parameters(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
-    def log_metric(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
-    def log_metrics(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
-    def log_figure(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
-    def log_curve(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
-    def log_image(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
-    def log_html(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
-    def log_text(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
-    def get_key(self) -> str:
-        return self._key
-
-    def end(self) -> None:
-        pass

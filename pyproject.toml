@@ -15,6 +15,7 @@ dependencies = [
     "huggingface-hub",
     "safetensors",
     "comet-ml",
+    "wandb",
     "tyro",
     "tqdm",
     "rich",

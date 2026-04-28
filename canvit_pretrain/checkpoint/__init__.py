@@ -53,6 +53,7 @@ class CheckpointData(TypedDict):
     git_commit: str | None
     git_dirty: bool
     comet_id: str | None
+    wandb_run_id: str | None
     hostname: str | None
     slurm_job_id: str | None
     slurm_array_task_id: str | None
@@ -162,6 +163,7 @@ def save(
     step: int | None = None,
     train_loss: float | None = None,
     comet_id: str | None = None,
+    wandb_run_id: str | None = None,
     optimizer_state: dict | None = None,
     scheduler_state: dict | None = None,
     training_config_history: dict[str, dict] | None = None,
@@ -195,6 +197,7 @@ def save(
         "git_commit": git_commit,
         "git_dirty": git_dirty,
         "comet_id": comet_id,
+        "wandb_run_id": wandb_run_id,
         "hostname": hostname,
         "slurm_job_id": slurm_job_id,
         "slurm_array_task_id": slurm_array_task_id,
@@ -250,6 +253,7 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
         "git_commit": raw["git_commit"],
         "git_dirty": raw["git_dirty"],
         "comet_id": raw["comet_id"],
+        "wandb_run_id": raw.get("wandb_run_id"),
         "hostname": raw["hostname"],
         "slurm_job_id": raw["slurm_job_id"],
         "slurm_array_task_id": raw["slurm_array_task_id"],

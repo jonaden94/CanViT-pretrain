@@ -73,5 +73,8 @@ exec srun uv run python -m canvit_pretrain.train \
     --run-name "$RUN_NAME" \
     --webdataset-dir "$WEBDATASET_DIR" \
     --ckpt-dir "$CHECKPOINTS_DIR" \
+    --wandb-project "${WANDB_PROJECT:-canvit-pretrain}" \
+    ${WANDB_ENTITY:+--wandb-entity "$WANDB_ENTITY"} \
+    ${WANDB_DIR:+--wandb-dir "$WANDB_DIR"} \
     --steps-per-job 50000 \
     "$@"

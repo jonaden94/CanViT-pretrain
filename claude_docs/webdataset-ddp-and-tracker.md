@@ -1,16 +1,16 @@
-# WebDataset Loader + Multi-GPU/Multi-Node DDP Training
+# WebDataset Loader + Multi-GPU/Multi-Node DDP + Pluggable Experiment Tracker
 
-This document describes the WebDataset-based data loading path and the
-distributed-data-parallel (DDP) training support added on top of the existing
-single-GPU sharded-features pipeline.
+This document describes three additions on top of the original single-GPU,
+sharded-features, Comet-only training pipeline.
 
 ## Goal
 
-The original repo supported only one training data path: precomputed `.pt`
-feature shards (`canvit_pretrain/train/data/shards.py::ShardedFeatureLoader`)
-plus raw images for validation, single-GPU only.
+The original repo supported only one training data path (precomputed `.pt`
+feature shards via `canvit_pretrain/train/data/shards.py::ShardedFeatureLoader`,
+plus raw images for validation), only single-GPU execution, and only Comet ML
+for experiment tracking.
 
-Two additions were made:
+Three orthogonal additions were made:
 
 1. **WebDataset loader** for a different on-disk format —
    `<dir>/{train-shuffled,val}/shard-NNNNNN.tar` with `info.json` metadata,
@@ -18,23 +18,26 @@ Two additions were made:
    pre-shuffled at dataset-creation time.
 2. **DDP** training over multiple GPUs and multiple nodes on the Grete
    SLURM cluster (`SLURM_PROCID` / `WORLD_SIZE` / `MASTER_ADDR` / `MASTER_PORT`).
+3. **Pluggable experiment tracker** — `cfg.tracker = "comet" | "wandb" | "none"`.
+   The training loop calls `exp.log_*` against a thin `Tracker` wrapper that
+   fans out to whichever backend is active. Selecting `"none"` makes every
+   log call a no-op, which is also what non-main DDP ranks get.
 
-Guiding principle: change as little of the existing code as possible. The
-existing `ShardedFeatureLoader` path keeps working byte-for-byte unchanged on
-single GPU; the new path activates only when `cfg.webdataset_dir` is set.
+Guiding principle for all three: change as little of the existing code as
+possible. The existing `ShardedFeatureLoader` path keeps working byte-for-byte
+unchanged on single GPU; the new data path activates only when
+`cfg.webdataset_dir` is set; DDP activates only when `WORLD_SIZE > 1`; the
+tracker swap is a single dispatch in `loop.py`.
 
 ## Design overview
 
-Three independent new modules:
+Four independent new modules:
 
 1. **`canvit_pretrain/train/dist.py`** — DDP singleton.
    * `init_dist()` reads SLURM env vars, sets the CUDA device to `local_rank`,
      and calls `dist.init_process_group("nccl")`. Idempotent.
    * Also exposes `is_main`, `rank`, `world_size`, `local_rank`, `device`,
-     `barrier`, `broadcast_module_buffers`, `all_reduce_mean`, and a
-     `DummyExperiment` no-op shim with the comet `.log_*` / `.get_key()` /
-     `.end()` surface. The shim lets the loop call `exp.log_*` unconditionally
-     on every rank without rank-guarding each call site.
+     `barrier`, `broadcast_module_buffers`, `all_reduce_mean`.
    * **Single-process fall-back:** when `WORLD_SIZE` is unset or 1, every
      helper returns rank=0 / world_size=1 / `is_dist()=False`. Single-GPU
      paths stay unchanged.
@@ -60,7 +63,18 @@ Three independent new modules:
      entries directly from one tar via the stdlib `tarfile` module and calls
      `set_stats` exactly the same way as the legacy path.
 
-Standalone script:
+4. **`canvit_pretrain/train/tracker.py`** — pluggable experiment tracker.
+   * `Tracker` class holds an *optional* Comet experiment and an *optional*
+     wandb run. Each `log_*` method fans out to whichever backend is set;
+     when both are `None`, every method is a silent no-op.
+   * `make_tracker(...)` factory builds the right `Tracker` for the active
+     job: `tracker="comet"` → real Comet experiment; `tracker="wandb"` →
+     real `wandb.Run`; `tracker="none"` or non-main rank → empty `Tracker()`.
+   * `Tracker.get_comet_id()` / `Tracker.get_wandb_id()` return the
+     resume-key for whichever backend is active; both are stored separately
+     in the checkpoint so resumes pick up on the right backend.
+
+Standalone scripts:
 
 * **`scripts/build_shard_schedule.py`** — reads `info.json`, drops the partial
   last shard, builds `n_epochs` permutations with
@@ -74,7 +88,8 @@ SLURM:
   `MASTER_ADDR`, `MASTER_PORT`, `WORLD_SIZE` per the
   `plan_dataloading/ddp/minimal_distributed_training.sh` reference; uses
   `srun uv run python -m canvit_pretrain.train`). Existing
-  `slurm_jonathan/train.sbatch` left untouched.
+  `slurm_jonathan/train.sbatch` retained; both pass `--wandb-project /
+  --wandb-entity / --wandb-dir` from env vars.
 
 ## Decode pipeline
 
@@ -147,17 +162,21 @@ number of batches (no `partial=False` drops).
 
 ## Checkpoint integration
 
-`CheckpointData` (TypedDict in `canvit_pretrain/checkpoint/__init__.py`) gained
-a single field:
+`CheckpointData` (TypedDict in `canvit_pretrain/checkpoint/__init__.py`)
+gained two new fields:
 
 ```python
-job_index: int | None
+job_index: int | None       # WebDataset shard cursor (see above)
+wandb_run_id: str | None    # mirror of comet_id for the wandb backend
 ```
 
-* `save(...)` accepts `job_index: int | None = None`. Sharded-features path
-  passes `None`; WebDataset path passes the running job's index.
-* `load(...)` reads `raw.get("job_index")` (NOT asserted) so existing
-  pre-change checkpoints load without error.
+* `save(...)` accepts `job_index: int | None = None` and
+  `wandb_run_id: str | None = None`. The sharded-features path passes
+  `job_index=None`; the WebDataset path passes the running job's index.
+  Whichever tracker is active fills its own ID slot via
+  `exp.get_comet_id()` / `exp.get_wandb_id()` (the inactive one is `None`).
+* `load(...)` reads `raw.get("job_index")` and `raw.get("wandb_run_id")`
+  (NOT asserted) so existing pre-change checkpoints load without error.
 
 ## Standardizer initialisation under DDP
 
@@ -213,15 +232,17 @@ metrics = {
 ```
 
 A `ddp.barrier()` after each validation block keeps non-main ranks (which run
-validate but log into a `DummyExperiment`) synchronised with rank 0.
+validate but log into a no-op `Tracker`) synchronised with rank 0.
 
 ## Rank-0 guards in loop.py
 
 Factored through `ddp.is_main()`:
 
-* Comet experiment creation. Non-main ranks get `ddp.DummyExperiment()`. All
-  `exp.log_parameters` / `exp.log_metric` / `exp.log_metrics` / `exp.log_figure`
-  / `exp.get_key()` / `exp.end()` calls in the loop stay unconditional.
+* Tracker creation. Non-main ranks pass `is_main=False` to `make_tracker(...)`,
+  which returns a no-op `Tracker()` (both backends `None`). All
+  `exp.log_parameters` / `exp.log_metric` / `exp.log_metrics` /
+  `exp.log_image` / `exp.log_curve` / `exp.get_comet_id` /
+  `exp.get_wandb_id` / `exp.end()` calls in the loop stay unconditional.
 * `tqdm(..., disable=not ddp.is_main())` for the progress bar.
 * Both `save_checkpoint(...)` + `update_symlink(...)` call sites (SIGUSR1 and
   end-of-job). Followed by `ddp.barrier()`.
@@ -230,18 +251,88 @@ Factored through `ddp.is_main()`:
 * Per-module grad norms use `core_model` (so names don't get the `module.`
   DDP prefix).
 
-## Configuration
+## Tracker abstraction
 
-Three new fields in `canvit_pretrain/train/config.py`:
+The training loop never imports `comet_ml` or `wandb` directly. Instead it
+imports `make_tracker` from `canvit_pretrain.train.tracker` and dispatches
+on `cfg.tracker`:
 
 ```python
+exp = make_tracker(
+    tracker=cfg.tracker,                  # "comet" | "wandb" | "none"
+    is_main=ddp.is_main(),
+    is_seeding=is_seeding,
+    run_name=run_name,
+    wandb_project=cfg.wandb_project,
+    wandb_entity=cfg.wandb_entity,
+    wandb_dir=cfg.wandb_dir,
+    prev_comet_id=ckpt_data["comet_id"]    if ckpt_data else None,
+    prev_wandb_id=ckpt_data.get("wandb_run_id") if ckpt_data else None,
+)
+```
+
+The returned object is the only logging surface the loop ever touches. Its
+methods mirror the comet-ml `Experiment` surface that the loop and `viz/*`
+historically depended on:
+
+| Method | Comet behavior | wandb behavior |
+|---|---|---|
+| `log_parameters(dict)` | `experiment.log_parameters(dict)` | `run.config.update(dict, allow_val_change=True)` |
+| `log_metric(name, value, step=)` | native | `run.log({name: value}, step=step)` |
+| `log_metrics(dict, step=)` | native | `run.log(dict, step=step)` |
+| `log_image(image, name=, step=)` | native (accepts PIL) | `run.log({name: wandb.Image(image)}, step=step)` |
+| `log_curve(name, x=, y=, step=)` | native (`exp.log_curve`) | render line plot via matplotlib → `wandb.Image` (no native equivalent) |
+| `get_comet_id()` / `get_wandb_id()` | wraps `get_key()` | wraps `run.id` |
+| `end()` | `experiment.end()` | `run.finish()` |
+
+Two backend-specific notes:
+
+* **Curves on wandb** are emitted as PNG images via `_curve_as_pil` in
+  `tracker.py` — wandb has no native `log_curve` analogue. This means each
+  curve update lands as a new image (versioned by step), same as PCA figures.
+  The 900-curve budget enforced in `viz/comet.py::log_curve` still applies
+  uniformly.
+* **Figure handling.** `viz/comet.py::log_figure` now converts the matplotlib
+  figure to a `PIL.Image` once (single decode), then hands it to
+  `Tracker.log_image`. Both backends accept PIL natively, so there is no
+  per-backend `isinstance` plumbing inside `Tracker`.
+
+### Resume semantics
+
+* The checkpoint stores both `comet_id` and `wandb_run_id` independently. On
+  load, `make_tracker` is given both. It uses whichever ID matches the
+  active backend; the other is ignored.
+* If you switch backends across resumes (e.g. saved with `tracker=comet`,
+  resume with `tracker=wandb`), `make_tracker` simply starts a fresh wandb
+  run and logs `"Creating NEW wandb run"`. No error, no stale ID dereference.
+* SEED mode (`--seed-ckpt`) always starts a new tracker run regardless of
+  the IDs in the seed checkpoint.
+
+## Configuration
+
+Seven new fields in `canvit_pretrain/train/config.py` (three from the
+WebDataset path, four from the tracker path):
+
+```python
+# WebDataset
 webdataset_dir: Path | None = None
 shard_schedule_path: Path | None = None  # default: <webdataset_dir>/train-shuffled/shard_schedule.npz
 seed: int = 0
+
+# Tracker
+tracker: Literal["comet", "wandb", "none"] = "wandb"
+wandb_project: str | None = None
+wandb_entity: str | None = None
+wandb_dir: Path | None = Path("/mnt/vast-nhr/projects/nib00021/jonathan")
 ```
 
-Setting `webdataset_dir` activates the new path. The runtime asserts that
-exactly one of `feature_base_dir` / `webdataset_dir` is set.
+Setting `webdataset_dir` activates the new data path. The runtime asserts
+that exactly one of `feature_base_dir` / `webdataset_dir` is set.
+
+`tracker` defaults to `"wandb"` (the migration target). Pass `--tracker comet`
+to use Comet; `--tracker none` to disable logging entirely (useful for smoke
+tests). When `tracker="wandb"`, `wandb_project` is required and asserted at
+startup.
 
 ## File-by-file summary
 
@@ -249,32 +340,39 @@ exactly one of `feature_base_dir` / `webdataset_dir` is set.
 
 | File | Purpose |
 |---|---|
-| `canvit_pretrain/train/dist.py` | DDP singleton + DummyExperiment. |
+| `canvit_pretrain/train/dist.py` | DDP singleton. |
 | `canvit_pretrain/train/data/schedule.py` | `load_schedule`, `slice_for_job`, `compute_shards_per_gpu`. |
 | `canvit_pretrain/train/data/webdataset.py` | `WebDatasetTrainLoader`, `WebDatasetValLoader`, `init_normalizer_stats_from_tar`. |
+| `canvit_pretrain/train/tracker.py` | `Tracker` class + `make_tracker` factory (Comet / wandb / none). |
 | `scripts/build_shard_schedule.py` | Standalone schedule builder. |
 | `slurm_jonathan/train_ddp.sbatch` | Multi-node SLURM template. |
-| `claude_docs/webdataset-loader-and-ddp.md` | This document. |
+| `claude_docs/webdataset-ddp-and-tracker.md` | This document. |
 
 ### Modified (additive, backward-compatible)
 
 | File | Change |
 |---|---|
-| `pyproject.toml` | Added `webdataset` dependency. |
-| `canvit_pretrain/train/config.py` | Added `webdataset_dir`, `shard_schedule_path`, `seed`. |
+| `pyproject.toml` | Added `webdataset` and `wandb` dependencies (kept `comet-ml`). |
+| `.envrc.grete` | Added `WANDB_PROJECT` / `WANDB_ENTITY` / `WANDB_DIR` plus `~/wandb_api_key.txt` loader. |
+| `canvit_pretrain/train/config.py` | Added `webdataset_dir`, `shard_schedule_path`, `seed`, `tracker`, `wandb_project`, `wandb_entity`, `wandb_dir`. |
 | `canvit_pretrain/train/data/__init__.py` | Wider `Loaders` types; `create_loaders` accepts `job_index`/`world_size`/`rank`; dispatches on `cfg.webdataset_dir`; new `_create_webdataset_loaders` helper. |
-| `canvit_pretrain/checkpoint/__init__.py` | `job_index` field on `CheckpointData`; save kwarg; `load()` uses `.get()` (backward compat). |
-| `canvit_pretrain/train/loop.py` | `ddp.init_dist()`; `cfg.device` override; rank guards on FAILED marker / mkdir / comet / tqdm / save / symlink; normalizer-init dispatch; DDP wrap (compile-then-DDP); `core_model` separation; `start_job_index` threading; metric all-reduce on log; `grad_norms_by_module(core_model, ...)`. |
+| `canvit_pretrain/checkpoint/__init__.py` | `job_index` and `wandb_run_id` fields on `CheckpointData`; matching `save` kwargs; `load()` uses `.get()` for both (backward compat). |
+| `canvit_pretrain/train/loop.py` | `ddp.init_dist()`; `cfg.device` override; rank guards on FAILED marker / mkdir / tracker / tqdm / save / symlink; normalizer-init dispatch; DDP wrap (compile-then-DDP); `core_model` separation; `start_job_index` threading; metric all-reduce on log; `grad_norms_by_module(core_model, ...)`; `make_tracker(...)` replaces the inline Comet block; both checkpoint saves pass `comet_id` and `wandb_run_id`. |
+| `canvit_pretrain/train/viz/comet.py` | `log_figure` converts to PIL once (works for both backends); type hints retargeted to `Tracker`. |
+| `canvit_pretrain/train/viz/validate.py` | Type hint retargeted to `Tracker`; dropped unused `comet_ml` import. |
+| `slurm_jonathan/train.sbatch` | Pass `--wandb-project` / optional `--wandb-entity` / `--wandb-dir` from env vars. |
+| `slurm_jonathan/train_ddp.sbatch` | Same wandb flags as legacy script. |
 
 ### Untouched
 
 `scripts/bench_dataloader.py` continues to use `ShardedFeatureLoader`
-directly. No changes to `step.py`, `viz/`, `model.py`, `scheduler.py`,
-`probe.py`, `ema.py`, `viewpoint.py`, or any test.
+directly. No changes to `step.py`, `viz/{plot,pca,sample,image,metrics}.py`,
+`model.py`, `scheduler.py`, `probe.py`, `ema.py`, `viewpoint.py`, or any
+test.
 
 ## How to run
 
-### Build the shard schedule once per dataset
+### Build the shard schedule once per dataset (WebDataset path only)
 
 ```bash
 uv run python scripts/build_shard_schedule.py \
@@ -289,7 +387,8 @@ uv run python scripts/build_shard_schedule.py \
 uv run python -m canvit_pretrain.train \
     --webdataset-dir "$WEBDATASET_DIR" \
     --steps-per-job 16 --batch-size 256 \
-    --ckpt-dir /tmp/canvit-test
+    --ckpt-dir /tmp/canvit-test \
+    --tracker wandb --wandb-project canvit-pretrain
 ```
 
 `WORLD_SIZE` is unset → `init_dist()` is a no-op → single-process behaviour.
@@ -306,15 +405,19 @@ sbatch --nodes=2 --ntasks-per-node=2 --gpus-per-node=A100:2 \
 The sbatch template sets `MASTER_ADDR`, `MASTER_PORT`, and `WORLD_SIZE`, then
 launches one process per GPU via `srun`. Each process calls `init_dist()`,
 which reads `SLURM_PROCID` / `SLURM_GPUS_ON_NODE` / `WORLD_SIZE` to compute
-`(rank, local_rank, device)` and joins the NCCL process group.
+`(rank, local_rank, device)` and joins the NCCL process group. Tracker flags
+(`--wandb-project`, `--wandb-entity`, `--wandb-dir`) are passed through from
+the env vars defined in `.envrc.grete`.
 
-### Legacy sharded-features path (unchanged)
+### Legacy sharded-features path (unchanged data; tracker still selectable)
 
 ```bash
-sbatch slurm_jonathan/train.sbatch  # single GPU, ShardedFeatureLoader path
+sbatch slurm_jonathan/train.sbatch                        # default: tracker=wandb
+sbatch slurm_jonathan/train.sbatch --tracker comet        # opt back into Comet
+sbatch slurm_jonathan/train.sbatch --tracker none         # no logging at all
 ```
 
-`webdataset_dir` is unset → existing behaviour preserved.
+`webdataset_dir` is unset → existing data behaviour preserved.
 
 ## Risk notes & known caveats
 
@@ -340,6 +443,16 @@ sbatch slurm_jonathan/train.sbatch  # single GPU, ShardedFeatureLoader path
   `"cls.npy" in info["keys"]` at startup. Adding the on-the-fly path later is
   small: skip the cls/ptch decoding and call `compute_raw_targets()` inside
   `load_train_batch` (the closure already exists in the loop).
+* **wandb requires `WANDB_API_KEY`** in the environment (the `.envrc.grete`
+  loader sources it from `~/wandb_api_key.txt`). On Grete, network access
+  goes through `HTTPS_PROXY=http://www-cache.gwdg.de:3128`, which is
+  exported in `slurm_jonathan/env.sh`.
+* **Switching trackers across resumes** silently starts a new run on the new
+  backend. If you depend on continuity, stick with one backend per run.
+* **Curve image cost on wandb**: each `Tracker.log_curve` call on the wandb
+  backend renders a PNG and uploads it. The 900-curve budget in
+  `viz/comet.py::log_curve` keeps this bounded but the constant is
+  Comet-derived; lower it via that file if wandb storage becomes a concern.
 
 ## Verification plan
 
@@ -352,19 +465,26 @@ sbatch slurm_jonathan/train.sbatch  # single GPU, ShardedFeatureLoader path
    `$WEBDATASET_DIR/train-shuffled/shard_schedule.npz` and contains
    `1000 * (n_shards - 1)` entries with the last shard absent.
 3. **Single-GPU WebDataset path**:
-   `uv run python -m canvit_pretrain.train --webdataset-dir $WEBDATASET_DIR --steps-per-job 16 --batch-size 256 --ckpt-dir /tmp/canvit-test`.
-   Confirm: shard divisibility log, normalizer stats log, comet experiment
-   created, one job's worth of steps, checkpoint with `job_index=0` saved,
-   second invocation resumes with `job_index=1` and slices the next shards.
-4. **Smoke DDP (1 node, 2 GPUs)**: submit `slurm_jonathan/train_ddp.sbatch`
+   `uv run python -m canvit_pretrain.train --webdataset-dir $WEBDATASET_DIR --steps-per-job 16 --batch-size 256 --ckpt-dir /tmp/canvit-test --tracker none`.
+   Confirm: shard divisibility log, normalizer stats log, no tracker
+   network calls, one job's worth of steps, checkpoint with `job_index=0`
+   saved, second invocation resumes with `job_index=1` and slices the next
+   shards.
+4. **Tracker swap (single-GPU)**: re-run step 3 with `--tracker wandb
+   --wandb-project canvit-pretrain`; confirm a new wandb run appears with
+   matching params and metrics. Then with `--tracker comet`; confirm a new
+   Comet experiment appears. Then resume each — confirm the same run / key
+   continues (`prev_wandb_id` / `prev_comet_id` flow into `make_tracker`).
+5. **Smoke DDP (1 node, 2 GPUs)**: submit `slurm_jonathan/train_ddp.sbatch`
    with `--nodes=1 --gpus-per-node=A100:2 --ntasks-per-node=2 --steps-per-job 16`.
    Confirm: both ranks initialise, only rank 0 logs / saves / writes failed
    marker, val all-reduce produces consistent metrics, checkpoint includes
-   `job_index`.
-5. **Multi-node DDP (2 nodes × 2 GPUs)**: same as above with `--nodes=2`.
+   `job_index` and `wandb_run_id`.
+6. **Multi-node DDP (2 nodes × 2 GPUs)**: same as above with `--nodes=2`.
    Confirm `MASTER_ADDR` resolves, no NCCL errors, end-of-job barrier
    completes cleanly, resume from checkpoint works.
-6. **Compile × DDP smoke**: confirm `cfg.compile=True` works under DDP. If it
+7. **Compile × DDP smoke**: confirm `cfg.compile=True` works under DDP. If it
    fails, swap order (wrap-then-compile) and re-test.
-7. **Backwards-compat checkpoint load**: load a pre-change checkpoint with
-   the new `load()` — must not error on missing `job_index`.
+8. **Backwards-compat checkpoint load**: load a pre-change checkpoint with
+   the new `load()` — must not error on missing `job_index` or
+   `wandb_run_id`.

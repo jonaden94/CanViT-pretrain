@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import torch
 
@@ -90,6 +91,15 @@ class Config:
     viz_every_n_vals: int = 5  # Log viz every N validation runs
     curve_every_n_vals: int = 5  # Log curves every N validation runs
     log_spatial_stats: bool = True
+    # Experiment tracker
+    tracker: Literal["comet", "wandb", "none"] = "wandb"
+    """Backend for parameter/metric/figure logging."""
+    wandb_project: str | None = None
+    """W&B project name. Required when tracker='wandb'."""
+    wandb_entity: str | None = None
+    """W&B entity (team or user). Falls back to your default account when unset."""
+    wandb_dir: Path | None = Path("/mnt/vast-nhr/projects/nib00021/jonathan")
+    """Directory wandb writes its run files into. None = wandb's own default (./wandb)."""
     # Compilation and precision
     compile: bool = True
     combo_kernels: bool = False  # torch._inductor.config.combo_kernels (experimental)
