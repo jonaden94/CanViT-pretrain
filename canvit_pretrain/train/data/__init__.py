@@ -14,7 +14,9 @@ from canvit_pytorch.preprocess import preprocess
 from canvit_pretrain.datasets import IndexedImageFolder
 from torch.utils.data import DataLoader, Dataset
 
+from .schedule import SCHEDULE_FILENAME
 from .shards import ShardedFeatureLoader
+from .webdataset import WebDatasetTrainLoader, WebDatasetValLoader
 
 log = logging.getLogger(__name__)
 
@@ -77,19 +79,37 @@ class InfiniteLoader:
 class Loaders(NamedTuple):
     """Train and validation data loaders."""
 
-    train: ShardedFeatureLoader
-    val: InfiniteLoader
+    train: ShardedFeatureLoader | WebDatasetTrainLoader
+    val: InfiniteLoader | WebDatasetValLoader
 
 
 def scene_size_px(grid_size: int, patch_size: int) -> int:
     return grid_size * patch_size
 
 
-def create_loaders(cfg: "Config", start_step: int) -> Loaders:
-    """Train + val loaders; train reads precomputed features, val reads raw images. start_step positions the shard cursor on resume (0 for fresh)."""
+def create_loaders(
+    cfg: "Config",
+    start_step: int,
+    *,
+    job_index: int = 0,
+    world_size: int = 1,
+    rank: int = 0,
+) -> Loaders:
+    """Train + val loaders. Dispatches on cfg.webdataset_dir:
+      - set: WebDataset path (rank-aware, job_index-driven shard schedule).
+      - unset: existing precomputed-features path (raw images for val).
+    start_step positions the shard cursor on resume (sharded path); job_index
+    plays the analogous role for the WebDataset path.
+    """
     from ..config import Config
     assert isinstance(cfg, Config)
-    log.info(f"=== CREATE_LOADERS: start_step={start_step} ===")
+    log.info(
+        f"=== CREATE_LOADERS: start_step={start_step}, job_index={job_index}, "
+        f"rank={rank}/{world_size} ==="
+    )
+
+    if cfg.webdataset_dir is not None:
+        return _create_webdataset_loaders(cfg, job_index=job_index, world_size=world_size, rank=rank)
 
     val_dir = cfg.val_dir
     assert val_dir.is_dir(), f"val_dir not found: {val_dir}"
@@ -145,4 +165,45 @@ def create_loaders(cfg: "Config", start_step: int) -> Loaders:
         num_workers=cfg.num_workers, pin_memory=True, drop_last=True, persistent_workers=persistent,
     ))
 
+    return Loaders(train=train_loader, val=val_loader)
+
+
+def _create_webdataset_loaders(
+    cfg: "Config",
+    *,
+    job_index: int,
+    world_size: int,
+    rank: int,
+) -> Loaders:
+    """Build WebDataset train + val loaders for the rank-aware path."""
+    assert cfg.webdataset_dir is not None
+    train_dir = cfg.webdataset_dir / "train-shuffled"
+    val_dir_wds = cfg.webdataset_dir / "val"
+    assert train_dir.is_dir(), f"train dir not found: {train_dir}"
+    assert val_dir_wds.is_dir(), f"val dir not found: {val_dir_wds}"
+
+    schedule_path = cfg.shard_schedule_path or (train_dir / SCHEDULE_FILENAME)
+
+    log.info(f"WebDataset path: {cfg.webdataset_dir}")
+    log.info(f"  train: {train_dir}")
+    log.info(f"  val: {val_dir_wds}")
+    log.info(f"  schedule: {schedule_path}")
+
+    train_loader = WebDatasetTrainLoader(
+        train_dir=train_dir,
+        schedule_path=schedule_path,
+        job_index=job_index,
+        batch_size_per_gpu=cfg.batch_size,
+        steps_per_job=cfg.steps_per_job,
+        image_size=cfg.scene_resolution,
+        world_size=world_size,
+        rank=rank,
+    )
+    val_loader = WebDatasetValLoader(
+        val_dir=val_dir_wds,
+        batch_size_per_gpu=cfg.batch_size,
+        image_size=cfg.scene_resolution,
+        world_size=world_size,
+        rank=rank,
+    )
     return Loaders(train=train_loader, val=val_loader)
