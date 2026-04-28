@@ -57,6 +57,12 @@ class Config:
     feature_base_dir: Path | None = None
     feature_image_root: Path | None = None  # Required with feature_base_dir
     tar_dir: Path | None = None  # images read directly from mmap'd tars
+    # WebDataset path (alternative to feature_base_dir). When set, training
+    # reads pre-shuffled WebDataset tar shards under {webdataset_dir}/train-shuffled
+    # and validates against {webdataset_dir}/val.
+    webdataset_dir: Path | None = None
+    shard_schedule_path: Path | None = None  # default: webdataset_dir/train-shuffled/shard_schedule.npz
+    seed: int = 0  # for reproducibility (currently used for the shard schedule)
     # Run identification and checkpointing
     run_name: str | None = None
     """Run name. Auto-generated from SLURM_ARRAY_JOB_ID or timestamp if None."""
