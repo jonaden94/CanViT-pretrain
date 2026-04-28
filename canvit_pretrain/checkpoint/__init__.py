@@ -43,6 +43,10 @@ class CheckpointData(TypedDict):
     optimizer_state: dict | None
     scheduler_state: dict | None
     training_config_history: dict[str, dict] | None
+    # WebDataset job_index — index of the job that wrote this checkpoint.
+    # On resume, the next job uses job_index + 1. None for legacy checkpoints
+    # and for the sharded-features path (which uses scheduler.last_epoch).
+    job_index: int | None
 
     # --- Provenance (last save only — see provenance_history for full trail) ---
     timestamp: str
@@ -162,6 +166,7 @@ def save(
     scheduler_state: dict | None = None,
     training_config_history: dict[str, dict] | None = None,
     provenance_history: dict[str, dict] | None = None,
+    job_index: int | None = None,
 ) -> None:
     """Save checkpoint with all info needed to reconstruct model and push to hub."""
     assert isinstance(model.cfg, CanViTForPretrainingConfig)
@@ -185,6 +190,7 @@ def save(
         "scheduler_state": scheduler_state,
         "training_config_history": training_config_history,
         "provenance_history": provenance_history,
+        "job_index": job_index,
         "timestamp": datetime.now(UTC).isoformat(),
         "git_commit": git_commit,
         "git_dirty": git_dirty,
@@ -239,6 +245,7 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
         "scheduler_state": raw["scheduler_state"],
         "training_config_history": raw["training_config_history"],
         "provenance_history": raw.get("provenance_history"),
+        "job_index": raw.get("job_index"),
         "timestamp": raw["timestamp"],
         "git_commit": raw["git_commit"],
         "git_dirty": raw["git_dirty"],
