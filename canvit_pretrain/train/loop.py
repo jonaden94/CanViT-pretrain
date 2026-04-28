@@ -52,8 +52,13 @@ from canvit_pretrain.checkpoint import (  # noqa: E402
 from canvit_pretrain.checkpoint import load as load_checkpoint  # noqa: E402
 from canvit_pretrain.checkpoint import save as save_checkpoint  # noqa: E402
 
+from . import dist as ddp  # noqa: E402
 from .config import Config  # noqa: E402
 from .data import ShardedFeatureLoader, create_loaders, scene_size_px  # noqa: E402
+from .data.webdataset import (  # noqa: E402
+    WebDatasetTrainLoader,
+    init_normalizer_stats_from_tar,
+)
 from .ema import EMATracker  # noqa: E402
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher  # noqa: E402
 from .probe import load_probe  # noqa: E402
@@ -118,8 +123,10 @@ def init_normalizer_stats_from_shard(
 def train(cfg: Config, trial: optuna.Trial) -> float:
     """Train with stochastic reset. Returns best val_loss."""
     signal.signal(signal.SIGUSR1, _handle_sigusr1)
+    ddp.init_dist()
+    cfg.device = ddp.device()
     log.info(f"Starting trial {trial.number}")
-    log.info(f"Device: {cfg.device}")
+    log.info(f"Device: {cfg.device}, rank={ddp.rank()}/{ddp.world_size()}")
 
     # === RUN NAME AND CHECKPOINT RESOLUTION ===
     run_name = cfg.run_name
@@ -129,22 +136,27 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     log.info(f"Run: {run_name} (dir: {run_dir})")
 
     # Check for failure marker (prevents infinite crash loops in job arrays)
+    # All ranks check; only rank 0 writes/cancels.
     failed_marker = run_dir / "FAILED"
     if failed_marker.exists():
         log.error(f"FAILED marker exists: {failed_marker}")
         log.error(f"Previous job crashed. Delete marker to retry: rm {failed_marker}")
-        cancel_slurm_array()
+        if ddp.is_main():
+            cancel_slurm_array()
         raise RuntimeError(f"Refusing to start: {failed_marker} exists")
 
     # Create run_dir early so we can write FAILED marker on crash
-    run_dir.mkdir(parents=True, exist_ok=True)
+    if ddp.is_main():
+        run_dir.mkdir(parents=True, exist_ok=True)
+    ddp.barrier()
 
     try:
         return training_loop(cfg=cfg, trial=trial, run_name=run_name, run_dir=run_dir)
     except Exception:
         log.exception("Training crashed - writing FAILED marker")
-        failed_marker.write_text(f"Crashed at {datetime.now(UTC).isoformat()}\n")
-        cancel_slurm_array()
+        if ddp.is_main():
+            failed_marker.write_text(f"Crashed at {datetime.now(UTC).isoformat()}\n")
+            cancel_slurm_array()
         raise
 
 
@@ -219,19 +231,24 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
     # === COMET EXPERIMENT ===
     # RESUME mode: continue existing experiment. SEED/FRESH mode: new experiment.
-    comet_cfg = comet_ml.ExperimentConfig(auto_metric_logging=False)
-    if prev_comet_id is not None and not is_seeding:
-        log.info(f"Continuing Comet experiment: {prev_comet_id}")
-        exp = comet_ml.start(
-            experiment_key=prev_comet_id,
-            experiment_config=comet_cfg,
-        )
-    else:
-        if is_seeding and prev_comet_id:
-            log.info(f"SEED mode: creating new experiment (seed source had {prev_comet_id})")
+    # Non-main ranks get a no-op DummyExperiment so all loop calls remain
+    # unconditional below (no rank guards on `exp.log_*`).
+    if ddp.is_main():
+        comet_cfg = comet_ml.ExperimentConfig(auto_metric_logging=False)
+        if prev_comet_id is not None and not is_seeding:
+            log.info(f"Continuing Comet experiment: {prev_comet_id}")
+            exp = comet_ml.start(
+                experiment_key=prev_comet_id,
+                experiment_config=comet_cfg,
+            )
         else:
-            log.info("Creating NEW Comet experiment")
-        exp = comet_ml.start(experiment_config=comet_cfg)
+            if is_seeding and prev_comet_id:
+                log.info(f"SEED mode: creating new experiment (seed source had {prev_comet_id})")
+            else:
+                log.info("Creating NEW Comet experiment")
+            exp = comet_ml.start(experiment_config=comet_cfg)
+    else:
+        exp = ddp.DummyExperiment()
 
     exp.log_parameters(flatten_dict(asdict(cfg)))
     exp.log_parameters({"trial_number": trial.number, "run_name": run_name})
@@ -282,11 +299,40 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         log.info(f"{'SEED' if is_seeding else 'FRESH'}: start_step=0")
         log.info("=" * 60)
 
-    train_loader, val_loader = create_loaders(cfg, start_step=start_step)
+    # WebDataset path: derive job_index from the saved value (next job runs
+    # the slice after the saved one). On the sharded path job_index is unused.
+    if cfg.webdataset_dir is not None:
+        if ckpt_data is not None and not is_seeding:
+            saved_job_index = ckpt_data.get("job_index")
+            assert saved_job_index is not None, (
+                "WebDataset resume requires a checkpoint with `job_index`. "
+                "If you're resuming from a sharded-features checkpoint, pass --seed-ckpt instead."
+            )
+            start_job_index = saved_job_index + 1
+        else:
+            start_job_index = 0
+        # On the WebDataset path, start_step is always derived from job_index,
+        # since each job consumes exactly steps_per_job clean shard-aligned steps.
+        start_step = start_job_index * cfg.steps_per_job
+        log.info(f"WebDataset: start_job_index={start_job_index}, start_step={start_step}")
+    else:
+        start_job_index = 0
 
-    # Feature-based training is the only supported path
-    assert cfg.feature_base_dir is not None, "feature_base_dir required (raw image training removed)"
-    assert isinstance(train_loader, ShardedFeatureLoader)
+    train_loader, val_loader = create_loaders(
+        cfg,
+        start_step=start_step,
+        job_index=start_job_index,
+        world_size=ddp.world_size(),
+        rank=ddp.rank(),
+    )
+
+    # Feature-based training is the only supported path. Two flavours:
+    #   - feature_base_dir: legacy precomputed `.pt` shards (ShardedFeatureLoader)
+    #   - webdataset_dir:   WebDataset tar shards (WebDatasetTrainLoader)
+    assert (cfg.feature_base_dir is not None) != (cfg.webdataset_dir is not None), (
+        "Exactly one of feature_base_dir or webdataset_dir must be set"
+    )
+    assert isinstance(train_loader, (ShardedFeatureLoader, WebDatasetTrainLoader))
 
     trainable = [p for p in model.parameters() if p.requires_grad]
     n_trainable = sum(p.numel() for p in trainable)
@@ -379,16 +425,43 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         log.info("Standardizer stats loaded from model state_dict")
 
     if need_init:
-        assert cfg.feature_base_dir is not None, "feature_base_dir required for standardizer init"
-        shards_dir = cfg.feature_base_dir / cfg.teacher_name / str(cfg.scene_resolution) / "shards"
-        shard_files = sorted(shards_dir.glob("*.pt"))
-        assert shard_files, f"No shards in {shards_dir}"
-        init_normalizer_stats_from_shard(shard_files[0], scene_norm, cls_norm, cfg.device, cfg.normalizer_max_samples)
+        # Rank 0 fills standardizer state; the subsequent DDP wrap broadcasts
+        # buffers to all ranks (DDP's default broadcast_buffers=True).
+        if ddp.is_main():
+            if cfg.webdataset_dir is not None:
+                assert isinstance(train_loader, WebDatasetTrainLoader)
+                init_normalizer_stats_from_tar(
+                    train_loader.first_shard_path(),
+                    scene_norm, cls_norm,
+                    cfg.device, cfg.normalizer_max_samples,
+                )
+            else:
+                assert cfg.feature_base_dir is not None, "feature_base_dir required for standardizer init"
+                shards_dir = cfg.feature_base_dir / cfg.teacher_name / str(cfg.scene_resolution) / "shards"
+                shard_files = sorted(shards_dir.glob("*.pt"))
+                assert shard_files, f"No shards in {shards_dir}"
+                init_normalizer_stats_from_shard(shard_files[0], scene_norm, cls_norm, cfg.device, cfg.normalizer_max_samples)
+        ddp.barrier()
 
     log.info(
         f"Training: {cfg.n_full_start_branches} full + {cfg.n_random_start_branches} random branches,"
         f" chunk_size={cfg.chunk_size}, continue_prob={cfg.continue_prob}"
     )
+
+    # === DDP WRAP ===
+    # Wrap after standardizer init so DDP construction broadcasts the
+    # already-initialized buffers from rank 0 to all ranks (DDP default:
+    # broadcast_buffers=True). We keep `core_model` for state_dict access
+    # and pass the unwrapped model to validate(); the wrapped `model` is
+    # used for the training forward (where DDP gradient sync happens).
+    core_model = model
+    if ddp.is_dist():
+        log.info(f"Wrapping model in DDP (local_rank={ddp.local_rank()})")
+        model = nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[ddp.local_rank()],
+            find_unused_parameters=False,
+        )
 
     # EMA tracking for all metrics
     ema = EMATracker(alpha=cfg.ema_alpha)
@@ -415,15 +488,24 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
     # Step semantics: step S = model state after S gradient updates
     # step=0: before any gradient (initial model)
-    # Scheduler last_epoch tracks gradient updates done so far
-    start_step = scheduler.last_epoch
+    # Sharded path: scheduler.last_epoch tracks gradient updates done so far.
+    # WebDataset path: start_step is derived from job_index (clean shard-aligned
+    #   resume). Scheduler state is restored from the checkpoint and should agree.
+    if cfg.webdataset_dir is not None:
+        start_step = start_job_index * cfg.steps_per_job
+    else:
+        start_step = scheduler.last_epoch
     end_step = start_step + cfg.steps_per_job
-    if ckpt_data is not None and not is_seeding and start_step == 0:
+    if ckpt_data is not None and not is_seeding and start_step == 0 and cfg.webdataset_dir is None:
         log.error("!!! CHECKPOINT LOADED BUT start_step=0 - optimizer/scheduler state was not restored !!!")
     log.info(f"Starting training loop: steps {start_step} → {end_step}")
     model.train()  # Explicit: validate() restores, but be clear about initial state
-    # NOTE: tqdm shows job-local progress (e.g. "199/5001"), but `step` is global
-    pbar = tqdm(range(start_step, end_step + 1), desc="Training", unit="step")
+    # tqdm shows job-local progress; only rank 0 displays.
+    pbar = tqdm(
+        range(start_step, end_step + 1),
+        desc="Training", unit="step",
+        disable=not ddp.is_main(),
+    )
 
     for step in pbar:
         batch: TrainBatch | None = None
@@ -444,7 +526,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                     validate(
                         exp=exp,
                         step=step,
-                        model=model,
+                        model=core_model,
                         compute_raw_targets=compute_raw_targets,
                         scene_normalizer=scene_norm,
                         cls_normalizer=cls_norm,
@@ -465,6 +547,9 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                     )
             except Exception:
                 log.error(f"!!! VALIDATION FAILED at step {step} !!!\n{traceback.format_exc()}")
+            # All ranks barrier so non-main ranks (which run validate but skip
+            # comet logging via DummyExperiment) stay synchronised with rank 0.
+            ddp.barrier()
 
         # === SIGUSR1 CHECKPOINT ===
         global _checkpoint_requested
@@ -473,21 +558,24 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             _checkpoint_requested = False
             ema_loss = ema.get("total_loss")
             ckpt_path = make_ckpt_path(step)
-            save_checkpoint(
-                ckpt_path, model, cfg.backbone_name,
-                teacher_repo_id=cfg.teacher_repo_id,
-                teacher_name=cfg.teacher_name,
-                dataset=cfg.dataset,
-                glimpse_grid_size=cfg.glimpse_grid_size,
-                scene_resolution=cfg.scene_resolution,
-                step=step, train_loss=ema_loss.item() if ema_loss is not None else None,
-                comet_id=exp.get_key(),
-                optimizer_state=optimizer.state_dict(),
-                scheduler_state=scheduler.state_dict(),
-                training_config_history=training_config_history,
-                provenance_history=provenance_history,
-            )
-            update_symlink(run_dir / "latest.pt", ckpt_path)
+            if ddp.is_main():
+                save_checkpoint(
+                    ckpt_path, core_model, cfg.backbone_name,
+                    teacher_repo_id=cfg.teacher_repo_id,
+                    teacher_name=cfg.teacher_name,
+                    dataset=cfg.dataset,
+                    glimpse_grid_size=cfg.glimpse_grid_size,
+                    scene_resolution=cfg.scene_resolution,
+                    step=step, train_loss=ema_loss.item() if ema_loss is not None else None,
+                    comet_id=exp.get_key(),
+                    optimizer_state=optimizer.state_dict(),
+                    scheduler_state=scheduler.state_dict(),
+                    training_config_history=training_config_history,
+                    provenance_history=provenance_history,
+                    job_index=start_job_index,
+                )
+                update_symlink(run_dir / "latest.pt", ckpt_path)
+            ddp.barrier()
 
         # === TRAINING PHASE (only for step < end_step) ===
         if step < end_step:
@@ -501,7 +589,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             t_gpu_start = time.perf_counter()
 
             step_metrics = training_step(
-                model=model,
+                model=model,  # DDP-wrapped if dist; .module-proxied attrs work transparently
                 images=batch.images,
                 scene_target=batch.scene_target,
                 cls_target=batch.cls_target,
@@ -554,8 +642,13 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 assert isinstance(lr_val, float)
                 lr = lr_val
 
-                # Log all EMA metrics
-                metrics = {f"train/{k}": v.item() for k, v in ema.items()}
+                # Log all EMA metrics. Under DDP, all-reduce mean each scalar
+                # so the logged value reflects the global training population
+                # rather than rank 0's local batches.
+                metrics = {
+                    f"train/{k}": ddp.all_reduce_mean(v).item()
+                    for k, v in ema.items()
+                }
                 metrics["train/lr"] = lr
                 metrics["train/grad_norm"] = grad_norm
                 metrics["train/continue_prob"] = cfg.continue_prob
@@ -574,9 +667,10 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 data_str = f"d={data_pct:.0f}%" if t_total_so_far > 0 else ""
                 pbar.set_postfix_str(f"loss={ema_loss.item():.2e} grad={grad_norm:.2e} lr={lr:.2e} {data_str}")
 
-            # Per-module grad norms (at val intervals, after training)
+            # Per-module grad norms (at val intervals, after training).
+            # Use core_model so names don't get the "module." DDP prefix.
             if step % cfg.val_every == 0:
-                for name, norm in grad_norms_by_module(model, depth=1).items():
+                for name, norm in grad_norms_by_module(core_model, depth=1).items():
                     exp.log_metric(f"grad_norm/{name}", norm, step=step)
 
             # Optuna pruning (skip step 0 - EMA not meaningful yet)
@@ -614,24 +708,27 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 )
                 log_figure(exp, fig, "train/pca", step)
 
-    # End-of-job checkpoint (always saved)
+    # End-of-job checkpoint (rank 0 saves; others wait at barrier).
     ema_loss = ema.get("total_loss")
     ckpt_path = make_ckpt_path(end_step)
-    save_checkpoint(
-        ckpt_path, model, cfg.backbone_name,
-        teacher_repo_id=cfg.teacher_repo_id,
-        teacher_name=cfg.teacher_name,
-        dataset=cfg.dataset,
-        glimpse_grid_size=cfg.glimpse_grid_size,
-        scene_resolution=cfg.scene_resolution,
-        step=end_step, train_loss=ema_loss.item() if ema_loss is not None else None,
-        comet_id=exp.get_key(),
-        optimizer_state=optimizer.state_dict(),
-        scheduler_state=scheduler.state_dict(),
-        training_config_history=training_config_history,
-        provenance_history=provenance_history,
-    )
-    update_symlink(run_dir / "latest.pt", ckpt_path)
+    if ddp.is_main():
+        save_checkpoint(
+            ckpt_path, core_model, cfg.backbone_name,
+            teacher_repo_id=cfg.teacher_repo_id,
+            teacher_name=cfg.teacher_name,
+            dataset=cfg.dataset,
+            glimpse_grid_size=cfg.glimpse_grid_size,
+            scene_resolution=cfg.scene_resolution,
+            step=end_step, train_loss=ema_loss.item() if ema_loss is not None else None,
+            comet_id=exp.get_key(),
+            optimizer_state=optimizer.state_dict(),
+            scheduler_state=scheduler.state_dict(),
+            training_config_history=training_config_history,
+            provenance_history=provenance_history,
+            job_index=start_job_index,
+        )
+        update_symlink(run_dir / "latest.pt", ckpt_path)
+    ddp.barrier()
 
     ema_loss = ema.get("total_loss")
     final_loss = ema_loss.item() if ema_loss is not None else float("inf")
