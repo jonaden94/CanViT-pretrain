@@ -16,8 +16,8 @@
 
 # CanViT pretraining (WebDataset path) with multi-GPU / multi-node DDP.
 #
-# Each job processes shards_per_job = shards_per_gpu * n_gpus contiguous shards
-# from the precomputed schedule, saves a checkpoint with job_index, and exits.
+# Each job processes shards_per_job = shards_per_gpu * n_gpus contiguous shards,
+# saves a checkpoint with job_index, and exits.
 # The next job in the array reads job_index from the checkpoint and consumes
 # the next slice of shards.
 #
@@ -31,9 +31,8 @@
 # Resume existing run:
 #   sbatch --array=0-9%1 slurm_jonathan/train_ddp.sbatch --run-name train-XXXXXXX
 #
-# Pre-flight (run once before the first job): build the shard schedule.
-#   uv run python scripts/build_shard_schedule.py \
-#       --webdataset-dir "$WEBDATASET_DIR" --seed 0
+cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+source /user/henrich1/u25995/.bashrc
 
 set -eu
 

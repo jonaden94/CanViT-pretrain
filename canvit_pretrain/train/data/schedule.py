@@ -1,10 +1,4 @@
-"""Shard schedule helpers for WebDataset training under SLURM job arrays.
-
-The schedule is a flat list of shard paths produced by tiling per-epoch
-permutations of the training shards (excluding the last partial shard).
-It is built once by `scripts/build_shard_schedule.py` and saved alongside
-the dataset. Each job reads its slice from the schedule via job_index.
-"""
+"""Shard schedule helpers for WebDataset training under SLURM job arrays."""
 
 from __future__ import annotations
 
@@ -14,8 +8,6 @@ from pathlib import Path
 import numpy as np
 
 log = logging.getLogger(__name__)
-
-SCHEDULE_FILENAME = "shard_schedule.npz"
 
 
 def compute_shards_per_gpu(
@@ -36,58 +28,60 @@ def compute_shards_per_gpu(
     return samples_per_gpu // samples_per_shard
 
 
-def load_schedule(path: Path) -> tuple[list[str], dict[str, str]]:
-    """Load the shard schedule. Returns (shard_paths, metadata).
-
-    The schedule is stored as a numpy .npz with two arrays:
-      shards     — np.array of shard paths (str), length = n_epochs * n_shards
-      metadata   — single-row np.array of bytes describing seed, dataset hash,
-                   n_shards, n_epochs (for audit only, not enforcement).
-    """
-    assert path.exists(), f"Schedule not found at {path}. Build it with scripts/build_shard_schedule.py"
-    data = np.load(path, allow_pickle=False)
-    shards = data["shards"].tolist()
-    meta_keys = data["meta_keys"].tolist()
-    meta_vals = data["meta_vals"].tolist()
-    metadata = {k: v for k, v in zip(meta_keys, meta_vals)}
-    log.info(f"Loaded schedule: {len(shards):,} entries from {path}")
-    log.info(f"  metadata: {metadata}")
-    return shards, metadata
-
-
-def slice_for_job(
-    schedule: list[str],
+def compute_schedule_slice(
     *,
+    seed: int,
+    train_dir: Path,
     job_index: int,
     shards_per_gpu: int,
     world_size: int,
     rank: int,
 ) -> list[Path]:
-    """Slice the schedule for one (job, rank) tuple.
+    """Deterministically compute this rank's shard list for one job, no file IO.
 
-    Layout: each job consumes `shards_per_job = shards_per_gpu * world_size`
-    contiguous shards from the schedule. Within a job, ranks split that block
-    evenly: rank r gets the r-th `shards_per_gpu`-sized chunk.
+    The schedule is an infinite flat sequence built by repeating per-epoch
+    permutations of the training shards (last partial shard excluded). Job j
+    consumes shards_per_job = shards_per_gpu * world_size contiguous entries.
+    Within that block, rank r gets the r-th shards_per_gpu-sized chunk.
 
-    This deterministic layout makes it possible to use `wds.split_by_node`
-    inside WebDataset itself if we choose to (it would split a flat list across
-    ranks); we instead pre-slice per rank here so the loader sees only its own
-    shards. Either way the result is the same partition.
+    Epochs are generated lazily so the sequence is infinite.
     """
+    all_shards = sorted(train_dir.glob("shard-*.tar"))
+    assert all_shards, f"No shards in {train_dir}"
+    train_shards = all_shards[:-1]  # exclude partial last shard
+    n = len(train_shards)
+    assert n > 0, f"Need ≥2 shards in {train_dir} (last is excluded as partial)"
+
     shards_per_job = shards_per_gpu * world_size
-    start = job_index * shards_per_job
-    end = start + shards_per_job
-    assert end <= len(schedule), (
-        f"Schedule exhausted: job_index={job_index} requires shards "
-        f"[{start}:{end}] but schedule has {len(schedule)}. "
-        f"Rebuild with more epochs in scripts/build_shard_schedule.py."
+    flat_start = job_index * shards_per_job
+    flat_end = flat_start + shards_per_job
+
+    rng = np.random.default_rng(seed=seed)
+    pos = 0
+    job_block: list[Path] = []
+
+    while pos < flat_end:
+        epoch_perm = rng.permutation(n)
+        epoch_paths = [train_shards[int(i)] for i in epoch_perm]
+        epoch_end = pos + n
+
+        if epoch_end > flat_start:
+            lo = max(0, flat_start - pos)
+            hi = min(n, flat_end - pos)
+            job_block.extend(epoch_paths[lo:hi])
+
+        pos = epoch_end
+
+    assert len(job_block) == shards_per_job, (
+        f"Expected {shards_per_job} shards in job block, got {len(job_block)}"
     )
-    job_block = schedule[start:end]
+
     rank_start = rank * shards_per_gpu
     rank_end = rank_start + shards_per_gpu
     rank_shards = job_block[rank_start:rank_end]
+
     log.info(
-        f"Job slice: job_index={job_index}, rank={rank}/{world_size}, "
-        f"shards_per_gpu={shards_per_gpu}, schedule[{start + rank_start}:{start + rank_end}]"
+        f"Schedule: seed={seed}, job_index={job_index}, rank={rank}/{world_size}, "
+        f"shards_per_gpu={shards_per_gpu}, n_train_shards={n}"
     )
-    return [Path(s) for s in rank_shards]
+    return rank_shards

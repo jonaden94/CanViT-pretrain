@@ -14,7 +14,6 @@ from canvit_pytorch.preprocess import preprocess
 from canvit_pretrain.datasets import IndexedImageFolder
 from torch.utils.data import DataLoader, Dataset
 
-from .schedule import SCHEDULE_FILENAME
 from .shards import ShardedFeatureLoader
 from .webdataset import WebDatasetTrainLoader, WebDatasetValLoader
 
@@ -182,16 +181,13 @@ def _create_webdataset_loaders(
     assert train_dir.is_dir(), f"train dir not found: {train_dir}"
     assert val_dir_wds.is_dir(), f"val dir not found: {val_dir_wds}"
 
-    schedule_path = cfg.shard_schedule_path or (train_dir / SCHEDULE_FILENAME)
-
     log.info(f"WebDataset path: {cfg.webdataset_dir}")
     log.info(f"  train: {train_dir}")
     log.info(f"  val: {val_dir_wds}")
-    log.info(f"  schedule: {schedule_path}")
 
     train_loader = WebDatasetTrainLoader(
         train_dir=train_dir,
-        schedule_path=schedule_path,
+        seed=cfg.seed,
         job_index=job_index,
         batch_size_per_gpu=cfg.batch_size,
         steps_per_job=cfg.steps_per_job,

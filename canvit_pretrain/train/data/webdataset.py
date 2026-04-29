@@ -1,8 +1,8 @@
 """WebDataset-based train/val loaders.
 
-Each rank receives a pre-sliced list of shard paths (computed via
-`schedule.slice_for_job`). DataLoader workers then split those shards via
-`wds.split_by_worker` — one shard per worker (`num_workers = shards_per_gpu`).
+Each rank receives a deterministically computed list of shard paths (via
+`schedule.compute_schedule_slice`). DataLoader workers then split those shards
+via `wds.split_by_worker` — one shard per worker (`num_workers = shards_per_gpu`).
 
 Loader interface matches the existing `ShardedFeatureLoader` and
 `InfiniteLoader` so `loop.py` can call `train_loader.next()` and
@@ -28,7 +28,7 @@ from PIL import Image
 from torch import Tensor
 from torch.utils.data import DataLoader
 
-from .schedule import compute_shards_per_gpu, load_schedule, slice_for_job
+from .schedule import compute_schedule_slice, compute_shards_per_gpu
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -95,7 +95,7 @@ class WebDatasetTrainLoader:
         self,
         *,
         train_dir: Path,
-        schedule_path: Path,
+        seed: int,
         job_index: int,
         batch_size_per_gpu: int,
         steps_per_job: int,
@@ -118,18 +118,14 @@ class WebDatasetTrainLoader:
         self.shards_per_gpu = compute_shards_per_gpu(
             steps_per_job, batch_size_per_gpu, self.samples_per_shard
         )
-        schedule, _ = load_schedule(schedule_path)
-        self.shard_files: list[Path] = slice_for_job(
-            schedule,
+        self.shard_files: list[Path] = compute_schedule_slice(
+            seed=seed,
+            train_dir=train_dir,
             job_index=job_index,
             shards_per_gpu=self.shards_per_gpu,
             world_size=world_size,
             rank=rank,
         )
-        # Convert to absolute paths under train_dir if schedule stored relative.
-        self.shard_files = [
-            p if p.is_absolute() else train_dir / p for p in self.shard_files
-        ]
         self.train_dir = train_dir
         self.batch_size = batch_size_per_gpu
         self.image_size = image_size
