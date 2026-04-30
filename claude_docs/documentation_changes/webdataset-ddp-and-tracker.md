@@ -386,7 +386,7 @@ uv run python scripts/build_shard_schedule.py \
 ```bash
 uv run python -m canvit_pretrain.train \
     --webdataset-dir "$WEBDATASET_DIR" \
-    --steps-per-job 16 --batch-size 256 \
+    --steps-per-job 16 --batch-size-per-gpu 256 \
     --ckpt-dir /tmp/canvit-test \
     --tracker wandb --wandb-project canvit-pretrain
 ```
@@ -465,7 +465,7 @@ sbatch slurm_jonathan/train.sbatch --tracker none         # no logging at all
    `$WEBDATASET_DIR/train-shuffled/shard_schedule.npz` and contains
    `1000 * (n_shards - 1)` entries with the last shard absent.
 3. **Single-GPU WebDataset path**:
-   `uv run python -m canvit_pretrain.train --webdataset-dir $WEBDATASET_DIR --steps-per-job 16 --batch-size 256 --ckpt-dir /tmp/canvit-test --tracker none`.
+   `uv run python -m canvit_pretrain.train --webdataset-dir $WEBDATASET_DIR --steps-per-job 16 --batch-size-per-gpu 256 --ckpt-dir /tmp/canvit-test --tracker none`.
    Confirm: shard divisibility log, normalizer stats log, no tracker
    network calls, one job's worth of steps, checkpoint with `job_index=0`
    saved, second invocation resumes with `job_index=1` and slices the next
