@@ -33,10 +33,12 @@ class TrainBatch(NamedTuple):
     raw_scene_target: Tensor  # Raw teacher scene features (for metrics)
     raw_cls_target: Tensor  # Raw teacher CLS features (for metrics)
 
-# Force FlashAttention for SDPA - fail loud if unavailable
-torch.backends.cuda.enable_flash_sdp(True)
-torch.backends.cuda.enable_mem_efficient_sdp(False)
-torch.backends.cuda.enable_math_sdp(False)
+# FlashAttention requires sm_80+ (Ampere/Hopper). On older GPUs (e.g. V100/sm_70)
+# fall back to PyTorch defaults which include mem_efficient and math SDPA.
+if torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 0):
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    torch.backends.cuda.enable_math_sdp(False)
 from canvit_pytorch import CLSStandardizer, PatchStandardizer  # noqa: E402
 from canvit_pytorch.backbone.vit import NormFeatures  # noqa: E402
 
@@ -355,11 +357,17 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         )
         log.info(f"Optimizer: AdamW, lr={start_lr:.2e}→{cfg.peak_lr:.2e} (constant), wd={cfg.weight_decay:.2e}")
 
+    # bfloat16 requires sm_80+ (Ampere/Hopper); fall back to float16 on older GPUs.
+    amp_dtype = (
+        torch.bfloat16
+        if cfg.device.type == "cuda" and torch.cuda.get_device_capability() >= (8, 0)
+        else torch.float16
+    )
     amp_ctx = (
-        torch.autocast(device_type=cfg.device.type, dtype=torch.bfloat16)
+        torch.autocast(device_type=cfg.device.type, dtype=amp_dtype)
         if cfg.amp else nullcontext()
     )
-    log.info(f"AMP: {'bfloat16' if cfg.amp else 'disabled'}")
+    log.info(f"AMP: {amp_dtype} " if cfg.amp else "AMP: disabled")
     log.info(f"Non-blocking transfers: {'enabled' if cfg.non_blocking_transfer else 'DISABLED (sync)'}")
 
     # === RESTORE MODEL WEIGHTS ===
