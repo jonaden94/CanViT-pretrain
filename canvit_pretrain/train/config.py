@@ -31,7 +31,7 @@ class Config:
     glimpse_grid_size: int = 8  # tokens per glimpse side
     canvas_patch_grid_size: int = 32  # canvas spatial grid side length in tokens
     # Training
-    batch_size: int = 64
+    batch_size_per_gpu: int = 64
     warmup_steps: int = 100_000
     start_lr: float | None = 1e-7  # None = peak_lr / warmup_steps
     peak_lr: float = 4e-4

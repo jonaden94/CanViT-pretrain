@@ -134,7 +134,7 @@ def create_loaders(
     train_loader = ShardedFeatureLoader(
         shards_dir=shards_dir,
         image_size=sz,
-        batch_size=cfg.batch_size,
+        batch_size=cfg.batch_size_per_gpu,
         num_workers=cfg.num_workers,
         start_step=start_step,
         image_root=cfg.feature_image_root,
@@ -160,7 +160,7 @@ def create_loaders(
     # CRITICAL: shuffle=True required! Without it, batches are sequential
     # (all tench, then all goldfish, etc.) which gives misleading metrics.
     val_loader = InfiniteLoader(DataLoader(
-        val_ds, batch_size=cfg.batch_size, shuffle=True,
+        val_ds, batch_size=cfg.batch_size_per_gpu, shuffle=True,
         num_workers=cfg.num_workers, pin_memory=True, drop_last=True, persistent_workers=persistent,
     ))
 
@@ -189,7 +189,7 @@ def _create_webdataset_loaders(
         train_dir=train_dir,
         seed=cfg.seed,
         job_index=job_index,
-        batch_size_per_gpu=cfg.batch_size,
+        batch_size_per_gpu=cfg.batch_size_per_gpu,
         steps_per_job=cfg.steps_per_job,
         image_size=cfg.scene_resolution,
         world_size=world_size,
@@ -197,7 +197,7 @@ def _create_webdataset_loaders(
     )
     val_loader = WebDatasetValLoader(
         val_dir=val_dir_wds,
-        batch_size_per_gpu=cfg.batch_size,
+        batch_size_per_gpu=cfg.batch_size_per_gpu,
         image_size=cfg.scene_resolution,
         world_size=world_size,
         rank=rank,
