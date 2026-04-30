@@ -8,6 +8,7 @@ from typing import NamedTuple
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from canvit_pytorch import CanViTOutput, RecurrentState, Viewpoint, sample_at_viewpoint
 from torch import Tensor
@@ -128,6 +129,14 @@ def training_step(
     n_glimpses = chunk_size
     while random.random() < continue_prob:
         n_glimpses += chunk_size
+
+    # Synchronise n_glimpses across DDP ranks: each rank samples independently,
+    # so without broadcast different ranks call backward() a different number of
+    # times, causing NCCL allreduce to deadlock.
+    if dist.is_available() and dist.is_initialized():
+        n_glimpses_t = torch.tensor(n_glimpses, device=device)
+        dist.broadcast(n_glimpses_t, src=0)
+        n_glimpses = int(n_glimpses_t.item())
 
     # t1_schedule[t-1][branch_idx] = viewpoint type for timestep t, branch branch_idx
     # t>=1 is always all-RANDOM
