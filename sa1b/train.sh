@@ -76,7 +76,7 @@ exec uv run python -m canvit_pretrain.train \
     --canvas-patch-grid-size 64 \
     --scene-resolution 1024 \
     --steps-per-job "$STEPS_PER_JOB" \
-    --batch-size "$BATCH_SIZE" \
+    --batch-size-per-gpu "$BATCH_SIZE" \
     --num-workers "$NUM_WORKERS" \
     --warmup-steps 2000 \
     --normalizer-max-samples 1024 \

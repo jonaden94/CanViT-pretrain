@@ -1,0 +1,20 @@
+# Grete cluster environment variables.
+# Copy to .envrc: cp .envrc.grete .envrc && direnv allow
+# (or it will be sourced directly by slurm_jonathan/env.sh in SLURM jobs)
+
+# Caches
+export HF_HOME="/user/henrich1/u25995/.cache/huggingface"
+export TORCH_HOME="/user/henrich1/u25995/.cache/torch"
+export TORCH_COMPILE_CACHE_DIR="/user/henrich1/u25995/.cache/torch_compile"
+
+# Storage
+export CHECKPOINTS_DIR="/user/henrich1/u25995/jonathan/repos/CanViT-pretrain/checkpoints"
+export WEBDATASET_DIR="/user/henrich1/u25995/jonathan/datasets/webdataset-imagenet-1k"  # must contain train-shuffled/ and val/
+
+# Tracker config
+export WANDB_PROJECT="canvit-pretrain"   # TODO: change as needed
+export WANDB_ENTITY=""                   # leave empty to use your default account
+export WANDB_DIR="/mnt/vast-nhr/projects/nib00021/jonathan"
+
+# Credentials
+if [ -f "${HF_HOME:-}/token" ] && [ -z "${HF_TOKEN:-}" ]; then export HF_TOKEN=$(cat "$HF_HOME/token"); fi
