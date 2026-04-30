@@ -212,7 +212,7 @@ def training_step(
         if do_viz:
             assert viz_data is not None
             viz_data.viewpoints.append(vp0_named)
-            viz_data.viz_samples.append(extract_sample0_viz(out, glimpse, L.scene_pred, model))
+            viz_data.viz_samples.append(extract_sample0_viz(out, glimpse, L.scene_pred, core_model))
 
         chunk = ChunkState(
             state=out.state,
@@ -252,7 +252,7 @@ def training_step(
             if do_viz:
                 assert viz_data is not None
                 viz_data.viewpoints.append(vp_named)
-                viz_data.viz_samples.append(extract_sample0_viz(out, glimpse, L.scene_pred, model))
+                viz_data.viz_samples.append(extract_sample0_viz(out, glimpse, L.scene_pred, core_model))
 
             chunk.chunk_combined_loss = chunk.chunk_combined_loss + L.combined.float()
             chunk.total_combined_loss = chunk.total_combined_loss + L.combined.detach().float()
