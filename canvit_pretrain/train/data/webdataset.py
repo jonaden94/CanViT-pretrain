@@ -66,12 +66,28 @@ def _build_pipeline(
     batch_size: int,
     use_worker_split: bool,
 ) -> wds.WebDataset:
-    """Build a WebDataset pipeline that yields (image, label, cls, ptch) batches."""
+    """Build a WebDataset pipeline that yields (image, label, cls, ptch) batches.
+
+    wds.WebDataset already applies split_by_worker internally (via its default
+    workersplitter parameter) at the shard-URL level — one shard per worker.
+    We must NOT add split_by_worker again via .compose(), as that would apply
+    it a second time at the decoded-sample level, keeping only every Nth sample
+    per worker and reducing throughput by num_workers. See claude_docs/webdataset.md.
+
+    nodesplitter=None: we pre-slice shards per rank before constructing the
+    dataset, so no node-level splitting inside WebDataset is needed (the default
+    single_node_only would raise ValueError under DDP).
+    """
     # shardshuffle=False — the schedule already provides global shuffle.
     # empty_check=False — single-shard val/init pipelines should not warn.
-    ds = wds.WebDataset(shards, shardshuffle=False, empty_check=False)
-    if use_worker_split:
-        ds = ds.compose(wds.split_by_worker)
+    workersplitter = wds.split_by_worker if use_worker_split else None
+    ds = wds.WebDataset(
+        shards,
+        shardshuffle=False,
+        empty_check=False,
+        nodesplitter=None,
+        workersplitter=workersplitter,
+    )
     return (
         ds.to_tuple("jpg", "json", "cls.npy", "ptch.npy")
         .map_tuple(
@@ -131,11 +147,18 @@ class WebDatasetTrainLoader:
         self.image_size = image_size
         self.num_workers = self.shards_per_gpu
 
+        total_samples = len(self.shard_files) * self.samples_per_shard
+        assert total_samples == steps_per_job * batch_size_per_gpu, (
+            f"Sample count mismatch: {len(self.shard_files)} shards × {self.samples_per_shard} "
+            f"= {total_samples} samples, but steps_per_job × batch_size = "
+            f"{steps_per_job} × {batch_size_per_gpu} = {steps_per_job * batch_size_per_gpu}"
+        )
+
         log.info(
             f"WebDatasetTrainLoader: rank={rank}/{world_size}, job_index={job_index}, "
             f"shards_per_gpu={self.shards_per_gpu}, num_workers={self.num_workers}, "
             f"samples_per_shard={self.samples_per_shard}, batch_size={batch_size_per_gpu}, "
-            f"steps_per_job={steps_per_job}"
+            f"steps_per_job={steps_per_job}, total_samples={total_samples} ✓"
         )
 
         self._iter: Iterator | None = None
