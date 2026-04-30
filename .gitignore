@@ -8,6 +8,7 @@ wheels/
 
 # Virtual environments
 .venv/
+.venv-v100/
 
 # Testing/linting
 .pytest_cache/
@@ -31,3 +32,5 @@ checkpoints/
 throwaway/
 profile_*.json
 misc/
+logs/
+plan_dataloading/
