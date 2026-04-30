@@ -587,7 +587,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             t_gpu_start = time.perf_counter()
 
             step_metrics = training_step(
-                model=model,  # DDP-wrapped if dist; .module-proxied attrs work transparently
+                model=model,  # DDP-wrapped if dist; step.py unwraps via getattr(model, "module", model)
                 images=batch.images,
                 scene_target=batch.scene_target,
                 cls_target=batch.cls_target,

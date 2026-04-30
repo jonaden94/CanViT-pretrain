@@ -120,7 +120,9 @@ def training_step(
     device = images.device
     B = images.shape[0]
 
-    state_init = model.init_state(batch_size=B, canvas_grid_size=canvas_grid_size)
+    # DDP wraps forward() but not custom methods — unwrap for direct method calls.
+    core_model = getattr(model, "module", model)
+    state_init = core_model.init_state(batch_size=B, canvas_grid_size=canvas_grid_size)
 
     # Sample trajectory length (shared across branches for this step)
     n_glimpses = chunk_size
@@ -155,8 +157,8 @@ def training_step(
         return StepOutput(out=out, glimpse=glimpse)
 
     def compute_loss(out: CanViTOutput) -> LossOutput:
-        scene_pred = model.predict_teacher_scene(out.state.canvas)
-        cls_pred = model.predict_scene_teacher_cls(out.state.recurrent_cls)
+        scene_pred = core_model.predict_teacher_scene(out.state.canvas)
+        cls_pred = core_model.predict_scene_teacher_cls(out.state.recurrent_cls)
 
         scene_patches_loss = torch.zeros((), device=device)
         scene_cls_loss = torch.zeros((), device=device)
@@ -188,8 +190,8 @@ def training_step(
 
         # Capture initial state for viz (before any glimpses)
         if do_viz:
-            init_scene = model.predict_teacher_scene(state_init.canvas)
-            init_spatial = model.get_spatial(state_init.canvas[0:1])[0]
+            init_scene = core_model.predict_teacher_scene(state_init.canvas)
+            init_spatial = core_model.get_spatial(state_init.canvas[0:1])[0]
             viz_data = TrainVizData(
                 image=imagenet_denormalize_to_numpy(images[0]),
                 teacher_features=scene_target[0].cpu().float().numpy(),
