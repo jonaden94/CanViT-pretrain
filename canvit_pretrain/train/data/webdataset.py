@@ -2,7 +2,10 @@
 
 Each rank receives a deterministically computed list of shard paths (via
 `schedule.compute_schedule_slice`). DataLoader workers then split those shards
-via `wds.split_by_worker` — one shard per worker (`num_workers = shards_per_gpu`).
+via `wds.split_by_worker` — each worker streams one or more shards sequentially.
+The actual `num_workers` is derived from `cfg.num_workers`, capped at
+`shards_per_gpu`, and rounded down to a divisor of `shards_per_gpu` so every
+worker gets the same number of shards.
 
 Loader interface matches the existing `ShardedFeatureLoader` and
 `InfiniteLoader` so `loop.py` can call `train_loader.next()` and
@@ -118,6 +121,7 @@ class WebDatasetTrainLoader:
         image_size: int,
         world_size: int,
         rank: int,
+        num_workers: int,
     ) -> None:
         info = _read_info(train_dir)
         assert "cls.npy" in info["keys"], (
@@ -145,7 +149,30 @@ class WebDatasetTrainLoader:
         self.train_dir = train_dir
         self.batch_size = batch_size_per_gpu
         self.image_size = image_size
-        self.num_workers = self.shards_per_gpu
+
+        # Resolve num_workers: cap at shards_per_gpu (extra workers would get
+        # zero shards), then round down to a divisor of shards_per_gpu so every
+        # worker streams the same number of shards (keeps the per-worker batch
+        # count uniform under .batched(partial=False)).
+        requested = max(1, num_workers)
+        capped = min(requested, self.shards_per_gpu)
+        nw = capped
+        while self.shards_per_gpu % nw != 0:
+            nw -= 1
+        self.num_workers = nw
+        shards_per_worker = self.shards_per_gpu // self.num_workers
+        if requested != self.num_workers:
+            log.info(
+                f"WebDatasetTrainLoader: requested num_workers={requested}, "
+                f"using {self.num_workers} "
+                f"({'capped to shards_per_gpu' if requested > self.shards_per_gpu else 'rounded down for divisibility'}); "
+                f"each worker streams {shards_per_worker} shard(s)"
+            )
+        else:
+            log.info(
+                f"WebDatasetTrainLoader: num_workers={self.num_workers}; "
+                f"each worker streams {shards_per_worker} shard(s)"
+            )
 
         total_samples = len(self.shard_files) * self.samples_per_shard
         assert total_samples == steps_per_job * batch_size_per_gpu, (

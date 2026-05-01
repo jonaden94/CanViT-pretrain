@@ -194,6 +194,7 @@ def _create_webdataset_loaders(
         image_size=cfg.scene_resolution,
         world_size=world_size,
         rank=rank,
+        num_workers=cfg.num_workers,
     )
     val_loader = WebDatasetValLoader(
         val_dir=val_dir_wds,
