@@ -34,3 +34,5 @@ profile_*.json
 misc/
 logs/
 plan_dataloading/
+.claude
+slurm_nhr/canvit_train_state
