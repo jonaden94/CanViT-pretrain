@@ -471,6 +471,12 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             find_unused_parameters=False,
             broadcast_buffers=False,
         )
+        # TBPTT (chunk_size=2) reuses parameters across both forward chunks in
+        # a single backward, causing DDP's autograd hook to fire twice per
+        # backward and raise "Parameter at index N has been marked as ready
+        # twice". _set_static_graph() tells DDP to learn the parameter-ready
+        # order on the first backward and reuse it, preventing the double-fire.
+        model._set_static_graph()
 
     # EMA tracking for all metrics
     ema = EMATracker(alpha=cfg.ema_alpha)
