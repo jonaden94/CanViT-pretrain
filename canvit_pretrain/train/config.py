@@ -80,7 +80,7 @@ class Config:
     normalizer_max_samples: int = 0
     """Max samples from shard for normalizer stats. 0 = use all samples."""
     # Training
-    num_workers: int = 16
+    num_workers: int = 4
     scene_resolution: int = 512
     dataset: str = "in21k"
     # Logging
