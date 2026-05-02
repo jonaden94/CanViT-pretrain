@@ -60,8 +60,7 @@ def init_dist() -> None:
         f"device={_device}, MASTER_ADDR={os.environ.get('MASTER_ADDR')}, "
         f"MASTER_PORT={os.environ.get('MASTER_PORT')}"
     )
-    dist.init_process_group(backend="nccl", rank=_rank, world_size=_world_size,
-                            device_id=torch.device("cuda", _local_rank))
+    dist.init_process_group(backend="nccl", rank=_rank, world_size=_world_size)
 
 
 def is_dist() -> bool:
