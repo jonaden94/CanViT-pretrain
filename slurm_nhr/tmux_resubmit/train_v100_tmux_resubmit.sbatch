@@ -1,4 +1,6 @@
 #!/bin/bash
+##SBATCH -p grete:shared
+##SBATCH -G A100:1
 #SBATCH -p jupyter
 #SBATCH -G V100:1
 #SBATCH -t 0-01:00:00

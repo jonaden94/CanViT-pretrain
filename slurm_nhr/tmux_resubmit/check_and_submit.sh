@@ -3,8 +3,8 @@
 
 REPO="/user/henrich1/u25995/jonathan/repos/CanViT-pretrain"
 STATE_FILE="$REPO/slurm_nhr/canvit_train_state"
-# SBATCH_SCRIPT="$REPO/slurm_nhr/tmux_resubmit/train_v100_tmux_resubmit.sbatch"
-SBATCH_SCRIPT="$REPO/slurm_nhr/tmux_resubmit/train_ddp_v100_tmux_resubmit.sbatch"
+SBATCH_SCRIPT="$REPO/slurm_nhr/tmux_resubmit/train_v100_tmux_resubmit.sbatch"
+# SBATCH_SCRIPT="$REPO/slurm_nhr/tmux_resubmit/train_ddp_v100_tmux_resubmit.sbatch"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
