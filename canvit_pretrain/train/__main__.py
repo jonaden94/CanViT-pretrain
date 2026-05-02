@@ -1,5 +1,21 @@
 """Entry point for CanViT pretraining."""
 
+# CRITICAL (DDP-safety): redirect matplotlib config + cache to a per-rank,
+# per-job /tmp directory BEFORE any matplotlib import happens anywhere in the
+# dep tree. The default ~/.config/matplotlib + ~/.cache/matplotlib paths are
+# on shared NFS, and concurrent reads/writes from multiple DDP ranks (and from
+# concurrent jobs on the same node) race on the font cache file, leaving it in
+# a state that makes subsequent matplotlib calls hang indefinitely. Also force
+# the non-interactive Agg backend to skip any GUI/display probing.
+import os as _os
+_slurm_rank = _os.environ.get("SLURM_PROCID", "0")
+_slurm_job = _os.environ.get("SLURM_JOB_ID", "nojob")
+_mpl_dir = f"/tmp/mpl_config_rank{_slurm_rank}_job{_slurm_job}"
+_os.makedirs(_mpl_dir, exist_ok=True)
+_os.environ["MPLCONFIGDIR"] = _mpl_dir
+import matplotlib as _matplotlib  # noqa: E402
+_matplotlib.use("Agg")
+
 import logging
 from dataclasses import replace
 
