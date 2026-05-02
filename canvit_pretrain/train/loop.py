@@ -639,7 +639,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
             # Update EMA for all metrics
             ema.update("total_loss", step_metrics.total_loss)
-            ema.update("n_glimpses", torch.tensor(step_metrics.n_glimpses, dtype=torch.float32))
+            ema.update("n_glimpses", torch.tensor(step_metrics.n_glimpses, dtype=torch.float32, device=cfg.device))
             for prefix, m in [("full", step_metrics.full_start), ("random", step_metrics.random_start)]:
                 if m is None:
                     continue
