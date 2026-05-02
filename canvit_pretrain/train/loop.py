@@ -430,8 +430,10 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         log.info("Standardizer stats loaded from model state_dict")
 
     if need_init:
-        # Rank 0 fills standardizer state; the subsequent DDP wrap broadcasts
-        # buffers to all ranks (DDP's default broadcast_buffers=True).
+        # Rank 0 fills standardizer state, then we explicitly broadcast the
+        # resulting buffers to all ranks. The explicit broadcast is required
+        # because broadcast_buffers=False on the DDP wrap disables the
+        # per-forward auto-sync that would otherwise propagate them.
         if ddp.is_main():
             if cfg.webdataset_dir is not None:
                 assert isinstance(train_loader, WebDatasetTrainLoader)
@@ -447,6 +449,9 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 assert shard_files, f"No shards in {shards_dir}"
                 init_normalizer_stats_from_shard(shard_files[0], scene_norm, cls_norm, cfg.device, cfg.normalizer_max_samples)
         ddp.barrier()
+        if ddp.is_dist():
+            ddp.broadcast_module_buffers(scene_norm)
+            ddp.broadcast_module_buffers(cls_norm)
 
     log.info(
         f"Training: {cfg.n_full_start_branches} full + {cfg.n_random_start_branches} random branches,"
