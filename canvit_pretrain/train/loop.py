@@ -565,7 +565,11 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         do_curves = step % cfg.val_every == 0 and val_count % cfg.curve_every_n_vals == 0
 
         # === VALIDATION/VIZ PHASE (state after `step` gradient updates) ===
-        if step % cfg.val_every == 0:
+        # Skip validation at end_step: it would re-validate the same model
+        # state that the next job's first step (== end_step) will validate
+        # again on resume. This eliminates the duplicate cross-job validation
+        # without affecting any val_every interval inside the job.
+        if step % cfg.val_every == 0 and step != end_step:
             log.info(f"Starting validation at step {step}")
 
             # Validation on val batch (always at val_every)
