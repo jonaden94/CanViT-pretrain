@@ -47,6 +47,15 @@ class CheckpointData(TypedDict):
     # On resume, the next job uses job_index + 1. None for legacy checkpoints
     # and for the sharded-features path (which uses scheduler.last_epoch).
     job_index: int | None
+    # WebDataset shard-schedule invariants — the four values that determine
+    # `compute_schedule_slice`'s offset (`job_index * shards_per_gpu * world_size`).
+    # Asserted-equal at resume time so changing any of them between save and
+    # resume cannot silently re-process or skip shards. None on the
+    # sharded-features path (which doesn't use the WebDataset schedule).
+    ddp_world_size: int | None
+    batch_size_per_gpu: int | None
+    steps_per_job: int | None
+    samples_per_shard: int | None
 
     # --- Provenance (last save only — see provenance_history for full trail) ---
     timestamp: str
@@ -169,6 +178,10 @@ def save(
     training_config_history: dict[str, dict] | None = None,
     provenance_history: dict[str, dict] | None = None,
     job_index: int | None = None,
+    ddp_world_size: int | None = None,
+    batch_size_per_gpu: int | None = None,
+    steps_per_job: int | None = None,
+    samples_per_shard: int | None = None,
 ) -> None:
     """Save checkpoint with all info needed to reconstruct model and push to hub."""
     assert isinstance(model.cfg, CanViTForPretrainingConfig)
@@ -193,6 +206,10 @@ def save(
         "training_config_history": training_config_history,
         "provenance_history": provenance_history,
         "job_index": job_index,
+        "ddp_world_size": ddp_world_size,
+        "batch_size_per_gpu": batch_size_per_gpu,
+        "steps_per_job": steps_per_job,
+        "samples_per_shard": samples_per_shard,
         "timestamp": datetime.now(UTC).isoformat(),
         "git_commit": git_commit,
         "git_dirty": git_dirty,
@@ -249,6 +266,10 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
         "training_config_history": raw["training_config_history"],
         "provenance_history": raw.get("provenance_history"),
         "job_index": raw.get("job_index"),
+        "ddp_world_size": raw["ddp_world_size"],
+        "batch_size_per_gpu": raw["batch_size_per_gpu"],
+        "steps_per_job": raw["steps_per_job"],
+        "samples_per_shard": raw["samples_per_shard"],
         "timestamp": raw["timestamp"],
         "git_commit": raw["git_commit"],
         "git_dirty": raw["git_dirty"],

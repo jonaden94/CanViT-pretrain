@@ -333,6 +333,36 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     )
     assert isinstance(train_loader, (ShardedFeatureLoader, WebDatasetTrainLoader))
 
+    # WebDataset resume invariants: shard-schedule offsets are deterministic in
+    # (world_size, batch_size_per_gpu, steps_per_job, samples_per_shard); changing
+    # any of them between save and resume silently re-processes or skips shards.
+    if cfg.webdataset_dir is not None and ckpt_data is not None and not is_seeding:
+        assert isinstance(train_loader, WebDatasetTrainLoader)
+        saved = (
+            ckpt_data["ddp_world_size"],
+            ckpt_data["batch_size_per_gpu"],
+            ckpt_data["steps_per_job"],
+            ckpt_data["samples_per_shard"],
+        )
+        current = (
+            ddp.world_size(),
+            cfg.batch_size_per_gpu,
+            cfg.steps_per_job,
+            train_loader.samples_per_shard,
+        )
+        if saved != current:
+            raise RuntimeError(
+                "WebDataset resume config mismatch — refusing to resume because the "
+                "shard-schedule offset would be wrong (silent shard re-processing or "
+                "skipping). "
+                f"Saved: world_size={saved[0]}, batch_size_per_gpu={saved[1]}, "
+                f"steps_per_job={saved[2]}, samples_per_shard={saved[3]}. "
+                f"Current: world_size={current[0]}, batch_size_per_gpu={current[1]}, "
+                f"steps_per_job={current[2]}, samples_per_shard={current[3]}. "
+                "If you intend to start a new training schedule with different values, "
+                "use --seed-ckpt instead."
+            )
+
     trainable = [p for p in model.parameters() if p.requires_grad]
     n_trainable = sum(p.numel() for p in trainable)
     n_total = count_parameters(model)
@@ -595,6 +625,13 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                     training_config_history=training_config_history,
                     provenance_history=provenance_history,
                     job_index=start_job_index,
+                    ddp_world_size=ddp.world_size(),
+                    batch_size_per_gpu=cfg.batch_size_per_gpu,
+                    steps_per_job=cfg.steps_per_job,
+                    samples_per_shard=(
+                        train_loader.samples_per_shard
+                        if isinstance(train_loader, WebDatasetTrainLoader) else None
+                    ),
                 )
                 update_symlink(run_dir / "latest.pt", ckpt_path)
             ddp.barrier()
@@ -749,6 +786,13 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             training_config_history=training_config_history,
             provenance_history=provenance_history,
             job_index=start_job_index,
+            ddp_world_size=ddp.world_size(),
+            batch_size_per_gpu=cfg.batch_size_per_gpu,
+            steps_per_job=cfg.steps_per_job,
+            samples_per_shard=(
+                train_loader.samples_per_shard
+                if isinstance(train_loader, WebDatasetTrainLoader) else None
+            ),
         )
         update_symlink(run_dir / "latest.pt", ckpt_path)
     ddp.barrier()
