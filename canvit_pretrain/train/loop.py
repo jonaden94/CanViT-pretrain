@@ -454,11 +454,14 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     )
 
     # === DDP WRAP ===
-    # Wrap after standardizer init so DDP construction broadcasts the
-    # already-initialized buffers from rank 0 to all ranks (DDP default:
-    # broadcast_buffers=True). We keep `core_model` for state_dict access
-    # and pass the unwrapped model to validate(); the wrapped `model` is
-    # used for the training forward (where DDP gradient sync happens).
+    # broadcast_buffers=False: prevents DDP from broadcasting model buffers
+    # in-place at the start of every forward pass. With TBPTT (chunk_size=2)
+    # two forwards run between consecutive backwards; an in-place buffer
+    # broadcast between them mutates tensors saved by AOT autograd, causing
+    # a version-mismatch RuntimeError during backward
+    # ("[torch.cuda.FloatTensor [...]] is at version 3; expected version 2").
+    # We keep `core_model` for state_dict access and pass it to validate();
+    # the wrapped `model` is used for the training forward (gradient sync).
     core_model = model
     if ddp.is_dist():
         log.info(f"Wrapping model in DDP (local_rank={ddp.local_rank()})")
@@ -466,6 +469,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             model,
             device_ids=[ddp.local_rank()],
             find_unused_parameters=False,
+            broadcast_buffers=False,
         )
 
     # EMA tracking for all metrics
