@@ -521,6 +521,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
         # === VALIDATION/VIZ PHASE (state after `step` gradient updates) ===
         if step % cfg.val_every == 0:
+            log.info(f"Starting validation at step {step}")
 
             # Validation on val batch (always at val_every)
             val_images, val_labels = val_loader.next_batch_with_labels()
