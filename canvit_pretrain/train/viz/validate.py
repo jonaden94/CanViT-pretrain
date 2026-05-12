@@ -68,19 +68,28 @@ def _log_pca(
     glimpse_grid_size: int,
     log_spatial_stats: bool,
     log_curves: bool,
+    show_locals: bool = True,
 ) -> None:
-    """Log PCA visualization from accumulator data."""
+    """Log PCA visualization from accumulator data.
+
+    ``show_locals`` must be False when the patcher does not lay tokens on a
+    uniform g x g grid (e.g. foveated mode) — the local-PCA panel reshapes
+    local_patches to (G, G, D) and is invalid otherwise.
+    """
     assert acc.initial_scene is not None
     scenes = [vs.predicted_scene for vs in acc.viz_samples]
     glimpses = [vs.glimpse for vs in acc.viz_samples]
     canvas_spatials = [vs.canvas_spatial for vs in acc.viz_samples]
 
-    # Extract local stream patches if available (for show_locals)
-    locals_avp_raw = [vs.local_patches for vs in acc.viz_samples]
-    has_locals = all(lp is not None for lp in locals_avp_raw)
+    # Extract local stream patches if available AND the caller allows it.
+    # Foveated runs return local_patches but they are not on a uniform grid.
     locals_avp: list[np.ndarray] | None = None
-    if has_locals:
-        locals_avp = [lp for lp in locals_avp_raw if lp is not None]
+    has_locals = False
+    if show_locals:
+        locals_avp_raw = [vs.local_patches for vs in acc.viz_samples]
+        has_locals = all(lp is not None for lp in locals_avp_raw)
+        if has_locals:
+            locals_avp = [lp for lp in locals_avp_raw if lp is not None]
 
     fig_pca = plot_multistep_pca(
         full_img=full_img,
@@ -289,7 +298,12 @@ def validate(
                 boxes = [vp.to_pixel_box(0, H, W) for vp in viewpoints]
                 names = [vp.name for vp in viewpoints]
                 full_img = imagenet_denormalize_to_numpy(images[0])
-                glimpse_grid_size = glimpse_size_px // model.backbone.patch_size_px
+                # Uniform-grid local PCA panel needs g*g tokens; foveated tokens
+                # are a point cloud so we disable the local stream panel.
+                uniform_grid = getattr(model.cfg, "patcher_name", "uniform") == "uniform"
+                glimpse_grid_size = (
+                    glimpse_size_px // model.backbone.patch_size_px if uniform_grid else 0
+                )
 
                 _log_pca(
                     exp=exp,
@@ -304,6 +318,7 @@ def validate(
                     glimpse_grid_size=glimpse_grid_size,
                     log_spatial_stats=log_spatial_stats,
                     log_curves=log_curves,
+                    show_locals=uniform_grid,
                 )
 
             return acc.scene_cos_raw[-1]

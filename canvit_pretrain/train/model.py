@@ -40,7 +40,12 @@ def create_model(
     teacher_dim: int,
     cfg: Config,
 ) -> ModelBundle:
-    """Create CanViTForPretraining wrapping student backbone."""
+    """Create CanViTForPretraining wrapping student backbone.
+
+    glimpse_size_px is the side length of the pixel crop fed to ``model.forward``.
+    - uniform mode: glimpse_grid_size * student_backbone.patch_size_px
+    - foveated mode: cfg.model.foveated_patcher.fixation_size (fovi's fixation window)
+    """
     cfg.model.teacher_dim = teacher_dim
 
     model = CanViTForPretraining(
@@ -49,13 +54,21 @@ def create_model(
         backbone_name=cfg.backbone_name,
         canvas_patch_grid_sizes=[cfg.canvas_patch_grid_size],
     ).to(cfg.device)
-    glimpse_size_px = cfg.glimpse_grid_size * student_backbone.patch_size_px
 
-    log.info(
-        f"Model created: canvas={cfg.canvas_patch_grid_size}x{cfg.canvas_patch_grid_size}, "
-        f"glimpse={cfg.glimpse_grid_size}x{cfg.glimpse_grid_size} ({glimpse_size_px}px), "
-        f"student_dim={student_backbone.embed_dim} -> teacher_dim={teacher_dim}, "
-    )
+    if cfg.model.patcher_name == "foveated":
+        glimpse_size_px = cfg.model.foveated_patcher.fixation_size
+        log.info(
+            f"Model created (foveated): canvas={cfg.canvas_patch_grid_size}x{cfg.canvas_patch_grid_size}, "
+            f"glimpse={glimpse_size_px}px, n_patches={model.patcher.n_patches}, "
+            f"student_dim={student_backbone.embed_dim} -> teacher_dim={teacher_dim}, "
+        )
+    else:
+        glimpse_size_px = cfg.glimpse_grid_size * student_backbone.patch_size_px
+        log.info(
+            f"Model created: canvas={cfg.canvas_patch_grid_size}x{cfg.canvas_patch_grid_size}, "
+            f"glimpse={cfg.glimpse_grid_size}x{cfg.glimpse_grid_size} ({glimpse_size_px}px), "
+            f"student_dim={student_backbone.embed_dim} -> teacher_dim={teacher_dim}, "
+        )
     return ModelBundle(model, glimpse_size_px)
 
 
