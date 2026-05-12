@@ -9,6 +9,7 @@ Activation requires both `WORLD_SIZE` and `SLURM_PROCID` to be set, plus
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 
@@ -60,7 +61,18 @@ def init_dist() -> None:
         f"device={_device}, MASTER_ADDR={os.environ.get('MASTER_ADDR')}, "
         f"MASTER_PORT={os.environ.get('MASTER_PORT')}"
     )
-    dist.init_process_group(backend="nccl", rank=_rank, world_size=_world_size)
+    # device_id pins this rank's NCCL communicator to a specific device,
+    # avoiding PyTorch's "Guessing device ID based on global rank" warning
+    # and the heterogeneous-mapping hang it warns about. Our rank → device
+    # mapping is already established by torch.cuda.set_device(_local_rank)
+    # above, so the explicit binding matches what PyTorch would have guessed.
+    dist.init_process_group(backend="nccl", rank=_rank, world_size=_world_size, device_id=_device)
+
+    # Register cleanup at interpreter shutdown to silence PyTorch's
+    # "destroy_process_group() was not called before program exit" warning.
+    # atexit runs after all DDP collectives have completed, so it's safe; the
+    # is_initialized() guard makes it idempotent if destroy is called manually.
+    atexit.register(lambda: dist.destroy_process_group() if dist.is_initialized() else None)
 
 
 def is_dist() -> bool:
