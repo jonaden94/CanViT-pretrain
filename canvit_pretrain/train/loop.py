@@ -503,15 +503,17 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         model = nn.parallel.DistributedDataParallel(
             model,
             device_ids=[ddp.local_rank()],
-            find_unused_parameters=False,
+            find_unused_parameters=True,
             broadcast_buffers=False,
         )
-        # TBPTT (chunk_size=2) reuses parameters across both forward chunks in
-        # a single backward, causing DDP's autograd hook to fire twice per
-        # backward and raise "Parameter at index N has been marked as ready
-        # twice". _set_static_graph() tells DDP to learn the parameter-ready
-        # order on the first backward and reuse it, preventing the double-fire.
-        model._set_static_graph()
+        # _set_static_graph() is deliberately NOT called. In this codebase
+        # it silently broke DDP's AllReduce (per-rank gradients diverged,
+        # confirmed by step-1 weight diff = LR × per-rank-grad). The reason
+        # we previously needed it was "Parameter at index N marked as ready
+        # twice" under TBPTT chunked backward — but find_unused_parameters=True
+        # already handles that path correctly (and is independently required
+        # here, since the second branch's backward does not flow gradients
+        # back to canvas/recurrent init params, so their hooks never fire).
 
     # EMA tracking for all metrics
     ema = EMATracker(alpha=cfg.ema_alpha)
@@ -673,6 +675,69 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
                 collect_viz=do_pca,
             )
+
+            # === DIAGNOSTIC: did DDP AllReduce the gradients for each top-level
+            # component? Compares each component's .grad norm (whatever DDP left
+            # it as, after backward) with the same gradient explicitly
+            # re-averaged across ranks.
+            #   ratio ≈ 1.0       → DDP already averaged; grads are correct.
+            #   ratio > 1.0 (~√N) → DDP did NOT average; .grad is rank-local.
+            # Covers every top-level submodule + every direct nn.Parameter on
+            # core_model so we can see which components DDP handles correctly
+            # and which it doesn't.
+            if ddp.is_dist() and step < 3:
+                import torch.distributed as _dist
+
+                _diag_targets: list[tuple[str, list[Tensor]]] = []
+                for _child_name, _child in core_model.named_children():
+                    _grads = [p.grad for p in _child.parameters() if p.grad is not None]
+                    if _grads:
+                        _diag_targets.append((_child_name, _grads))
+                for _pname, _p in core_model.named_parameters(recurse=False):
+                    if _p.grad is not None:
+                        _diag_targets.append((_pname, [_p.grad]))
+
+                for _name, _grads in _diag_targets:
+                    _before = torch.cat([g.flatten() for g in _grads]).norm().item()
+                    _clones = [g.detach().clone() for g in _grads]
+                    for _c in _clones:
+                        _dist.all_reduce(_c, op=_dist.ReduceOp.AVG)
+                    _after = torch.cat([c.flatten() for c in _clones]).norm().item()
+                    if ddp.is_main():
+                        log.info(
+                            f"[DDP DIAG step={step}] {_name:30s} "
+                            f"pre_AR={_before:.4e}  post_AR={_after:.4e}  "
+                            f"ratio={_before / max(_after, 1e-30):.4f}"
+                        )
+
+                # === DIAGNOSTIC 2: Are model weights identical across ranks? ===
+                # Definitive test of DDP sync — no assumption about gradient
+                # statistics needed. After DDP __init__'s broadcast, all ranks
+                # start with identical weights. If gradients are correctly
+                # AllReduced each step, every rank applies the same update and
+                # weights stay identical. If gradients are NOT AllReduced, each
+                # rank applies a different update and weights diverge.
+                # Expected:
+                #   step=0  → max_diff = 0 (init was broadcast; no step yet).
+                #   step>=1 → max_diff = 0 if DDP is averaging gradients
+                #             max_diff > 0 if DDP is not averaging
+                _max_diff = 0.0
+                _worst = ""
+                for _pname, _p in core_model.named_parameters():
+                    _local = _p.detach().clone()
+                    _bcast = _local.clone()
+                    _dist.broadcast(_bcast, src=0)
+                    _d = (_local - _bcast).abs().max()
+                    _dist.all_reduce(_d, op=_dist.ReduceOp.MAX)
+                    _dv = _d.item()
+                    if _dv > _max_diff:
+                        _max_diff = _dv
+                        _worst = _pname
+                if ddp.is_main():
+                    log.info(
+                        f"[WEIGHT SYNC step={step}] max param diff across ranks: "
+                        f"{_max_diff:.4e}  (worst: {_worst})"
+                    )
 
             grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
             optimizer.step()

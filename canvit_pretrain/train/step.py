@@ -166,8 +166,14 @@ def training_step(
         return StepOutput(out=out, glimpse=glimpse)
 
     def compute_loss(out: CanViTOutput) -> LossOutput:
-        scene_pred = core_model.predict_teacher_scene(out.state.canvas)
-        cls_pred = core_model.predict_scene_teacher_cls(out.state.recurrent_cls)
+        # `out` is a CanViTForPretrainingOutput coming through the DDP-wrapped
+        # forward — scene_pred / cls_pred were produced INSIDE that forward,
+        # so head-param gradients are part of the autograd graph DDP's
+        # Reducer instruments. Calling `core_model.predict_*` here would
+        # bypass the DDP wrapper and skip AllReduce on the head gradients
+        # (manifests as √N grad-norm scaling on the heads in N-GPU runs).
+        scene_pred = out.scene_pred  # type: ignore[attr-defined]
+        cls_pred = out.cls_pred  # type: ignore[attr-defined]
 
         scene_patches_loss = torch.zeros((), device=device)
         scene_cls_loss = torch.zeros((), device=device)
