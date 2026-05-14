@@ -331,9 +331,16 @@ def load_model(
     backbone_name = ckpt["backbone_name"]
     cfg = dacite.from_dict(CanViTForPretrainingConfig, ckpt["model_config"])
 
+    backbone = create_backbone(backbone_name)
+    # ``glimpse_grid_size`` may not be in the checkpoint dict for older runs;
+    # fall back to 8 (the canonical pretraining default).
+    glimpse_grid = ckpt.get("glimpse_grid_size") or 8
+    glimpse_size_px = int(glimpse_grid * backbone.patch_size_px)
+
     model = CanViTForPretraining(
-        backbone=create_backbone(backbone_name),
+        backbone=backbone,
         cfg=cfg,
+        glimpse_size_px=glimpse_size_px,
         backbone_name=backbone_name,
         canvas_patch_grid_sizes=ckpt["canvas_patch_grid_sizes"],
     )

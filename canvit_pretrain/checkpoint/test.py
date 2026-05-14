@@ -21,6 +21,7 @@ def _make_tiny_model(device: torch.device) -> CanViTForPretraining:
     return CanViTForPretraining(
         backbone=backbone,
         cfg=cfg,
+        glimpse_size_px=8 * backbone.patch_size_px,
         backbone_name="vits16",
         canvas_patch_grid_sizes=[8, 16, 32],
     ).to(device)

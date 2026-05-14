@@ -42,32 +42,36 @@ def create_model(
 ) -> ModelBundle:
     """Create CanViTForPretraining wrapping student backbone.
 
-    glimpse_size_px is the side length of the pixel crop fed to ``model.forward``.
-    - uniform mode: glimpse_grid_size * student_backbone.patch_size_px
-    - foveated mode: cfg.model.foveated_patcher.fixation_size (fovi's fixation window)
+    glimpse_size_px is the side length of the pixel crop the uniform patcher
+    takes internally from the full image; the foveated patcher ignores it and
+    operates on the full image at the viewpoint's fixation point.
     """
     cfg.model.teacher_dim = teacher_dim
+
+    # Uniform crop size is purely a function of training config + backbone.
+    # The foveated patcher doesn't use it; pass it through anyway for symmetry.
+    glimpse_size_px = cfg.glimpse_grid_size * student_backbone.patch_size_px
 
     model = CanViTForPretraining(
         backbone=student_backbone,
         cfg=cfg.model,
+        glimpse_size_px=glimpse_size_px,
         backbone_name=cfg.backbone_name,
         canvas_patch_grid_sizes=[cfg.canvas_patch_grid_size],
     ).to(cfg.device)
 
     if cfg.model.patcher_name == "foveated":
-        glimpse_size_px = cfg.model.foveated_patcher.fixation_size
         log.info(
             f"Model created (foveated): canvas={cfg.canvas_patch_grid_size}x{cfg.canvas_patch_grid_size}, "
-            f"glimpse={glimpse_size_px}px, n_patches={model.patcher.n_patches}, "
-            f"student_dim={student_backbone.embed_dim} -> teacher_dim={teacher_dim}, "
+            f"fixation_size={cfg.model.foveated_patcher.fixation_size}px, "
+            f"n_patches={model.patcher.n_patches}, "
+            f"student_dim={student_backbone.embed_dim} -> teacher_dim={teacher_dim}"
         )
     else:
-        glimpse_size_px = cfg.glimpse_grid_size * student_backbone.patch_size_px
         log.info(
             f"Model created: canvas={cfg.canvas_patch_grid_size}x{cfg.canvas_patch_grid_size}, "
             f"glimpse={cfg.glimpse_grid_size}x{cfg.glimpse_grid_size} ({glimpse_size_px}px), "
-            f"student_dim={student_backbone.embed_dim} -> teacher_dim={teacher_dim}, "
+            f"student_dim={student_backbone.embed_dim} -> teacher_dim={teacher_dim}"
         )
     return ModelBundle(model, glimpse_size_px)
 

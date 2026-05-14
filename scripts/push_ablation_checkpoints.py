@@ -119,9 +119,12 @@ def main(args: Args) -> None:
         from canvit_pytorch.model.pretraining.impl import CanViTForPretrainingConfig
 
         cfg = dacite.from_dict(CanViTForPretrainingConfig, raw["model_config"])
+        backbone = create_backbone(raw["backbone_name"])
+        gpx = int((raw.get("glimpse_grid_size") or 8) * backbone.patch_size_px)
         model = CanViTForPretraining(
-            backbone=create_backbone(raw["backbone_name"]),
+            backbone=backbone,
             cfg=cfg,
+            glimpse_size_px=gpx,
             backbone_name=raw["backbone_name"],
             canvas_patch_grid_sizes=raw["canvas_patch_grid_sizes"],
         )

@@ -30,6 +30,7 @@ def model() -> CanViTForPretraining:
     return CanViTForPretraining(
         backbone=backbone,
         cfg=cfg,
+        glimpse_size_px=128,
         backbone_name="vits16",
         canvas_patch_grid_sizes=[_G],
     ).to(_DEVICE)

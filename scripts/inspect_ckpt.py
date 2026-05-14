@@ -102,7 +102,7 @@ def smoke_test(path: Path) -> None:
         state = model.init_state(batch_size=1, canvas_grid_size=canvas_grid)
         vp = Viewpoint(centers=torch.zeros(1, 2), scales=torch.ones(1, 1))
         dummy = torch.randn(1, 3, glimpse_px, glimpse_px)
-        out = model.forward(glimpse=dummy, state=state, viewpoint=vp, canvas_grid_size=canvas_grid)
+        out = model.forward(image=dummy, state=state, viewpoint=vp, canvas_grid_size=canvas_grid)
     print("ok")
     print(f"output canvas: {out.state.canvas.shape}")
 
