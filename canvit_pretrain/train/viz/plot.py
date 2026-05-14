@@ -11,8 +11,15 @@ from sklearn.decomposition import PCA
 
 from ..probe import TopKPrediction
 from ..viewpoint import PixelBox
+from .foveated_plot import (
+    plot_patch_voronoi_absolute,
+    plot_patches_overlay_relative,
+    plot_samples_reconstruction_absolute,
+    plot_samples_scatter_absolute,
+)
 from .metrics import cosine_dissimilarity
 from .pca import fit_pca, pca_rgb
+from .sample import FoveatedVizData
 
 # Type alias for RGBA color tuple
 RGBA = tuple[float, float, float, float]
@@ -119,18 +126,28 @@ def plot_multistep_pca(
     locals_teacher_cropped: list[NDArray[np.floating]] | None = None,
     show_locals: bool = False,
     timestep_predictions: list[TimestepPredictions] | None = None,
+    foveated_samples: list[FoveatedVizData | None] | None = None,
 ) -> Figure:
     """Full multi-row visualization with all diagnostic columns.
 
     Row 0 = "init": learned spatial_hidden_init projected through scene_proj, BEFORE any glimpses
     Row 1+ = "t=0, t=1, ...": scene state AFTER processing each glimpse
 
-    Columns: [Preds] | Trajectory | Glimpse | Teacher | Scene | [Hidden] | ... | Δ Scene | Error
+    Uniform-patcher columns:  [Preds] | Trajectory | Glimpse | Teacher | Scene | [Hidden] | [Local Stream] | ... | Δ Scene | Error
+    Foveated-patcher columns: [Preds] | Trajectory | Samples | Sample-Recon | Patches | Teacher | Scene | [Hidden] | [Patch-Recon] | ... | Δ Scene | Error
     """
     n_views = len(scenes)
     assert len(glimpses) == n_views
     assert len(boxes) == n_views
     assert len(names) == n_views
+
+    # Detect foveated mode by presence of per-timestep foveated viz data.
+    is_foveated = (
+        foveated_samples is not None
+        and len(foveated_samples) == n_views
+        and all(s is not None for s in foveated_samples)
+    )
+
     if show_locals:
         assert locals_avp is not None and len(locals_avp) == n_views
         # locals_teacher is optional - if None, only show locals_avp
@@ -195,16 +212,31 @@ def plot_multistep_pca(
             delta_hidden_maps.append(cosine_dissimilarity(h, prev_hidden).reshape(S, S))
             prev_hidden = h
 
-    # Column indices
+    # Column indices. Foveated mode replaces the single "Glimpse" col with
+    # three foveated cols, and the uniform "Local Stream" col with a single
+    # patch-Voronoi col (rendered differently below).
     c = 0
     C_PREDS = c if show_preds else None
     if show_preds:
         c += 1
-    C_TRAJ, C_GLIMPSE, C_TEACHER, C_SCENE, C_SCENE_OWN = c, c + 1, c + 2, c + 3, c + 4
-    c += 5
+    C_TRAJ = c
+    c += 1
+    if is_foveated:
+        C_GLIMPSE = None
+        C_FOV_SCATTER, C_FOV_RECON, C_FOV_PATCHES = c, c + 1, c + 2
+        c += 3
+    else:
+        C_GLIMPSE = c
+        C_FOV_SCATTER = C_FOV_RECON = C_FOV_PATCHES = None
+        c += 1
+    C_TEACHER, C_SCENE, C_SCENE_OWN = c, c + 1, c + 2
+    c += 3
     C_HIDDEN = c if show_hidden else None
     if show_hidden:
         c += 1
+    # Local stream col: same slot serves both uniform (g x g grid) and
+    # foveated (patch-Voronoi). Either is gated on `show_locals` (== has_locals
+    # in the caller), since `locals_avp` carries the data for both modes.
     C_LOCAL_AVP = c if show_locals else None
     if show_locals:
         c += 1
@@ -232,8 +264,20 @@ def plot_multistep_pca(
     axes[row, C_TRAJ].set_title("init")
     axes[row, C_TRAJ].axis("off")
 
-    axes[row, C_GLIMPSE].axis("off")
-    axes[row, C_GLIMPSE].set_title("(no glimpse)")
+    if is_foveated:
+        for col, title in zip(
+            (C_FOV_SCATTER, C_FOV_RECON, C_FOV_PATCHES),
+            ("(no glimpse)", "", ""),
+            strict=True,
+        ):
+            assert col is not None
+            axes[row, col].axis("off")
+            if title:
+                axes[row, col].set_title(title)
+    else:
+        assert C_GLIMPSE is not None
+        axes[row, C_GLIMPSE].axis("off")
+        axes[row, C_GLIMPSE].set_title("(no glimpse)")
 
     axes[row, C_TEACHER].imshow(teacher_rgb)
     axes[row, C_TEACHER].set_title("Teacher")
@@ -296,7 +340,9 @@ def plot_multistep_pca(
         local_avp_rgb = None
         local_teacher_rgb = None
         pca_cropped: PCA | None = None
-        if show_locals:
+        if show_locals and not is_foveated:
+            # Uniform-grid local stream: reshape [g*g, D] into a g x g RGB grid.
+            # Foveated path computes its PCA in the renderer (different shape).
             assert locals_avp is not None
             pca_local_avp = fit_pca(locals_avp[t])
             local_avp_rgb = pca_rgb(pca_local_avp, locals_avp[t], G, G)
@@ -347,9 +393,39 @@ def plot_multistep_pca(
         ax.set_title(f"t={t}")
         ax.axis("off")
 
-        axes[row, C_GLIMPSE].imshow(glimpses[t])
-        axes[row, C_GLIMPSE].set_title(f"Glimpse ({names[t]})")
-        axes[row, C_GLIMPSE].axis("off")
+        if is_foveated:
+            assert foveated_samples is not None
+            fov = foveated_samples[t]
+            assert fov is not None
+            # Pixel coords are pre-computed in FoveatedVizData using the
+            # per-step viewpoint fixation (full-image foveation).
+            sample_px = fov.sample_xy_pixel
+            assert C_FOV_SCATTER is not None
+            assert C_FOV_RECON is not None
+            assert C_FOV_PATCHES is not None
+            plot_samples_scatter_absolute(
+                axes[row, C_FOV_SCATTER], full_img,
+                sample_px, fov.sample_colors, sizes=fov.sample_sizes,
+                title=f"Samples ({names[t]})" if t == 0 else f"Samples t={t}",
+            )
+            img_h, img_w = full_img.shape[:2]
+            plot_samples_reconstruction_absolute(
+                axes[row, C_FOV_RECON],
+                sample_px, fov.sample_colors, img_h, img_w,
+                title="Sample recon" if t == 0 else "",
+            )
+            plot_patches_overlay_relative(
+                axes[row, C_FOV_PATCHES],
+                fov.sample_cart_rowcol, fov.sample_colors, fov.sample_sizes,
+                fov.knn_indices, fov.knn_pad_mask, fov.out_polar_r,
+                cart_pad_xy=fov.cart_pad_rowcol,
+                title="Patches (rel)" if t == 0 else "",
+            )
+        else:
+            assert C_GLIMPSE is not None
+            axes[row, C_GLIMPSE].imshow(glimpses[t])
+            axes[row, C_GLIMPSE].set_title(f"Glimpse ({names[t]})")
+            axes[row, C_GLIMPSE].axis("off")
 
         axes[row, C_TEACHER].imshow(teacher_rgb)
         axes[row, C_TEACHER].axis("off")
@@ -369,11 +445,31 @@ def plot_multistep_pca(
             axes[row, C_HIDDEN].axis("off")
 
         if show_locals:
-            assert C_LOCAL_AVP is not None and local_avp_rgb is not None
-            axes[row, C_LOCAL_AVP].imshow(local_avp_rgb)
-            if t == 0:
-                axes[row, C_LOCAL_AVP].set_title("Local Stream")
-            axes[row, C_LOCAL_AVP].axis("off")
+            assert C_LOCAL_AVP is not None
+            if is_foveated:
+                # Foveated: patch-Voronoi in absolute (image) coords with sample hull mask.
+                assert foveated_samples is not None
+                fov = foveated_samples[t]
+                assert fov is not None
+                # local_patches[t] is [N_patches, D]; PCA -> [N_patches, 3] RGB.
+                patch_pca = fit_pca(locals_avp[t])  # type: ignore[index]
+                patch_rgb = patch_pca.transform(locals_avp[t])[:, :3]  # type: ignore[index]
+                # Normalize each channel to [0, 1] for consistent display.
+                lo = patch_rgb.min(axis=0, keepdims=True)
+                hi = patch_rgb.max(axis=0, keepdims=True)
+                patch_rgb = (patch_rgb - lo) / np.maximum(hi - lo, 1e-8)
+                img_h, img_w = full_img.shape[:2]
+                plot_patch_voronoi_absolute(
+                    axes[row, C_LOCAL_AVP],
+                    fov.patch_xy_pixel, patch_rgb, fov.sample_xy_pixel, img_h, img_w,
+                    title="Local Stream (fov)" if t == 0 else "",
+                )
+            else:
+                assert local_avp_rgb is not None
+                axes[row, C_LOCAL_AVP].imshow(local_avp_rgb)
+                if t == 0:
+                    axes[row, C_LOCAL_AVP].set_title("Local Stream")
+                axes[row, C_LOCAL_AVP].axis("off")
 
         if show_teacher_locals:
             assert C_LOCAL_TEACHER is not None and local_teacher_rgb is not None
