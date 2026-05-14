@@ -116,6 +116,42 @@ class Viewpoint(CoreViewpoint):
 
         return Viewpoint(name="random", centers=centers, scales=scales)
 
+    @staticmethod
+    def random_fixation(*, batch_size: int, device: torch.device) -> "Viewpoint":
+        """Sample uniform fixation points over the full visual field [-1, 1]^2.
+
+        Used by the foveated patcher path: ``scales`` is ignored at the model
+        level (foveation always covers the full image), but we still set it to
+        1.0 so downstream consumers (viz, ``to_pixel_box``) get a well-defined
+        full-scene box centered at the fixation.
+        """
+        centers = (torch.rand(batch_size, 2, device=device) * 2.0 - 1.0).float()
+        scales = torch.ones(batch_size, device=device, dtype=torch.float32)
+        return Viewpoint(name="fixation", centers=centers, scales=scales)
+
+
+# Fixed-seed RNG for foveated eval grid shuffling. Using a stand-alone
+# Generator avoids polluting the global torch RNG state and keeps validation
+# plots comparable across checkpoints and runs.
+_FOVEATED_EVAL_SEED = 0
+
+
+def _foveated_eval_centers() -> list[tuple[float, float]]:
+    """Validation fixation sequence for the foveated path:
+    - First fixation: image center (0, 0).
+    - Then the 9 centers of a 3x3 grid over [-1, 1]^2 (i.e. all combinations
+      of {-2/3, 0, +2/3} on each axis) in a fixed-seed random order.
+
+    Total: 10 fixations. Note (0, 0) appears twice (initial + grid center).
+    """
+    axis = (-2.0 / 3.0, 0.0, 2.0 / 3.0)
+    grid = [(r, c) for r in axis for c in axis]
+    gen = torch.Generator()
+    gen.manual_seed(_FOVEATED_EVAL_SEED)
+    perm = torch.randperm(len(grid), generator=gen).tolist()
+    grid_shuffled = [grid[i] for i in perm]
+    return [(0.0, 0.0)] + grid_shuffled
+
 
 def make_eval_viewpoints(
     B: int, device: torch.device, n_viewpoints: int = 10
@@ -129,4 +165,24 @@ def make_eval_viewpoints(
     for i, vp in enumerate(core_vps):
         name = "full" if i == 0 else f"vp_{i}"
         result.append(Viewpoint(name=name, centers=vp.centers, scales=vp.scales))
+    return result
+
+
+def make_eval_viewpoints_foveated(
+    B: int, device: torch.device, n_viewpoints: int = 10
+) -> list[Viewpoint]:
+    """Foveated-mode validation trajectory: center fixation + shuffled 3x3 grid centers.
+
+    Deterministic across calls (fixed seed). All ``scales`` are 1.0 (ignored by
+    the foveated patcher; kept for viz boxes). The first ``n_viewpoints`` of
+    the 10-step trajectory are returned.
+    """
+    assert n_viewpoints >= 1
+    centers_seq = _foveated_eval_centers()
+    result: list[Viewpoint] = []
+    for i, (r, c) in enumerate(centers_seq[:n_viewpoints]):
+        center_t = torch.tensor([r, c], device=device, dtype=torch.float32).view(1, 2).expand(B, -1).contiguous()
+        scales_t = torch.ones(B, device=device, dtype=torch.float32)
+        name = "center" if i == 0 else f"fix_{i}"
+        result.append(Viewpoint(name=name, centers=center_t, scales=scales_t))
     return result

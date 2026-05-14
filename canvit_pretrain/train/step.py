@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from canvit_pytorch import CanViTOutput, RecurrentState, Viewpoint, sample_at_viewpoint
+from canvit_pytorch import CanViTOutput, RecurrentState, Viewpoint
 from torch import Tensor
 
 from canvit_pretrain import CanViTForPretraining
@@ -81,10 +81,9 @@ class ChunkState:
 
 
 class StepOutput(NamedTuple):
-    """Output from forward_glimpse: model output + sampled glimpse."""
+    """Output from forward_step: model output."""
 
     out: CanViTOutput
-    glimpse: Tensor
 
 
 def training_step(
@@ -124,6 +123,7 @@ def training_step(
     # DDP wraps forward() but not custom methods — unwrap for direct method calls.
     core_model = getattr(model, "module", model)
     state_init = core_model.init_state(batch_size=B, canvas_grid_size=canvas_grid_size)
+    is_foveated = getattr(core_model.cfg, "patcher_name", "uniform") == "foveated"
 
     # Sample trajectory length (shared across branches for this step)
     n_glimpses = chunk_size
@@ -151,8 +151,15 @@ def training_step(
     viz_data: TrainVizData | None = None
 
     def make_named_vp(vp_type: ViewpointType) -> NamedViewpoint:
-        """Create a NamedViewpoint (has .name for viz, convertible to canvit Viewpoint)."""
+        """Create a NamedViewpoint (has .name for viz, convertible to canvit Viewpoint).
+
+        Foveated path: random fixations are uniform over [-1, 1]^2 (full visual
+        field). ``min_viewpoint_scale`` is ignored, since foveation always
+        covers the full image. Uniform path: existing safe-box-area sampler.
+        """
         if vp_type == ViewpointType.RANDOM:
+            if is_foveated:
+                return NamedViewpoint.random_fixation(batch_size=B, device=device)
             return NamedViewpoint.random(batch_size=B, device=device, min_scale=min_viewpoint_scale)
         assert vp_type == ViewpointType.FULL
         return NamedViewpoint.full_scene(batch_size=B, device=device)
@@ -160,10 +167,9 @@ def training_step(
     def to_canvit_vp(vp: NamedViewpoint) -> Viewpoint:
         return Viewpoint(centers=vp.centers, scales=vp.scales)
 
-    def forward_glimpse(*, state: RecurrentState, vp: Viewpoint) -> StepOutput:
-        glimpse = sample_at_viewpoint(spatial=images, viewpoint=vp, glimpse_size_px=glimpse_size_px)
-        out = model(glimpse=glimpse, state=state, viewpoint=vp)
-        return StepOutput(out=out, glimpse=glimpse)
+    def forward_step(*, state: RecurrentState, vp: Viewpoint) -> StepOutput:
+        out = model(image=images, state=state, viewpoint=vp)
+        return StepOutput(out=out)
 
     def compute_loss(out: CanViTOutput) -> LossOutput:
         # `out` is a CanViTForPretrainingOutput coming through the DDP-wrapped
@@ -220,14 +226,16 @@ def training_step(
         with amp_ctx:
             vp0_named = make_named_vp(t0_type)
             vp0 = to_canvit_vp(vp0_named)
-            step_out = forward_glimpse(state=state_init, vp=vp0)
-            out, glimpse = step_out.out, step_out.glimpse
+            step_out = forward_step(state=state_init, vp=vp0)
+            out = step_out.out
             L = compute_loss(out)
 
         if do_viz:
             assert viz_data is not None
             viz_data.viewpoints.append(vp0_named)
-            viz_data.viz_samples.append(extract_sample0_viz(out, glimpse, L.scene_pred, core_model))
+            viz_data.viz_samples.append(
+                extract_sample0_viz(out, images, vp0, L.scene_pred, core_model, glimpse_size_px)
+            )
 
         chunk = ChunkState(
             state=out.state,
@@ -260,14 +268,16 @@ def training_step(
             vp = to_canvit_vp(vp_named)
 
             with amp_ctx:
-                step_out = forward_glimpse(state=chunk.state, vp=vp)
-                out, glimpse = step_out.out, step_out.glimpse
+                step_out = forward_step(state=chunk.state, vp=vp)
+                out = step_out.out
                 L = compute_loss(out)
 
             if do_viz:
                 assert viz_data is not None
                 viz_data.viewpoints.append(vp_named)
-                viz_data.viz_samples.append(extract_sample0_viz(out, glimpse, L.scene_pred, core_model))
+                viz_data.viz_samples.append(
+                    extract_sample0_viz(out, images, vp, L.scene_pred, core_model, glimpse_size_px)
+                )
 
             chunk.chunk_combined_loss = chunk.chunk_combined_loss + L.combined.float()
             chunk.total_combined_loss = chunk.total_combined_loss + L.combined.detach().float()
