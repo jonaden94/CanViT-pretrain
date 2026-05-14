@@ -9,14 +9,11 @@ every method is a no-op so call sites stay unconditional.
 
 from __future__ import annotations
 
-import gc
-import io
 import logging
 from pathlib import Path
 from typing import Any
 
 import comet_ml
-import matplotlib.pyplot as plt
 import wandb
 
 log = logging.getLogger(__name__)
@@ -56,20 +53,6 @@ class Tracker:
         if self._wandb is not None:
             self._wandb.log(metrics, step=step)
 
-    def log_curve(self, name: str, *, x: list, y: list, step: int | None = None) -> None:
-        if self._comet is not None:
-            self._comet.log_curve(name, x=x, y=y, step=step)
-        if self._wandb is not None:
-            # wandb has no native log_curve — render as image, same as PCA figures.
-            img = _curve_as_pil(name, x, y)
-            self._wandb.log({name: wandb.Image(img)}, step=step)
-
-    def log_image(self, image: Any, name: str, step: int | None = None) -> None:
-        if self._comet is not None:
-            self._comet.log_image(image, name=name, step=step)
-        if self._wandb is not None:
-            self._wandb.log({name: wandb.Image(image)}, step=step)
-
     def get_comet_id(self) -> str | None:
         return self._comet.get_key() if self._comet is not None else None
 
@@ -85,26 +68,6 @@ class Tracker:
             self._comet.end()
         if self._wandb is not None:
             self._wandb.finish()
-
-
-def _curve_as_pil(name: str, x: list, y: list) -> Any:
-    """Render a line plot as a PIL.Image so wandb.Image can wrap it."""
-    from PIL import Image as PILImage
-
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.plot(x, y, marker="o")
-    ax.set_xlabel("timestep")
-    ax.set_ylabel(name)
-    ax.set_title(name)
-    fig.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=80, bbox_inches="tight")
-    plt.close(fig)
-    gc.collect()
-    buf.seek(0)
-    img = PILImage.open(buf)
-    img.load()  # force decode before buf goes out of scope
-    return img
 
 
 def make_tracker(

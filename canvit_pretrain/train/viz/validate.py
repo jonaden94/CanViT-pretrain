@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -25,8 +26,8 @@ from ..probe import (
     labels_are_in1k,
 )
 from ..tracker import Tracker
-from ..viewpoint import make_eval_viewpoints
-from .comet import log_curve, log_figure
+from ..viewpoint import make_eval_viewpoints, make_eval_viewpoints_foveated
+from .disk import plot_combined_curves, save_figure
 from .image import imagenet_denormalize_to_numpy
 from .plot import TimestepPredictions, plot_multistep_pca
 from .sample import VizSampleData, extract_sample0_viz
@@ -67,29 +68,32 @@ def _log_pca(
     canvas_grid_size: int,
     glimpse_grid_size: int,
     log_spatial_stats: bool,
-    log_curves: bool,
-    show_locals: bool = True,
+    run_dir: Path,
 ) -> None:
-    """Log PCA visualization from accumulator data.
+    """Save PCA visualization to disk from accumulator data.
 
-    ``show_locals`` must be False when the patcher does not lay tokens on a
-    uniform g x g grid (e.g. foveated mode) — the local-PCA panel reshapes
-    local_patches to (G, G, D) and is invalid otherwise.
+    The local-stream column (uniform g x g grid vs foveated patch-Voronoi)
+    is selected inside `plot_multistep_pca` based on whether the
+    `foveated_samples` field is populated.
     """
     assert acc.initial_scene is not None
     scenes = [vs.predicted_scene for vs in acc.viz_samples]
     glimpses = [vs.glimpse for vs in acc.viz_samples]
     canvas_spatials = [vs.canvas_spatial for vs in acc.viz_samples]
 
-    # Extract local stream patches if available AND the caller allows it.
-    # Foveated runs return local_patches but they are not on a uniform grid.
+    # Extract local stream patches if available. plot_multistep_pca decides
+    # how to render them (uniform g x g grid OR foveated patch-Voronoi)
+    # based on whether `foveated_samples` is present.
     locals_avp: list[np.ndarray] | None = None
-    has_locals = False
-    if show_locals:
-        locals_avp_raw = [vs.local_patches for vs in acc.viz_samples]
-        has_locals = all(lp is not None for lp in locals_avp_raw)
-        if has_locals:
-            locals_avp = [lp for lp in locals_avp_raw if lp is not None]
+    locals_avp_raw = [vs.local_patches for vs in acc.viz_samples]
+    has_locals = bool(locals_avp_raw) and all(lp is not None for lp in locals_avp_raw)
+    if has_locals:
+        locals_avp = [lp for lp in locals_avp_raw if lp is not None]
+
+    foveated_samples_raw = [vs.foveated for vs in acc.viz_samples]
+    foveated_samples = (
+        foveated_samples_raw if any(s is not None for s in foveated_samples_raw) else None
+    )
 
     fig_pca = plot_multistep_pca(
         full_img=full_img,
@@ -106,8 +110,9 @@ def _log_pca(
         initial_hidden_spatial=acc.initial_canvas_spatial,
         show_locals=has_locals,
         timestep_predictions=acc.pca_predictions if acc.pca_predictions else None,
+        foveated_samples=foveated_samples,
     )
-    log_figure(exp, fig_pca, f"{prefix}/pca", step)
+    save_figure(fig_pca, run_dir, f"pca_{prefix}", step)
 
     if log_spatial_stats and acc.viz_samples:
         target_stats = {"mean": float(np.mean(teacher_np)), "std": float(np.std(teacher_np))}
@@ -122,25 +127,6 @@ def _log_pca(
             step=step,
         )
 
-    if log_curves:
-        for suffix, data in [("raw", acc.scene_cos_raw), ("norm", acc.scene_cos_norm)]:
-            log_curve(
-                exp,
-                f"{prefix}/scene_cos_{suffix}_vs_timestep",
-                x=list(range(len(data))),
-                y=data,
-                step=step,
-            )
-        if acc.cls_cos_raw:
-            for suffix, data in [("raw", acc.cls_cos_raw), ("norm", acc.cls_cos_norm)]:
-                log_curve(
-                    exp,
-                    f"{prefix}/cls_cos_{suffix}_vs_timestep",
-                    x=list(range(len(data))),
-                    y=data,
-                    step=step,
-                )
-
 
 def validate(
     *,
@@ -154,6 +140,7 @@ def validate(
     canvas_grid_size: int,
     scene_size_px: int,
     glimpse_size_px: int,
+    run_dir: Path,
     n_eval_viewpoints: int = 10,
     min_viewpoint_scale: float = 0.05,
     prefix: str = "val",
@@ -177,7 +164,11 @@ def validate(
             )
 
     B = images.shape[0]
-    viewpoints = make_eval_viewpoints(B, images.device, n_viewpoints=n_eval_viewpoints)
+    is_foveated = getattr(model.cfg, "patcher_name", "uniform") == "foveated"
+    if is_foveated:
+        viewpoints = make_eval_viewpoints_foveated(B, images.device, n_viewpoints=n_eval_viewpoints)
+    else:
+        viewpoints = make_eval_viewpoints(B, images.device, n_viewpoints=n_eval_viewpoints)
     has_cls = model.scene_cls_head is not None
     has_probe = probe is not None and labels is not None and labels_are_in1k(labels)
 
@@ -221,7 +212,7 @@ def validate(
                 return acc
 
             def step_fn(
-                acc: ValAccumulator, out: CanViTOutput, _vp: CanvitViewpoint, glimpse: Tensor
+                acc: ValAccumulator, out: CanViTOutput, vp: CanvitViewpoint,
             ) -> ValAccumulator:
                 predicted_scene = model.predict_teacher_scene(out.state.canvas)
                 predicted_cls = (
@@ -253,14 +244,15 @@ def validate(
                             )
 
                 if log_pca:
-                    acc.viz_samples.append(extract_sample0_viz(out, glimpse, predicted_scene, model))
+                    acc.viz_samples.append(
+                        extract_sample0_viz(out, images, vp, predicted_scene, model, glimpse_size_px)
+                    )
 
                 return acc
 
             acc, _final_state = model.forward_reduce(
                 image=images,
                 viewpoints=viewpoints,  # pyright: ignore[reportArgumentType]
-                glimpse_size_px=glimpse_size_px,
                 canvas_grid_size=canvas_grid_size,
                 init_fn=init_fn,
                 step_fn=step_fn,
@@ -283,14 +275,19 @@ def validate(
             if has_probe:
                 for t, ia in enumerate(acc.in1k_accs):
                     exp.log_metric(f"{prefix}/in1k_tts_top1_t{t}", ia, step=step)
-                if log_curves:
-                    log_curve(
-                        exp,
-                        f"{prefix}/in1k_tts_top1_vs_timestep",
-                        x=list(range(len(acc.in1k_accs))),
-                        y=acc.in1k_accs,
-                        step=step,
-                    )
+
+            # Combined 5-subplot graphs figure saved to disk at log_curves cadence.
+            # Replaces the per-curve wandb log_curve calls (scene_cos_*, cls_cos_*,
+            # in1k_tts_top1_*). Per-timestep scalars above keep going to wandb.
+            if log_curves:
+                fig_graphs = plot_combined_curves(
+                    scene_cos_raw=acc.scene_cos_raw,
+                    scene_cos_norm=acc.scene_cos_norm,
+                    cls_cos_raw=acc.cls_cos_raw if has_cls else None,
+                    cls_cos_norm=acc.cls_cos_norm if has_cls else None,
+                    in1k_accs=acc.in1k_accs if has_probe else None,
+                )
+                save_figure(fig_graphs, run_dir, "graphs", step)
 
             if log_pca:
                 assert target_sample0 is not None
@@ -317,8 +314,7 @@ def validate(
                     canvas_grid_size=canvas_grid_size,
                     glimpse_grid_size=glimpse_grid_size,
                     log_spatial_stats=log_spatial_stats,
-                    log_curves=log_curves,
-                    show_locals=uniform_grid,
+                    run_dir=run_dir,
                 )
 
             return acc.scene_cos_raw[-1]
