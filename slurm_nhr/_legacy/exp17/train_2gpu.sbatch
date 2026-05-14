@@ -9,7 +9,7 @@
 #SBATCH -C inet                  # required for HuggingFace Hub access
 #SBATCH --delay-boot=1
 #SBATCH --mem=256G
-#SBATCH --exclude=ggpu105,ggpu134
+#SBATCH --exclude=ggpu131,ggpu132,ggpu105
 #SBATCH -o logs/exp17-2gpu/job-%A_%a.log
 #SBATCH -e logs/exp17-2gpu/job-%A_%a.log
 #SBATCH --array=0-99%1           # 100 jobs × 4096 steps each; %1 = sequential
@@ -38,6 +38,20 @@ log "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/de
 log "Args: $*"
 
 source slurm_nhr/env.sh
+
+# Some grete nodes have /local saturated by other users' leftover data
+# (SLURM only auto-cleans /local/jobs/<jobid>/, not /local/<uid>/). When that
+# happens, our compile cache (~300 MB measured) won't fit and the job wedges.
+# Fall back to project NFS: slower than NVMe but always has space.
+TMPDIR_NEED_GB=2
+ERSATZ_BASE=/mnt/vast-nhr/projects/nib00021/jonathan/ersatz_local
+tmpdir_avail_gb=$(df -BG --output=avail "$TMPDIR" 2>/dev/null | tail -1 | tr -dc '0-9')
+if [ "${tmpdir_avail_gb:-0}" -lt "$TMPDIR_NEED_GB" ]; then
+    log "WARN: $TMPDIR on $(hostname) has ${tmpdir_avail_gb:-?}G free (<${TMPDIR_NEED_GB}G); falling back to NFS"
+    export TMPDIR="$ERSATZ_BASE/u25995_${SLURM_JOB_ID}"
+    mkdir -p "$TMPDIR"
+fi
+log "TMPDIR=$TMPDIR"
 
 VENV=".venv-v100"
 if [ ! -d "$VENV" ]; then
@@ -73,7 +87,9 @@ srun --ntasks-per-node=1 --ntasks=$SLURM_NNODES bash -c '
 ' || true
 
 log "Starting training (run: $RUN_NAME)..."
-exec srun "$VENV/bin/python" -m canvit_pretrain.train \
+# `env TMPDIR=...` is required because SLURM's TaskProlog clears TMPDIR
+# inside every srun task; setting it in the outer shell does not propagate.
+exec srun env TMPDIR="$TMPDIR" "$VENV/bin/python" -m canvit_pretrain.train \
     --run-name "$RUN_NAME" \
     --webdataset-dir "$WEBDATASET_DIR" \
     --ckpt-dir "$CHECKPOINTS_DIR" \
@@ -84,6 +100,6 @@ exec srun "$VENV/bin/python" -m canvit_pretrain.train \
     --steps-per-job 4096 \
     --val-every 4096 \
     --log-every 512 \
-    --num-workers 8 \
+    --num-workers 4 \
     --peak-lr 0.0008 \
     "$@"
