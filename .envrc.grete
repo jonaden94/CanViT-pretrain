@@ -8,8 +8,9 @@ export TORCH_HOME="/user/henrich1/u25995/.cache/torch"
 export TORCH_COMPILE_CACHE_DIR="/user/henrich1/u25995/.cache/torch_compile"
 
 # Storage
-export CHECKPOINTS_DIR="/user/henrich1/u25995/jonathan/repos/CanViT-pretrain/checkpoints"
-export WEBDATASET_DIR="/user/henrich1/u25995/jonathan/datasets/webdataset-imagenet-1k"  # must contain train-shuffled/ and val/
+export LOGS_DIR="/user/henrich1/u25995/jonathan/repos/CanViT-pretrain/logs"
+# export WEBDATASET_DIR="/user/henrich1/u25995/jonathan/datasets/webdataset-imagenet-1k"  # vast NFS copy; superseded by lustre below to avoid NFS contention
+export WEBDATASET_DIR="/mnt/lustre-rzg/workspaces/ws/nib00021/u25995-canvit-data/webdataset-imagenet-1k"  # must contain train-shuffled/ and val/
 
 # Tracker config
 export WANDB_PROJECT="canvit-pretrain"   # TODO: change as needed

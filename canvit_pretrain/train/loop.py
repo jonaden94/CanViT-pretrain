@@ -67,7 +67,7 @@ from .scheduler import warmup_constant_scheduler, warmup_cosine_scheduler  # noq
 from .step import training_step  # noqa: E402
 from .tracker import make_tracker  # noqa: E402
 from .utils import count_parameters  # noqa: E402
-from .viz import log_figure, plot_multistep_pca, validate  # noqa: E402
+from .viz import plot_multistep_pca, save_figure, validate  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -131,11 +131,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     log.info(f"Device: {cfg.device}, rank={ddp.rank()}/{ddp.world_size()}")
 
     # === RUN NAME AND CHECKPOINT RESOLUTION ===
+    assert cfg.run_group is not None, "run_group is required (pass --run-group)"
     run_name = cfg.run_name
     if run_name is None:
         run_name = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    run_dir = cfg.ckpt_dir / run_name
-    log.info(f"Run: {run_name} (dir: {run_dir})")
+    run_dir = cfg.logs_dir / cfg.run_group / run_name
+    log.info(f"Run: {cfg.run_group}/{run_name} (dir: {run_dir})")
 
     # Check for failure marker (prevents infinite crash loops in job arrays)
     # All ranks check; only rank 0 writes/cancels.
@@ -147,9 +148,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             cancel_slurm_array()
         raise RuntimeError(f"Refusing to start: {failed_marker} exists")
 
-    # Create run_dir early so we can write FAILED marker on crash
+    # Create run_dir (for FAILED marker) and checkpoints/ subdir early.
     if ddp.is_main():
         run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
     ddp.barrier()
 
     try:
@@ -178,6 +180,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     """Main training loop. Called by train() with crash handling wrapper."""
     from dataclasses import asdict
 
+    ckpt_dir = run_dir / "checkpoints"
+
     def flatten_dict(d: dict, prefix: str = "") -> dict[str, object]:
         flat: dict[str, object] = {}
         for k, v in d.items():
@@ -189,12 +193,12 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         return flat
 
     # Determine checkpoint source and load mode
-    # Priority: run_dir/latest.pt (RESUME) > seed_ckpt (SEED) > hf_seed_ckpt (HF SEED) > fresh
+    # Priority: ckpt_dir/latest.pt (RESUME) > seed_ckpt (SEED) > hf_seed_ckpt (HF SEED) > fresh
     assert not (cfg.seed_ckpt and cfg.hf_seed_ckpt), "seed_ckpt and hf_seed_ckpt are mutually exclusive"
     ckpt_path_to_load: Path | None = None
     hf_seed_state_dict: dict[str, Tensor] | None = None
     is_seeding = False  # True = seed mode (weights only), False = resume mode (full state)
-    latest = find_latest(run_dir)
+    latest = find_latest(ckpt_dir)
     if latest is not None:
         ckpt_path_to_load = latest
         is_seeding = False
@@ -437,8 +441,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     provenance_history[now] = current_provenance()
 
     def make_ckpt_path(step: int) -> Path:
-        """Generate versioned checkpoint path: {run_dir}/step-{step}.pt"""
-        return run_dir / f"step-{step}.pt"
+        """Generate versioned checkpoint path: {run_dir}/checkpoints/step-{step}.pt"""
+        return ckpt_dir / f"step-{step}.pt"
 
     def compute_raw_targets(images: Tensor, sz: int) -> NormFeatures:
         with amp_ctx:
@@ -591,6 +595,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                         canvas_grid_size=G,
                         scene_size_px=scene_size,
                         glimpse_size_px=glimpse_size_px,
+                        run_dir=run_dir,
                         n_eval_viewpoints=cfg.n_eval_viewpoints,
                         min_viewpoint_scale=cfg.min_viewpoint_scale,
                         prefix="val",
@@ -639,7 +644,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                         if isinstance(train_loader, WebDatasetTrainLoader) else None
                     ),
                 )
-                update_symlink(run_dir / "latest.pt", ckpt_path)
+                update_symlink(ckpt_dir / "latest.pt", ckpt_path)
             ddp.barrier()
 
         # === TRAINING PHASE (only for step < end_step) ===
@@ -820,6 +825,10 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 scenes = [vs.predicted_scene for vs in vd.viz_samples]
                 glimpses = [vs.glimpse for vs in vd.viz_samples]
                 canvas_spatials = [vs.canvas_spatial for vs in vd.viz_samples]
+                foveated_samples_raw = [vs.foveated for vs in vd.viz_samples]
+                foveated_samples = (
+                    foveated_samples_raw if any(s is not None for s in foveated_samples_raw) else None
+                )
                 assert vd.initial_scene is not None
                 fig = plot_multistep_pca(
                     full_img=vd.image,
@@ -833,8 +842,9 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                     initial_scene=vd.initial_scene,
                     hidden_spatials=canvas_spatials if canvas_spatials[0] is not None else None,
                     initial_hidden_spatial=vd.initial_canvas_spatial,
+                    foveated_samples=foveated_samples,
                 )
-                log_figure(exp, fig, "train/pca", step)
+                save_figure(fig, run_dir, "pca_train", step)
 
     # End-of-job checkpoint (rank 0 saves; others wait at barrier).
     ema_loss = ema.get("total_loss")
@@ -863,7 +873,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 if isinstance(train_loader, WebDatasetTrainLoader) else None
             ),
         )
-        update_symlink(run_dir / "latest.pt", ckpt_path)
+        update_symlink(ckpt_dir / "latest.pt", ckpt_path)
     ddp.barrier()
 
     ema_loss = ema.get("total_loss")

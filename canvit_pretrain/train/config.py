@@ -64,10 +64,14 @@ class Config:
     webdataset_dir: Path | None = None
     seed: int = 0  # for reproducibility (shard schedule permutations)
     # Run identification and checkpointing
+    run_group: str | None = None
+    """Run category (e.g. 'foveated', 'crop'). Combined with run_name to form
+    `logs_dir / run_group / run_name /` as the root of all per-run artifacts."""
     run_name: str | None = None
     """Run name. Auto-generated from SLURM_ARRAY_JOB_ID or timestamp if None."""
-    ckpt_dir: Path = Path("checkpoints")
-    """Directory for checkpoint storage. Run checkpoints go in {ckpt_dir}/{run_name}/."""
+    logs_dir: Path = Path("logs")
+    """Root for run artifacts. Per-run files go under
+    `logs_dir / run_group / run_name / {checkpoints,log}/`."""
     seed_ckpt: Path | None = None
     """Seed model weights from external checkpoint (.pt in CheckpointData format).
     Starts fresh (new experiment, step=0). Only used if no checkpoint exists in run_dir."""
