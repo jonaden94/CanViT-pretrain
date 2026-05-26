@@ -75,17 +75,20 @@ def _rowcol_to_image_xy_pixel(
     rowcol_vf: np.ndarray,
     fix_center_rowcol: np.ndarray,
     image_size: int,
+    fix_size_norm: float = 1.0,
 ) -> np.ndarray:
     """Map visual-field rowcol in [-1, 1]^2 to image-pixel (x, y).
 
-    Assumes full-image foveation: the fixation window equals the image, so a
-    visual-field rowcol of (r, c) maps to image rowcol of ``fix + (r, c)``
-    (in [-1, 1] image coords). Then convert to pixel space:
+    Mirrors the model's ``FoveatedPatcher.forward`` scene-position mapping
+    (``scene_rowcol = fix_center + (fixation_size / image_size) * vf_rowcol``).
+    ``fix_size_norm`` is that ``fixation_size / image_size`` ratio: 1.0 for
+    full-image foveation (window == image), >1 when zoomed out (e.g. 722/512),
+    <1 when zoomed in. Then convert image rowcol to pixel space:
         col_px = (col_image + 1) / 2 * (W - 1)
         row_px = (row_image + 1) / 2 * (H - 1)
     and return as (x=col_px, y=row_px).
     """
-    image_rowcol = fix_center_rowcol[None, :] + rowcol_vf  # [N, 2]
+    image_rowcol = fix_center_rowcol[None, :] + fix_size_norm * rowcol_vf  # [N, 2]
     row_px = (image_rowcol[:, 0] + 1.0) * 0.5 * (image_size - 1)
     col_px = (image_rowcol[:, 1] + 1.0) * 0.5 * (image_size - 1)
     return np.stack([col_px, row_px], axis=1)  # (x, y)
@@ -113,9 +116,15 @@ def _extract_foveated_sample0(
 
     img0 = image[0:1]  # [1, 3, H, W]
     H = int(img0.shape[-1])
+    # Use the patcher's CONFIGURED fixation window (matches the model forward),
+    # not the image size. These differ whenever fixation_size != scene_resolution
+    # (e.g. the fixsize722 zoom-out run); hardcoding H here would render every
+    # run as full-image foveation and hide the actual sampling pattern.
+    fix_size = int(getattr(patcher, "fixation_size", H))
+    fix_size_norm = float(fix_size) / float(H)
     fix_loc = (viewpoint.centers[0:1].to(torch.float32) + 1.0) * 0.5  # [1, 2] in [0, 1]
     with torch.no_grad():
-        sensor = patcher.retina(img0, fix_loc=fix_loc, fixation_size=H)  # [1, 3, N_samples]
+        sensor = patcher.retina(img0, fix_loc=fix_loc, fixation_size=fix_size)  # [1, 3, N_samples]
 
     # Per-sample RGB in [0, 1]. RetinalTransform output mirrors the ImageNet-
     # normalized image it consumed; denormalize so colors are display-ready.
@@ -148,11 +157,11 @@ def _extract_foveated_sample0(
         cart_pad_rowcol = _as_numpy(pad_attr, dtype=np.float32)
 
     # Map every (row, col) in visual-field frame to image-pixel (x, y) using
-    # the viewpoint's fixation. With fix_size == image_size the mapping is
-    # ``scene_rowcol = fix_center + vf_rowcol``, then to pixel space.
+    # the viewpoint's fixation and the configured fixation window:
+    # ``scene_rowcol = fix_center + (fix_size / image_size) * vf_rowcol``.
     fix_center_rowcol = viewpoint.centers[0].detach().cpu().to(torch.float32).numpy()
-    sample_xy_pixel = _rowcol_to_image_xy_pixel(sample_cart_rowcol, fix_center_rowcol, H)
-    patch_xy_pixel = _rowcol_to_image_xy_pixel(patch_cart_rowcol, fix_center_rowcol, H)
+    sample_xy_pixel = _rowcol_to_image_xy_pixel(sample_cart_rowcol, fix_center_rowcol, H, fix_size_norm)
+    patch_xy_pixel = _rowcol_to_image_xy_pixel(patch_cart_rowcol, fix_center_rowcol, H, fix_size_norm)
 
     return FoveatedVizData(
         sample_cart_rowcol=sample_cart_rowcol,
