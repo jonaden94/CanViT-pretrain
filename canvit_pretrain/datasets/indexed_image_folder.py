@@ -105,7 +105,13 @@ class IndexedImageFolder(Dataset):
         class_names: list[str] = []
         for d in tqdm(class_dirs, desc="Scanning", unit="class"):
             cn = d.name
-            for f in d.iterdir():
+            # sorted() makes the index a pure function of the directory contents,
+            # independent of filesystem iteration order. Without it, within-class
+            # file order would depend on os.scandir() order, so deleting and
+            # rebuilding the cache could reorder files within a class and silently
+            # change any seeded subset built on top of the index (e.g. the fixed
+            # validation subset). Sorting guarantees a rebuild is byte-identical.
+            for f in sorted(d.iterdir()):
                 if f.is_file():
                     paths.append(f"{cn}/{f.name}")
                     class_names.append(cn)
