@@ -153,11 +153,19 @@ def plot_patches_overlay_relative(
     cart_pad_xy: NDArray[np.floating] | None = None,
     title: str = "Patches over RT",
     outline_lw: float = 1.2,
+    show_padding: bool = False,
 ) -> None:
     """Foveation pattern (sample scatter) + per-patch convex-hull outlines.
 
     Adapted from fovi/notebooks/plot.py:plot_patches_overlay. Operates entirely
     in the visual-field frame [-1, 1]^2 (no underlying image).
+
+    When ``show_padding`` is True and ``cart_pad_xy`` is provided, out-of-field
+    (padding) neighbor slots are also drawn as black 'x' markers AND included in
+    each patch's convex hull -- reflecting the patch as the model actually
+    processes it (a fixed kernel footprint, with peripheral cells filled by
+    padding). With ``show_padding`` False (default), hulls cover only real
+    samples (the image-coverage view) and padding is not drawn.
     """
     ax.scatter(
         sample_cart_xy[:, 0], sample_cart_xy[:, 1],
@@ -169,18 +177,26 @@ def plot_patches_overlay_relative(
         [sample_cart_xy, cart_pad_xy], axis=0
     )
     n_full = full_xy.shape[0]
+    draw_pad = show_padding and cart_pad_xy is not None and len(cart_pad_xy) > 0
 
     # fovi convention: knn_indices is [k, N_patches] (axis 1 = patches), and
     # padded slots may carry index = -1 (sentinel for some variants). Filter
-    # to (valid, in-range, non-pad) per patch column.
+    # to in-range indices; include or exclude padding slots per ``show_padding``.
     hull_segments: list[NDArray[np.floating]] = []
     hull_colors: list[str] = []
+    pad_pts: list[NDArray[np.floating]] = []
     n_patches = knn_indices.shape[1]
     for p in range(n_patches):
         col_idx = knn_indices[:, p]
         col_pad = knn_pad_mask[:, p]
-        valid_mask = (~col_pad) & (col_idx >= 0) & (col_idx < n_full)
-        members = col_idx[valid_mask]
+        in_range = (col_idx >= 0) & (col_idx < n_full)
+        # Hull members: include padding slots only when drawing padding.
+        hull_mask = in_range if draw_pad else (in_range & ~col_pad)
+        members = col_idx[hull_mask]
+        if draw_pad:
+            pad_slot = in_range & col_pad
+            if pad_slot.any():
+                pad_pts.append(full_xy[col_idx[pad_slot]])
         if members.size < 3:
             continue
         pts = full_xy[members]
@@ -200,9 +216,22 @@ def plot_patches_overlay_relative(
         lc = LineCollection(hull_segments, colors=hull_colors, linewidths=outline_lw, zorder=2)
         ax.add_collection(lc)
 
+    # Padding markers: single uniform style (black 'x') so they are unmistakably
+    # distinct from the image-colored sample dots and the ring-colored hulls.
+    if draw_pad and pad_pts:
+        pad_all = np.concatenate(pad_pts, axis=0)
+        ax.scatter(
+            pad_all[:, 0], pad_all[:, 1], marker="x",
+            c="black", s=14, linewidths=0.8, zorder=3, label="padding",
+        )
+
+    # Widen the view so the padding halo (radius > 1) stays visible.
+    lim = 1.05
+    if draw_pad:
+        lim = max(lim, float(np.abs(cart_pad_xy).max()) * 1.05)
     ax.set_title(title)
     ax.set_aspect("equal")
-    ax.set_xlim(-1.05, 1.05)
-    ax.set_ylim(1.05, -1.05)  # match image y-down so it visually aligns with neighbors
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(lim, -lim)  # match image y-down so it visually aligns with neighbors
     ax.set_xticks([])
     ax.set_yticks([])

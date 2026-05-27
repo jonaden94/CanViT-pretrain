@@ -149,12 +149,18 @@ def _extract_foveated_sample0(
     out_polar_r = _as_numpy(patcher.kpe.out_coords.polar[:, 0], dtype=np.float32)
 
     cart_pad_rowcol: np.ndarray | None = None
-    pad_attr = getattr(patcher.kpe.in_coords, "cartesian_pad_rowcol", None)
-    if pad_attr is None:
-        # fallback: older fovi versions named it `cartesian_pad_coords`
-        pad_attr = getattr(patcher.kpe.in_coords, "cartesian_pad_coords", None)
-    if pad_attr is not None:
-        cart_pad_rowcol = _as_numpy(pad_attr, dtype=np.float32)
+    pad_rowcol_attr = getattr(patcher.kpe.in_coords, "cartesian_pad_rowcol", None)
+    if pad_rowcol_attr is not None:
+        cart_pad_rowcol = _as_numpy(pad_rowcol_attr, dtype=np.float32)
+    else:
+        # fovi only exposes pad coords in the xy frame (`cartesian_pad_coords`).
+        # Real samples here are in the (row, col) = (-y, x) frame (the
+        # `cartesian_rowcol` convention, xy_to_rowcol format='-11'); apply the
+        # same map so pad markers/hulls align with the sample scatter.
+        pad_xy = getattr(patcher.kpe.in_coords, "cartesian_pad_coords", None)
+        if pad_xy is not None:
+            pad_xy = _as_numpy(pad_xy, dtype=np.float32)
+            cart_pad_rowcol = np.stack([-pad_xy[:, 1], pad_xy[:, 0]], axis=1)
 
     # Map every (row, col) in visual-field frame to image-pixel (x, y) using
     # the viewpoint's fixation and the configured fixation window:

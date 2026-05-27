@@ -420,6 +420,7 @@ def plot_multistep_pca(
                 fov.knn_indices, fov.knn_pad_mask, fov.out_polar_r,
                 cart_pad_xy=fov.cart_pad_rowcol,
                 title="Patches (rel)" if t == 0 else "",
+                show_padding=True,
             )
         else:
             assert C_GLIMPSE is not None
