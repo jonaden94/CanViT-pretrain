@@ -10,7 +10,11 @@ export TORCH_COMPILE_CACHE_DIR="/user/henrich1/u25995/.cache/torch_compile"
 # Storage
 export LOGS_DIR="/user/henrich1/u25995/jonathan/repos/CanViT-pretrain/logs"
 # export WEBDATASET_DIR="/user/henrich1/u25995/jonathan/datasets/webdataset-imagenet-1k"  # vast NFS copy; superseded by lustre below to avoid NFS contention
-export WEBDATASET_DIR="/mnt/lustre-rzg/workspaces/ws/nib00021/u25995-canvit-data/webdataset-imagenet-1k"  # must contain train-shuffled/ and val/
+export WEBDATASET_DIR="/mnt/lustre-rzg/workspaces/ws/nib00021/u25995-canvit-data/webdataset-imagenet-1k"  # training only; must contain train-shuffled/
+# Validation always reads this raw ImageNet-1k val ImageFolder (synset-named class subfolders), independent of WEBDATASET_DIR.
+export VAL_DIR="/user/henrich1/u25995/jonathan/datasets/imagenet1k-val"
+# Cache dir for the IndexedImageFolder parquet index (directory scan runs once, then reused across runs).
+export VAL_INDEX_DIR="/user/henrich1/u25995/jonathan/repos/_data_cache"
 
 # Tracker config
 export WANDB_PROJECT="canvit-pretrain"   # TODO: change as needed

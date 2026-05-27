@@ -60,7 +60,12 @@ if [ ! -d "$VENV" ]; then
 fi
 
 if [ -z "${WEBDATASET_DIR:-}" ]; then
-    log "ERROR: WEBDATASET_DIR is not set. Add it to .envrc.grete (parent of train-shuffled/ and val/)."
+    log "ERROR: WEBDATASET_DIR is not set. Add it to .envrc.grete (parent of train-shuffled/)."
+    exit 1
+fi
+
+if [ -z "${VAL_DIR:-}" ]; then
+    log "ERROR: VAL_DIR is not set. Add it to .envrc.grete (raw ImageNet-1k val ImageFolder, synset-named class subfolders)."
     exit 1
 fi
 
@@ -108,6 +113,8 @@ exec srun env TMPDIR="$TMPDIR" "$VENV/bin/python" -m canvit_pretrain.train \
     --run-name "$RUN_NAME" \
     --logs-dir "$LOGS_DIR" \
     --webdataset-dir "$WEBDATASET_DIR" \
+    --val-dir "$VAL_DIR" \
+    ${VAL_INDEX_DIR:+--val-index-dir "$VAL_INDEX_DIR"} \
     ${WANDB_ENTITY:+--wandb-entity "$WANDB_ENTITY"} \
     ${WANDB_DIR:+--wandb-dir "$WANDB_DIR"} \
     "${_CFG_ARGS[@]}" \

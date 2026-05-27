@@ -15,7 +15,7 @@ from canvit_pretrain.datasets import IndexedImageFolder
 from torch.utils.data import DataLoader, Dataset
 
 from .shards import ShardedFeatureLoader
-from .webdataset import WebDatasetTrainLoader, WebDatasetValLoader
+from .webdataset import WebDatasetTrainLoader
 
 log = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ class Loaders(NamedTuple):
     """Train and validation data loaders."""
 
     train: ShardedFeatureLoader | WebDatasetTrainLoader
-    val: InfiniteLoader | WebDatasetValLoader
+    val: InfiniteLoader
 
 
 def scene_size_px(grid_size: int, patch_size: int) -> int:
@@ -94,10 +94,16 @@ def create_loaders(
     world_size: int = 1,
     rank: int = 0,
 ) -> Loaders:
-    """Train + val loaders. Dispatches on cfg.webdataset_dir:
+    """Train + val loaders.
+
+    Validation ALWAYS reads the raw ImageNet-1k val ImageFolder at ``cfg.val_dir``
+    (synset-named class subfolders), independent of the training data source —
+    teacher targets are computed live during validation.
+
+    The training loader dispatches on ``cfg.webdataset_dir``:
       - set: WebDataset path (rank-aware, job_index-driven shard schedule).
-      - unset: existing precomputed-features path (raw images for val).
-    start_step positions the shard cursor on resume (sharded path); job_index
+      - unset: precomputed-features path (ShardedFeatureLoader).
+    ``start_step`` positions the shard cursor on resume (sharded path); ``job_index``
     plays the analogous role for the WebDataset path.
     """
     from ..config import Config
@@ -107,16 +113,56 @@ def create_loaders(
         f"rank={rank}/{world_size} ==="
     )
 
-    if cfg.webdataset_dir is not None:
-        return _create_webdataset_loaders(cfg, job_index=job_index, world_size=world_size, rank=rank)
+    val_loader = _create_imagefolder_val_loader(cfg)
 
+    if cfg.webdataset_dir is not None:
+        train_loader: ShardedFeatureLoader | WebDatasetTrainLoader = _create_webdataset_train_loader(
+            cfg, job_index=job_index, world_size=world_size, rank=rank
+        )
+    else:
+        train_loader = _create_sharded_train_loader(cfg, start_step=start_step)
+
+    return Loaders(train=train_loader, val=val_loader)
+
+
+def _create_imagefolder_val_loader(cfg: "Config") -> InfiniteLoader:
+    """Validation loader over the raw ImageNet-1k val ImageFolder (``cfg.val_dir``).
+
+    Synset-named class subfolders; labels are the canonical sorted-synset 0-999
+    indices (probe-compatible). The parquet index is cached under
+    ``cfg.val_index_dir`` so the directory scan happens once across runs.
+    """
     val_dir = cfg.val_dir
     assert val_dir.is_dir(), f"val_dir not found: {val_dir}"
 
     sz = cfg.scene_resolution
     persistent = cfg.num_workers > 0
+    val_tf = preprocess(sz)
 
-    # Train loader: precomputed features (required)
+    if cfg.val_index_dir is not None:
+        val_index_dir = cfg.val_index_dir
+        log.info(f"Val: using val_index_dir={val_index_dir}")
+    elif cfg.train_index_dir is not None:
+        val_index_dir = cfg.train_index_dir
+        log.info(f"Val: val_index_dir not set, using train_index_dir={val_index_dir}")
+    else:
+        val_index_dir = Path(tempfile.mkdtemp(prefix="avp_val_index_"))
+        log.info(f"Val: no index_dir available, using temp dir: {val_index_dir}")
+
+    val_ds: Dataset[tuple] = IndexedImageFolder(val_dir, val_index_dir, val_tf)
+    assert len(val_ds) > 0, "val dataset empty"
+    log.info(f"Val: raw ImageFolder {val_dir} — {len(val_ds):,} images, resolution: {sz}px")
+    # CRITICAL: shuffle=True required! Without it, batches are sequential
+    # (all tench, then all goldfish, etc.) which gives misleading metrics.
+    return InfiniteLoader(DataLoader(
+        val_ds, batch_size=cfg.batch_size_per_gpu, shuffle=True,
+        num_workers=cfg.num_workers, pin_memory=True, drop_last=True, persistent_workers=persistent,
+    ))
+
+
+def _create_sharded_train_loader(cfg: "Config", *, start_step: int) -> ShardedFeatureLoader:
+    """Build the precomputed-features training loader (ShardedFeatureLoader)."""
+    sz = cfg.scene_resolution
     assert cfg.feature_base_dir is not None, "feature_base_dir required"
     assert (cfg.feature_image_root is None) != (cfg.tar_dir is None), \
         "Exactly one of feature_image_root or tar_dir required"
@@ -142,50 +188,25 @@ def create_loaders(
         steps_per_job=cfg.steps_per_job,
     )
     log.info(f"  {len(train_loader.shard_files)} shards, start_shard={train_loader.start_shard}")
-
-    # Val loader
-    val_tf = preprocess(sz)
-    if cfg.val_index_dir is not None:
-        val_index_dir = cfg.val_index_dir
-        log.info(f"Val: using provided val_index_dir={val_index_dir}")
-    elif cfg.train_index_dir is not None:
-        val_index_dir = cfg.train_index_dir
-        log.info(f"Val: val_index_dir not set, using train_index_dir={val_index_dir}")
-    else:
-        val_index_dir = Path(tempfile.mkdtemp(prefix="avp_val_index_"))
-        log.info(f"Val: no index_dir available, using temp dir: {val_index_dir}")
-    val_ds: Dataset[tuple] = IndexedImageFolder(val_dir, val_index_dir, val_tf)
-    assert len(val_ds) > 0, "val dataset empty"
-    log.info(f"Val dataset: {len(val_ds):,} images, resolution: {sz}px")
-    # CRITICAL: shuffle=True required! Without it, batches are sequential
-    # (all tench, then all goldfish, etc.) which gives misleading metrics.
-    val_loader = InfiniteLoader(DataLoader(
-        val_ds, batch_size=cfg.batch_size_per_gpu, shuffle=True,
-        num_workers=cfg.num_workers, pin_memory=True, drop_last=True, persistent_workers=persistent,
-    ))
-
-    return Loaders(train=train_loader, val=val_loader)
+    return train_loader
 
 
-def _create_webdataset_loaders(
+def _create_webdataset_train_loader(
     cfg: "Config",
     *,
     job_index: int,
     world_size: int,
     rank: int,
-) -> Loaders:
-    """Build WebDataset train + val loaders for the rank-aware path."""
+) -> WebDatasetTrainLoader:
+    """Build the WebDataset training loader for the rank-aware path."""
     assert cfg.webdataset_dir is not None
     train_dir = cfg.webdataset_dir / "train-shuffled"
-    val_dir_wds = cfg.webdataset_dir / "val"
     assert train_dir.is_dir(), f"train dir not found: {train_dir}"
-    assert val_dir_wds.is_dir(), f"val dir not found: {val_dir_wds}"
 
     log.info(f"WebDataset path: {cfg.webdataset_dir}")
     log.info(f"  train: {train_dir}")
-    log.info(f"  val: {val_dir_wds}")
 
-    train_loader = WebDatasetTrainLoader(
+    return WebDatasetTrainLoader(
         train_dir=train_dir,
         seed=cfg.seed,
         job_index=job_index,
@@ -196,11 +217,3 @@ def _create_webdataset_loaders(
         rank=rank,
         num_workers=cfg.num_workers,
     )
-    val_loader = WebDatasetValLoader(
-        val_dir=val_dir_wds,
-        batch_size_per_gpu=cfg.batch_size_per_gpu,
-        image_size=cfg.scene_resolution,
-        world_size=world_size,
-        rank=rank,
-    )
-    return Loaders(train=train_loader, val=val_loader)

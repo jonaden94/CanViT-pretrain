@@ -1,4 +1,8 @@
-"""WebDataset-based train/val loaders.
+"""WebDataset-based training loader.
+
+Used for training only; validation always reads the raw ImageNet-1k val
+ImageFolder (see `create_loaders` / `IndexedImageFolder`), independent of the
+training data source.
 
 Each rank receives a deterministically computed list of shard paths (via
 `schedule.compute_schedule_slice`). DataLoader workers then split those shards
@@ -7,9 +11,8 @@ The actual `num_workers` is derived from `cfg.num_workers`, capped at
 `shards_per_gpu`, and rounded down to a divisor of `shards_per_gpu` so every
 worker gets the same number of shards.
 
-Loader interface matches the existing `ShardedFeatureLoader` and
-`InfiniteLoader` so `loop.py` can call `train_loader.next()` and
-`val_loader.next_batch_with_labels()` without modification.
+Loader interface matches the existing `ShardedFeatureLoader` so `loop.py` can
+call `train_loader.next()` without modification.
 """
 
 from __future__ import annotations
@@ -222,82 +225,6 @@ class WebDatasetTrainLoader:
         if not isinstance(labels, Tensor):
             labels = torch.as_tensor(labels, dtype=torch.long)
         return images, raw_patches, raw_cls, labels
-
-
-class WebDatasetValLoader:
-    """Streams validation samples from one rank's slice of the val shards.
-
-    Cycles forever (matches `InfiniteLoader` semantics). Yields one batch per
-    `next_batch_with_labels()` call. Each rank reads a non-overlapping slice
-    of val shards (round-robin partition).
-    """
-
-    def __init__(
-        self,
-        *,
-        val_dir: Path,
-        batch_size_per_gpu: int,
-        image_size: int,
-        world_size: int,
-        rank: int,
-    ) -> None:
-        info = _read_info(val_dir)
-        all_shards = sorted(val_dir.glob("shard-*.tar"))
-        assert all_shards, f"No shards in {val_dir}"
-        # Round-robin partition across ranks. Last shard is partial — included
-        # because validation must touch every sample.
-        rank_shards = [s for i, s in enumerate(all_shards) if i % world_size == rank]
-        assert rank_shards, (
-            f"Rank {rank} got no val shards (world_size={world_size}, "
-            f"n_shards={len(all_shards)}). Need world_size <= n_val_shards."
-        )
-
-        self.shard_files = rank_shards
-        self.batch_size = batch_size_per_gpu
-        self.image_size = image_size
-        self.num_workers = min(len(rank_shards), 4)
-
-        log.info(
-            f"WebDatasetValLoader: rank={rank}/{world_size}, "
-            f"shards={len(rank_shards)}/{len(all_shards)} (n_val_images={info.get('n_images', '?')}), "
-            f"num_workers={self.num_workers}"
-        )
-
-        self._iter: Iterator | None = None
-        self._loader: DataLoader | None = None
-
-    def _build_loader(self) -> DataLoader:
-        ds = _build_pipeline(
-            [str(p) for p in self.shard_files],
-            image_size=self.image_size,
-            batch_size=self.batch_size,
-            use_worker_split=True,
-        )
-        return DataLoader(
-            ds,
-            batch_size=None,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            persistent_workers=False,
-            prefetch_factor=2 if self.num_workers > 0 else None,
-        )
-
-    def _next_with_cycle(self) -> tuple[Tensor, ...]:
-        if self._iter is None:
-            self._loader = self._build_loader()
-            self._iter = iter(self._loader)
-        try:
-            return next(self._iter)
-        except StopIteration:
-            self._loader = self._build_loader()
-            self._iter = iter(self._loader)
-            return next(self._iter)
-
-    def next_batch_with_labels(self) -> tuple[Tensor, Tensor]:
-        images, labels, _raw_cls, _raw_patches = self._next_with_cycle()
-        if not isinstance(labels, Tensor):
-            labels = torch.as_tensor(labels, dtype=torch.long)
-        return images, labels
 
 
 def init_normalizer_stats_from_tar(
