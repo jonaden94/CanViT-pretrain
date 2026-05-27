@@ -578,39 +578,40 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         if step % cfg.val_every == 0 and step != end_step:
             log.info(f"Starting validation at step {step}")
 
-            # Validation on val batch (always at val_every)
-            val_images, val_labels = val_loader.next_batch_with_labels()
-            val_images = val_images.to(cfg.device, non_blocking=nb)
-            val_labels = val_labels.to(cfg.device, non_blocking=nb) if probe is not None else None
-            try:
-                with amp_ctx:
-                    validate(
-                        exp=exp,
-                        step=step,
-                        model=core_model,
-                        compute_raw_targets=compute_raw_targets,
-                        scene_normalizer=scene_norm,
-                        cls_normalizer=cls_norm,
-                        images=val_images,
-                        canvas_grid_size=G,
-                        scene_size_px=scene_size,
-                        glimpse_size_px=glimpse_size_px,
-                        run_dir=run_dir,
-                        n_eval_viewpoints=cfg.n_eval_viewpoints,
-                        min_viewpoint_scale=cfg.min_viewpoint_scale,
-                        prefix="val",
-                        probe=probe,
-                        labels=val_labels,
-                        log_curves=do_curves,
-                        log_pca=do_pca,
-                        teacher=teacher,
-                        log_spatial_stats=cfg.log_spatial_stats,
-                        teacher_name=cfg.teacher_name,
-                    )
-            except Exception:
-                log.error(f"!!! VALIDATION FAILED at step {step} !!!\n{traceback.format_exc()}")
-            # All ranks barrier so non-main ranks (which run validate but log
-            # into a no-op Tracker) stay synchronised with rank 0.
+            # Validation runs on rank 0 only, over the fixed N-sample subset
+            # (same samples every validation, independent of world size). Other
+            # ranks skip straight to the barrier. Safe because validate() uses the
+            # unwrapped core_model under inference_mode — no DDP collectives.
+            if ddp.is_main():
+                try:
+                    with amp_ctx:
+                        validate(
+                            exp=exp,
+                            step=step,
+                            model=core_model,
+                            compute_raw_targets=compute_raw_targets,
+                            scene_normalizer=scene_norm,
+                            cls_normalizer=cls_norm,
+                            val_batches=val_loader.batches(),
+                            device=cfg.device,
+                            canvas_grid_size=G,
+                            scene_size_px=scene_size,
+                            glimpse_size_px=glimpse_size_px,
+                            run_dir=run_dir,
+                            n_eval_viewpoints=cfg.n_eval_viewpoints,
+                            min_viewpoint_scale=cfg.min_viewpoint_scale,
+                            prefix="val",
+                            probe=probe,
+                            log_curves=do_curves,
+                            log_pca=do_pca,
+                            teacher=teacher,
+                            log_spatial_stats=cfg.log_spatial_stats,
+                            teacher_name=cfg.teacher_name,
+                            non_blocking=nb,
+                        )
+                except Exception:
+                    log.error(f"!!! VALIDATION FAILED at step {step} !!!\n{traceback.format_exc()}")
+            # All ranks barrier so non-main ranks stay synchronised with rank 0.
             ddp.barrier()
 
         # === SIGUSR1 CHECKPOINT ===

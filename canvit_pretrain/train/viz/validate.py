@@ -1,7 +1,7 @@
 """Validation with streaming metrics and optional PCA visualization."""
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -136,7 +136,8 @@ def validate(
     compute_raw_targets: Callable[[Tensor, int], "NormFeatures"],
     scene_normalizer: PatchStandardizer,
     cls_normalizer: CLSStandardizer,
-    images: Tensor,
+    val_batches: Iterable[tuple[Tensor, Tensor]],
+    device: torch.device,
     canvas_grid_size: int,
     scene_size_px: int,
     glimpse_size_px: int,
@@ -145,14 +146,20 @@ def validate(
     min_viewpoint_scale: float = 0.05,
     prefix: str = "val",
     probe: DINOv3LinearClassificationHead | None = None,
-    labels: Tensor | None = None,
     log_curves: bool = False,
     log_pca: bool = False,
     teacher: DINOv3Teacher | None = None,
     log_spatial_stats: bool = False,
     teacher_name: str | None = None,
+    non_blocking: bool = False,
 ) -> float:
-    """Run validation with streaming metrics (no O(B×T) memory)."""
+    """Run validation over a fixed set of batches (rank 0 only).
+
+    Iterates ``val_batches`` (the fixed N-sample subset, chunked by batch size),
+    computes per-timestep streaming metrics per chunk, and aggregates them weighted
+    by chunk size — so the reported metrics are over all N samples and identical
+    regardless of the chunk (batch) size. PCA/viz uses sample 0 of the first chunk.
+    """
     assert not log_pca or teacher is not None
 
     if probe is not None and teacher_name is not None:
@@ -163,117 +170,158 @@ def validate(
                 f"but probe trained on teacher@{probe_res}. IN1k metrics may be unreliable."
             )
 
-    B = images.shape[0]
     is_foveated = getattr(model.cfg, "patcher_name", "uniform") == "foveated"
-    if is_foveated:
-        viewpoints = make_eval_viewpoints_foveated(B, images.device, n_viewpoints=n_eval_viewpoints)
-    else:
-        viewpoints = make_eval_viewpoints(B, images.device, n_viewpoints=n_eval_viewpoints)
     has_cls = model.scene_cls_head is not None
-    has_probe = probe is not None and labels is not None and labels_are_in1k(labels)
 
     model_was_training = model.training
     model.eval()
 
-    try:
-        with torch.inference_mode():
-            raw_feats = compute_raw_targets(images, scene_size_px)
-            # Normalized targets for normalized cosine similarity and PCA
-            target = scene_normalizer(raw_feats.patches)
-            cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1) if has_cls else None
-            target_sample0 = target[0].cpu().float().numpy() if log_pca else None
+    def _run_chunk(images: Tensor, labels: Tensor | None, *, want_viz: bool):
+        """Evaluate one chunk. Returns (acc, batch_size, teacher_acc, target_sample0,
+        viewpoints, gt_idx, gt_name); per-timestep entries in ``acc`` are batch means."""
+        B = images.shape[0]
+        if is_foveated:
+            viewpoints = make_eval_viewpoints_foveated(B, images.device, n_viewpoints=n_eval_viewpoints)
+        else:
+            viewpoints = make_eval_viewpoints(B, images.device, n_viewpoints=n_eval_viewpoints)
+        has_probe = probe is not None and labels is not None and labels_are_in1k(labels)
 
-            gt_idx = int(labels[0].item()) if has_probe and labels is not None else 0
-            gt_name = get_imagenet_class_names()[gt_idx] if has_probe else ""
+        raw_feats = compute_raw_targets(images, scene_size_px)
+        # Normalized targets for normalized cosine similarity and PCA
+        target = scene_normalizer(raw_feats.patches)
+        cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1) if has_cls else None
+        target_sample0 = target[0].cpu().float().numpy() if want_viz else None
 
-            if has_probe and teacher is not None:
-                assert teacher_name is not None and probe is not None
-                probe_res = get_probe_resolution(teacher_name)
-                images_at_probe_res = F.interpolate(
-                    images, size=(probe_res, probe_res), mode="bilinear", align_corners=False
+        gt_idx = int(labels[0].item()) if has_probe and labels is not None else 0
+        gt_name = get_imagenet_class_names()[gt_idx] if has_probe else ""
+
+        teacher_acc: float | None = None
+        if has_probe and teacher is not None:
+            assert teacher_name is not None and probe is not None and labels is not None
+            probe_res = get_probe_resolution(teacher_name)
+            images_at_probe_res = F.interpolate(
+                images, size=(probe_res, probe_res), mode="bilinear", align_corners=False
+            )
+            teacher_cls = teacher.forward_norm_features(images_at_probe_res).cls
+            teacher_acc = compute_in1k_top1(probe(teacher_cls), labels)
+
+        def init_fn(state: RecurrentState) -> ValAccumulator:
+            acc = ValAccumulator()
+            if want_viz:
+                n_canvas_tokens = model.n_canvas_registers + canvas_grid_size ** 2
+                assert_shape(state.canvas, (B, n_canvas_tokens, model.canvas_dim))
+                acc.initial_scene = (
+                    model.predict_teacher_scene(state.canvas)[0].cpu().float().numpy()
                 )
-                teacher_cls = teacher.forward_norm_features(images_at_probe_res).cls
-                teacher_logits = probe(teacher_cls)
-                assert labels is not None
-                teacher_acc = compute_in1k_top1(teacher_logits, labels)
-                exp.log_metric(f"{prefix}/in1k_teacher_top1", teacher_acc, step=step)
-
-            def init_fn(state: RecurrentState) -> ValAccumulator:
-                acc = ValAccumulator()
-                if log_pca:
-                    n_canvas_tokens = model.n_canvas_registers + canvas_grid_size ** 2
-                    assert_shape(state.canvas, (B, n_canvas_tokens, model.canvas_dim))
-                    acc.initial_scene = (
-                        model.predict_teacher_scene(state.canvas)[0].cpu().float().numpy()
-                    )
-                    acc.initial_canvas_spatial = (
-                        model.get_spatial(state.canvas[0:1])[0].cpu().float().numpy()
-                    )
-                return acc
-
-            def step_fn(
-                acc: ValAccumulator, out: CanViTOutput, vp: CanvitViewpoint,
-            ) -> ValAccumulator:
-                predicted_scene = model.predict_teacher_scene(out.state.canvas)
-                predicted_cls = (
-                    model.predict_scene_teacher_cls(out.state.recurrent_cls) if has_cls else None
+                acc.initial_canvas_spatial = (
+                    model.get_spatial(state.canvas[0:1])[0].cpu().float().numpy()
                 )
+            return acc
 
-                # Cosine similarity: both raw (stable across runs) and normalized
-                scene_pred_raw = scene_normalizer.destandardize(predicted_scene)
-                acc.scene_cos_raw.append(F.cosine_similarity(scene_pred_raw, raw_feats.patches, dim=-1).mean().item())
-                acc.scene_cos_norm.append(F.cosine_similarity(predicted_scene, target, dim=-1).mean().item())
-
-                if has_cls and predicted_cls is not None:
-                    assert cls_target is not None
-                    cls_pred_raw = cls_normalizer.destandardize(predicted_cls.unsqueeze(1)).squeeze(1)
-                    acc.cls_cos_raw.append(F.cosine_similarity(cls_pred_raw, raw_feats.cls, dim=-1).mean().item())
-                    acc.cls_cos_norm.append(F.cosine_similarity(predicted_cls, cls_target, dim=-1).mean().item())
-
-                    if has_probe:
-                        assert probe is not None and labels is not None
-                        logits = probe(cls_pred_raw)
-                        acc.in1k_accs.append(compute_in1k_top1(logits, labels))
-
-                        if log_pca:
-                            top_k = get_top_k_predictions(logits[0:1], k=5)[0]
-                            acc.pca_predictions.append(
-                                TimestepPredictions(
-                                    predictions=top_k, gt_idx=gt_idx, gt_name=gt_name
-                                )
-                            )
-
-                if log_pca:
-                    acc.viz_samples.append(
-                        extract_sample0_viz(out, images, vp, predicted_scene, model, glimpse_size_px)
-                    )
-
-                return acc
-
-            acc, _final_state = model.forward_reduce(
-                image=images,
-                viewpoints=viewpoints,  # pyright: ignore[reportArgumentType]
-                canvas_grid_size=canvas_grid_size,
-                init_fn=init_fn,
-                step_fn=step_fn,
+        def step_fn(
+            acc: ValAccumulator, out: CanViTOutput, vp: CanvitViewpoint,
+        ) -> ValAccumulator:
+            predicted_scene = model.predict_teacher_scene(out.state.canvas)
+            predicted_cls = (
+                model.predict_scene_teacher_cls(out.state.recurrent_cls) if has_cls else None
             )
 
-            # Log both raw and normalized cosine similarities
-            exp.log_metric(f"{prefix}/scene_cos_raw", acc.scene_cos_raw[-1], step=step)
-            exp.log_metric(f"{prefix}/scene_cos_norm", acc.scene_cos_norm[-1], step=step)
-            for t, (raw, norm) in enumerate(zip(acc.scene_cos_raw, acc.scene_cos_norm)):
+            # Cosine similarity: both raw (stable across runs) and normalized
+            scene_pred_raw = scene_normalizer.destandardize(predicted_scene)
+            acc.scene_cos_raw.append(F.cosine_similarity(scene_pred_raw, raw_feats.patches, dim=-1).mean().item())
+            acc.scene_cos_norm.append(F.cosine_similarity(predicted_scene, target, dim=-1).mean().item())
+
+            if has_cls and predicted_cls is not None:
+                assert cls_target is not None
+                cls_pred_raw = cls_normalizer.destandardize(predicted_cls.unsqueeze(1)).squeeze(1)
+                acc.cls_cos_raw.append(F.cosine_similarity(cls_pred_raw, raw_feats.cls, dim=-1).mean().item())
+                acc.cls_cos_norm.append(F.cosine_similarity(predicted_cls, cls_target, dim=-1).mean().item())
+
+                if has_probe:
+                    assert probe is not None and labels is not None
+                    logits = probe(cls_pred_raw)
+                    acc.in1k_accs.append(compute_in1k_top1(logits, labels))
+
+                    if want_viz:
+                        top_k = get_top_k_predictions(logits[0:1], k=5)[0]
+                        acc.pca_predictions.append(
+                            TimestepPredictions(
+                                predictions=top_k, gt_idx=gt_idx, gt_name=gt_name
+                            )
+                        )
+
+            if want_viz:
+                acc.viz_samples.append(
+                    extract_sample0_viz(out, images, vp, predicted_scene, model, glimpse_size_px)
+                )
+
+            return acc
+
+        acc, _final_state = model.forward_reduce(
+            image=images,
+            viewpoints=viewpoints,  # pyright: ignore[reportArgumentType]
+            canvas_grid_size=canvas_grid_size,
+            init_fn=init_fn,
+            step_fn=step_fn,
+        )
+        return acc, B, teacher_acc, target_sample0, viewpoints, gt_idx, gt_name
+
+    try:
+        with torch.inference_mode():
+            # Evaluate every chunk of the fixed subset; collect per-chunk accumulators.
+            chunk_accs: list[tuple[ValAccumulator, int]] = []
+            teacher_accs: list[tuple[float, int]] = []
+            first: dict | None = None
+            for ci, (images_cpu, labels_cpu) in enumerate(val_batches):
+                images = images_cpu.to(device, non_blocking=non_blocking)
+                labels = labels_cpu.to(device, non_blocking=non_blocking) if probe is not None else None
+                want_viz = log_pca and ci == 0
+                acc, B, t_acc, tgt0, viewpoints, _gt_idx, _gt_name = _run_chunk(
+                    images, labels, want_viz=want_viz
+                )
+                chunk_accs.append((acc, B))
+                if t_acc is not None:
+                    teacher_accs.append((t_acc, B))
+                if ci == 0:
+                    first = {"acc": acc, "images": images, "target_sample0": tgt0, "viewpoints": viewpoints}
+
+            assert chunk_accs, "validate() received no batches"
+
+            def agg(attr: str) -> list[float]:
+                """Per-timestep mean over all samples (weighted by chunk size)."""
+                series = [(getattr(a, attr), b) for a, b in chunk_accs]
+                total = sum(b for _, b in series)
+                n_t = len(series[0][0])
+                return [sum(vals[t] * b for vals, b in series) / total for t in range(n_t)]
+
+            scene_cos_raw = agg("scene_cos_raw")
+            scene_cos_norm = agg("scene_cos_norm")
+            cls_cos_raw = agg("cls_cos_raw") if has_cls else []
+            cls_cos_norm = agg("cls_cos_norm") if has_cls else []
+            have_in1k = len(chunk_accs[0][0].in1k_accs) > 0
+            in1k_accs = agg("in1k_accs") if have_in1k else []
+
+            if teacher_accs:
+                total = sum(b for _, b in teacher_accs)
+                teacher_top1 = sum(a * b for a, b in teacher_accs) / total
+                exp.log_metric(f"{prefix}/in1k_teacher_top1", teacher_top1, step=step)
+
+            # Log both raw and normalized cosine similarities (aggregated over all N).
+            exp.log_metric(f"{prefix}/scene_cos_raw", scene_cos_raw[-1], step=step)
+            exp.log_metric(f"{prefix}/scene_cos_norm", scene_cos_norm[-1], step=step)
+            for t, (raw, norm) in enumerate(zip(scene_cos_raw, scene_cos_norm)):
                 exp.log_metric(f"{prefix}/scene_cos_raw_t{t}", raw, step=step)
                 exp.log_metric(f"{prefix}/scene_cos_norm_t{t}", norm, step=step)
 
             if has_cls:
-                exp.log_metric(f"{prefix}/cls_cos_raw", acc.cls_cos_raw[-1], step=step)
-                exp.log_metric(f"{prefix}/cls_cos_norm", acc.cls_cos_norm[-1], step=step)
-                for t, (raw, norm) in enumerate(zip(acc.cls_cos_raw, acc.cls_cos_norm)):
+                exp.log_metric(f"{prefix}/cls_cos_raw", cls_cos_raw[-1], step=step)
+                exp.log_metric(f"{prefix}/cls_cos_norm", cls_cos_norm[-1], step=step)
+                for t, (raw, norm) in enumerate(zip(cls_cos_raw, cls_cos_norm)):
                     exp.log_metric(f"{prefix}/cls_cos_raw_t{t}", raw, step=step)
                     exp.log_metric(f"{prefix}/cls_cos_norm_t{t}", norm, step=step)
 
-            if has_probe:
-                for t, ia in enumerate(acc.in1k_accs):
+            if have_in1k:
+                for t, ia in enumerate(in1k_accs):
                     exp.log_metric(f"{prefix}/in1k_tts_top1_t{t}", ia, step=step)
 
             # Combined 5-subplot graphs figure saved to disk at log_curves cadence.
@@ -281,20 +329,22 @@ def validate(
             # in1k_tts_top1_*). Per-timestep scalars above keep going to wandb.
             if log_curves:
                 fig_graphs = plot_combined_curves(
-                    scene_cos_raw=acc.scene_cos_raw,
-                    scene_cos_norm=acc.scene_cos_norm,
-                    cls_cos_raw=acc.cls_cos_raw if has_cls else None,
-                    cls_cos_norm=acc.cls_cos_norm if has_cls else None,
-                    in1k_accs=acc.in1k_accs if has_probe else None,
+                    scene_cos_raw=scene_cos_raw,
+                    scene_cos_norm=scene_cos_norm,
+                    cls_cos_raw=cls_cos_raw if has_cls else None,
+                    cls_cos_norm=cls_cos_norm if has_cls else None,
+                    in1k_accs=in1k_accs if have_in1k else None,
                 )
                 save_figure(fig_graphs, run_dir, "graphs", step)
 
             if log_pca:
-                assert target_sample0 is not None
-                H, W = images.shape[-2], images.shape[-1]
+                assert first is not None and first["target_sample0"] is not None
+                images0 = first["images"]
+                viewpoints = first["viewpoints"]
+                H, W = images0.shape[-2], images0.shape[-1]
                 boxes = [vp.to_pixel_box(0, H, W) for vp in viewpoints]
                 names = [vp.name for vp in viewpoints]
-                full_img = imagenet_denormalize_to_numpy(images[0])
+                full_img = imagenet_denormalize_to_numpy(images0[0])
                 # Uniform-grid local PCA panel needs g*g tokens; foveated tokens
                 # are a point cloud so we disable the local stream panel.
                 uniform_grid = getattr(model.cfg, "patcher_name", "uniform") == "uniform"
@@ -306,9 +356,9 @@ def validate(
                     exp=exp,
                     step=step,
                     prefix=prefix,
-                    acc=acc,
+                    acc=first["acc"],
                     full_img=full_img,
-                    teacher_np=target_sample0,
+                    teacher_np=first["target_sample0"],
                     boxes=boxes,
                     names=names,
                     canvas_grid_size=canvas_grid_size,
@@ -317,7 +367,7 @@ def validate(
                     run_dir=run_dir,
                 )
 
-            return acc.scene_cos_raw[-1]
+            return scene_cos_raw[-1]
     finally:
         if model_was_training:
             model.train()

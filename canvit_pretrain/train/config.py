@@ -91,6 +91,15 @@ class Config:
     log_every: int = 20
     val_every: int = 1000
     n_eval_viewpoints: int = 10  # Number of viewpoints in validation (quadtree)
+    n_val_samples: int = 256
+    """Number of validation samples evaluated per validation, independent of
+    ``batch_size_per_gpu`` and of world size. A fixed, seeded random subset of the
+    val set (the SAME images every validation — no cycling), clamped to the val set
+    size. Evaluated on rank 0 only, in chunks of ``batch_size_per_gpu`` whose
+    per-timestep metrics are aggregated (chunk size does not affect the result)."""
+    val_seed: int = 0
+    """Seed selecting the fixed validation subset. Same seed -> same images across
+    runs and across world sizes."""
     viz_every_n_vals: int = 5  # Log viz every N validation runs
     curve_every_n_vals: int = 5  # Log curves every N validation runs
     log_spatial_stats: bool = True

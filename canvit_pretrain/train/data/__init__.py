@@ -10,9 +10,10 @@ from torch import Tensor
 
 if TYPE_CHECKING:
     from ..config import Config
+import torch
 from canvit_pytorch.preprocess import preprocess
 from canvit_pretrain.datasets import IndexedImageFolder
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from .shards import ShardedFeatureLoader
 from .webdataset import WebDatasetTrainLoader
@@ -75,11 +76,33 @@ class InfiniteLoader:
         return batch[0], batch[1]
 
 
+class FixedValLoader:
+    """Deterministic, finite loader over a fixed N-sample subset of the val set.
+
+    Always yields the SAME images in the SAME order on every pass (re-iterable via
+    ``batches()``), independent of world size — the subset is chosen once by a fixed
+    seed from the full val set. Used for rank-0 validation: no cycling, no
+    per-rank/per-call sample drift.
+    """
+
+    def __init__(self, loader: DataLoader, n_samples: int) -> None:
+        self._loader = loader
+        self.n_samples = n_samples
+
+    def batches(self) -> Iterator[tuple[Tensor, Tensor]]:
+        """Yield ``(images, labels)`` for the fixed subset, one chunk per step."""
+        for batch in self._loader:
+            images, labels = batch[0], batch[1]
+            if not isinstance(labels, Tensor):
+                labels = torch.as_tensor(labels, dtype=torch.long)
+            yield images, labels
+
+
 class Loaders(NamedTuple):
     """Train and validation data loaders."""
 
     train: ShardedFeatureLoader | WebDatasetTrainLoader
-    val: InfiniteLoader
+    val: FixedValLoader
 
 
 def scene_size_px(grid_size: int, patch_size: int) -> int:
@@ -125,12 +148,19 @@ def create_loaders(
     return Loaders(train=train_loader, val=val_loader)
 
 
-def _create_imagefolder_val_loader(cfg: "Config") -> InfiniteLoader:
-    """Validation loader over the raw ImageNet-1k val ImageFolder (``cfg.val_dir``).
+def _create_imagefolder_val_loader(cfg: "Config") -> FixedValLoader:
+    """Validation loader over a fixed N-sample subset of the raw ImageNet-1k val
+    ImageFolder (``cfg.val_dir``).
 
     Synset-named class subfolders; labels are the canonical sorted-synset 0-999
     indices (probe-compatible). The parquet index is cached under
     ``cfg.val_index_dir`` so the directory scan happens once across runs.
+
+    The subset is ``min(cfg.n_val_samples, len(val_set))`` images, drawn once by a
+    seeded permutation (``cfg.val_seed``) over the full val set — so the SAME images
+    are used in every validation, independent of ``batch_size_per_gpu`` and of world
+    size. Iterated with ``shuffle=False`` in fixed order; metrics over the subset are
+    identical regardless of the chunk (batch) size.
     """
     val_dir = cfg.val_dir
     assert val_dir.is_dir(), f"val_dir not found: {val_dir}"
@@ -150,14 +180,22 @@ def _create_imagefolder_val_loader(cfg: "Config") -> InfiniteLoader:
         log.info(f"Val: no index_dir available, using temp dir: {val_index_dir}")
 
     val_ds: Dataset[tuple] = IndexedImageFolder(val_dir, val_index_dir, val_tf)
-    assert len(val_ds) > 0, "val dataset empty"
-    log.info(f"Val: raw ImageFolder {val_dir} — {len(val_ds):,} images, resolution: {sz}px")
-    # CRITICAL: shuffle=True required! Without it, batches are sequential
-    # (all tench, then all goldfish, etc.) which gives misleading metrics.
-    return InfiniteLoader(DataLoader(
-        val_ds, batch_size=cfg.batch_size_per_gpu, shuffle=True,
-        num_workers=cfg.num_workers, pin_memory=True, drop_last=True, persistent_workers=persistent,
-    ))
+    n_total = len(val_ds)
+    assert n_total > 0, "val dataset empty"
+
+    n = min(cfg.n_val_samples, n_total)
+    gen = torch.Generator().manual_seed(cfg.val_seed)
+    indices = torch.randperm(n_total, generator=gen)[:n].tolist()
+    subset = Subset(val_ds, indices)
+    log.info(
+        f"Val: raw ImageFolder {val_dir} — fixed subset {n}/{n_total} images "
+        f"(seed={cfg.val_seed}), resolution: {sz}px, chunk={cfg.batch_size_per_gpu}"
+    )
+    loader = DataLoader(
+        subset, batch_size=cfg.batch_size_per_gpu, shuffle=False,
+        num_workers=cfg.num_workers, pin_memory=True, drop_last=False, persistent_workers=persistent,
+    )
+    return FixedValLoader(loader, n_samples=n)
 
 
 def _create_sharded_train_loader(cfg: "Config", *, start_step: int) -> ShardedFeatureLoader:
