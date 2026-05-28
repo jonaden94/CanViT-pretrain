@@ -81,14 +81,35 @@ def _handle_sigusr1(signum: int, frame: object) -> None:
     log.info("SIGUSR1 received - will save checkpoint after current step")
 
 
-def grad_norms_by_module(model: nn.Module, depth: int = 1) -> dict[str, float]:
-    """Gradient norms grouped by module path prefix."""
+def grad_norms_by_module(
+    model: nn.Module,
+    depth: int = 1,
+    deep_prefixes: tuple[str, ...] = (),
+) -> dict[str, float]:
+    """Gradient norms grouped by module path prefix.
+
+    Default behaviour: each parameter contributes to the group named by its
+    first ``depth`` dot-separated components. To zoom in on selected sub-trees
+    without changing the granularity of every other module, pass ``deep_prefixes``:
+    any parameter whose name starts with one of those prefixes is grouped one
+    level deeper than the prefix itself. E.g. ``deep_prefixes=("patcher",)``
+    splits ``patcher`` into ``patcher.kpe``, ``patcher.embed_head``,
+    ``patcher.conditioner`` while every other top-level module stays at ``depth``.
+    Longest matching prefix wins, so ``("patcher", "patcher.conditioner")``
+    additionally splits ``patcher.conditioner`` one level deeper.
+    """
     groups: dict[str, list[Tensor]] = {}
     for name, param in model.named_parameters():
         if param.grad is None:
             continue
         parts = name.split(".")
-        prefix = ".".join(parts[:depth])
+        match = max(
+            (p for p in deep_prefixes if name.startswith(p + ".")),
+            key=lambda p: p.count("."),
+            default=None,
+        )
+        ndepth = (len(match.split(".")) + 1) if match is not None else depth
+        prefix = ".".join(parts[:ndepth])
         groups.setdefault(prefix, []).append(param.grad)
     return {
         prefix: torch.cat([g.flatten() for g in grads]).norm().item()
@@ -804,7 +825,16 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             # Per-module grad norms (at val intervals, after training).
             # Use core_model so names don't get the "module." DDP prefix.
             if step % cfg.val_every == 0:
-                for name, norm in grad_norms_by_module(core_model, depth=1).items():
+                # Optionally break patcher down (kpe vs conditioner; FiLM MLP /
+                # learned codes inside conditioner) to inspect modulation
+                # gradients vs the core embedding. Other modules stay at depth=1.
+                deep_prefixes = (
+                    ("patcher", "patcher.conditioner") if cfg.log_patcher_grad_detail else ()
+                )
+                grad_norm_groups = grad_norms_by_module(
+                    core_model, depth=1, deep_prefixes=deep_prefixes,
+                )
+                for name, norm in grad_norm_groups.items():
                     exp.log_metric(f"grad_norm/{name}", norm, step=step)
 
             # Optuna pruning (skip step 0 - EMA not meaningful yet)

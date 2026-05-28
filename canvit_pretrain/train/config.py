@@ -103,6 +103,12 @@ class Config:
     viz_every_n_vals: int = 5  # Log viz every N validation runs
     curve_every_n_vals: int = 5  # Log curves every N validation runs
     log_spatial_stats: bool = True
+    log_patcher_grad_detail: bool = True
+    """Break the patcher's per-validation grad-norm logs into sub-components:
+    ``patcher.kpe``, ``patcher.embed_head``, ``patcher.conditioner.*`` (FiLM MLP /
+    learned per-patch code / etc.). When False, the patcher is reported as a
+    single ``patcher`` group like every other top-level module. All other modules
+    (backbone, scene_cls_head, …) are unaffected either way."""
     # Experiment tracker
     tracker: Literal["comet", "wandb", "none"] = "wandb"
     """Backend for parameter/metric/figure logging."""
