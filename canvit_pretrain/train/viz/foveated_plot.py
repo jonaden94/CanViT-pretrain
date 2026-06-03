@@ -166,7 +166,16 @@ def plot_patches_overlay_relative(
     processes it (a fixed kernel footprint, with peripheral cells filled by
     padding). With ``show_padding`` False (default), hulls cover only real
     samples (the image-coverage view) and padding is not drawn.
+
+    The inputs are in the (row, col) frame; we plot ``col`` on the horizontal
+    axis and ``row`` on the vertical (y-down) so this overlay matches the image
+    orientation of the absolute columns. (Plotting row-on-x / col-on-y, as an
+    earlier version did, transposed the pattern relative to the image.)
     """
+    # (row, col) -> (col, row) so horizontal=col, vertical=row(down) == image frame.
+    sample_cart_xy = np.asarray(sample_cart_xy)[:, [1, 0]]
+    if cart_pad_xy is not None:
+        cart_pad_xy = np.asarray(cart_pad_xy)[:, [1, 0]]
     ax.scatter(
         sample_cart_xy[:, 0], sample_cart_xy[:, 1],
         c=sample_colors, s=sample_sizes, linewidths=0, zorder=1,
