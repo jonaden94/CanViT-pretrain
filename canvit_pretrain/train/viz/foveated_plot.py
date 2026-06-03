@@ -142,6 +142,55 @@ def _ring_index_per_patch(out_polar: NDArray[np.floating]) -> NDArray[np.integer
     return np.searchsorted(unique, radii)
 
 
+def plot_square_patches_overlay_relative(
+    ax,
+    sample_cart_rowcol: NDArray[np.floating],
+    sample_colors: NDArray[np.floating],
+    sample_sizes: NDArray[np.floating] | float,
+    patch_boxes_rowcol: NDArray[np.floating],
+    patch_ring_idx: NDArray[np.integer],
+    title: str = "Patches (rel)",
+    outline_lw: float = 1.2,
+) -> None:
+    """Square-patch foveation pattern: non-masked sample scatter + per-patch
+    axis-aligned **square** outlines, in the visual-field frame [-1, 1]^2.
+
+    Square analog of :func:`plot_patches_overlay_relative`. ``sample_cart_rowcol``
+    holds only the non-masked samples (masked slots are dropped upstream).
+    ``patch_boxes_rowcol`` is the full per-patch square extent ``(rowmin, colmin,
+    rowmax, colmax)`` (incl. masked slots) so the outline shows the patch's true
+    footprint while masked dots stay hidden. Outline color encodes the ring.
+
+    Plotted with ``col`` on the horizontal axis and ``row`` on the vertical
+    (y-down), matching the image orientation of the absolute columns.
+    """
+    from matplotlib.patches import Rectangle
+
+    ax.scatter(
+        sample_cart_rowcol[:, 1], sample_cart_rowcol[:, 0],  # (col, row): image frame
+        c=sample_colors, s=sample_sizes, linewidths=0, zorder=1,
+    )
+    lim = 1.05
+    for p in range(patch_boxes_rowcol.shape[0]):
+        rmin, cmin, rmax, cmax = (float(v) for v in patch_boxes_rowcol[p])
+        ring = int(patch_ring_idx[p])
+        ax.add_patch(Rectangle(
+            (cmin, rmin), cmax - cmin, rmax - rmin, fill=False,  # (x=col, y=row)
+            edgecolor=_RING_PALETTE[ring % len(_RING_PALETTE)],
+            linewidth=outline_lw, zorder=2,
+        ))
+        lim = max(lim, abs(rmin), abs(rmax), abs(cmin), abs(cmax))
+    if sample_cart_rowcol.size:
+        lim = max(lim, float(np.abs(sample_cart_rowcol).max()))
+    lim *= 1.03
+    ax.set_title(title)
+    ax.set_aspect("equal")
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(lim, -lim)  # y-down to match the absolute (image) columns
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+
 def plot_patches_overlay_relative(
     ax,
     sample_cart_xy: NDArray[np.floating],

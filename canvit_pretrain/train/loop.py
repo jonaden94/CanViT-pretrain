@@ -860,6 +860,10 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 foveated_samples = (
                     foveated_samples_raw if any(s is not None for s in foveated_samples_raw) else None
                 )
+                square_samples_raw = [vs.square for vs in vd.viz_samples]
+                square_samples = (
+                    square_samples_raw if any(s is not None for s in square_samples_raw) else None
+                )
                 assert vd.initial_scene is not None
                 fig = plot_multistep_pca(
                     full_img=vd.image,
@@ -874,6 +878,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                     hidden_spatials=canvas_spatials if canvas_spatials[0] is not None else None,
                     initial_hidden_spatial=vd.initial_canvas_spatial,
                     foveated_samples=foveated_samples,
+                    square_samples=square_samples,
                 )
                 save_figure(fig, run_dir, "pca_train", step)
 

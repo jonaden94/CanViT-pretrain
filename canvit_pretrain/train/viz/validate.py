@@ -94,6 +94,10 @@ def _log_pca(
     foveated_samples = (
         foveated_samples_raw if any(s is not None for s in foveated_samples_raw) else None
     )
+    square_samples_raw = [vs.square for vs in acc.viz_samples]
+    square_samples = (
+        square_samples_raw if any(s is not None for s in square_samples_raw) else None
+    )
 
     fig_pca = plot_multistep_pca(
         full_img=full_img,
@@ -111,6 +115,7 @@ def _log_pca(
         show_locals=has_locals,
         timestep_predictions=acc.pca_predictions if acc.pca_predictions else None,
         foveated_samples=foveated_samples,
+        square_samples=square_samples,
     )
     save_figure(fig_pca, run_dir, f"pca_{prefix}", step)
 

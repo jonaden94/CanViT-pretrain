@@ -16,10 +16,11 @@ from .foveated_plot import (
     plot_patches_overlay_relative,
     plot_samples_reconstruction_absolute,
     plot_samples_scatter_absolute,
+    plot_square_patches_overlay_relative,
 )
 from .metrics import cosine_dissimilarity
 from .pca import fit_pca, pca_rgb
-from .sample import FoveatedVizData
+from .sample import FoveatedVizData, SquareVizData
 
 # Type alias for RGBA color tuple
 RGBA = tuple[float, float, float, float]
@@ -127,6 +128,7 @@ def plot_multistep_pca(
     show_locals: bool = False,
     timestep_predictions: list[TimestepPredictions] | None = None,
     foveated_samples: list[FoveatedVizData | None] | None = None,
+    square_samples: list[SquareVizData | None] | None = None,
 ) -> Figure:
     """Full multi-row visualization with all diagnostic columns.
 
@@ -141,12 +143,20 @@ def plot_multistep_pca(
     assert len(boxes) == n_views
     assert len(names) == n_views
 
-    # Detect foveated mode by presence of per-timestep foveated viz data.
+    # Detect foveated / square mode by presence of per-timestep viz data. Both
+    # use the same "sample-based" column layout (Samples | Sample-Recon |
+    # Patches), differing only in how each cell is rendered.
     is_foveated = (
         foveated_samples is not None
         and len(foveated_samples) == n_views
         and all(s is not None for s in foveated_samples)
     )
+    is_square = (
+        square_samples is not None
+        and len(square_samples) == n_views
+        and all(s is not None for s in square_samples)
+    )
+    is_sample = is_foveated or is_square
 
     if show_locals:
         assert locals_avp is not None and len(locals_avp) == n_views
@@ -221,7 +231,7 @@ def plot_multistep_pca(
         c += 1
     C_TRAJ = c
     c += 1
-    if is_foveated:
+    if is_sample:
         C_GLIMPSE = None
         C_FOV_SCATTER, C_FOV_RECON, C_FOV_PATCHES = c, c + 1, c + 2
         c += 3
@@ -264,7 +274,7 @@ def plot_multistep_pca(
     axes[row, C_TRAJ].set_title("init")
     axes[row, C_TRAJ].axis("off")
 
-    if is_foveated:
+    if is_sample:
         for col, title in zip(
             (C_FOV_SCATTER, C_FOV_RECON, C_FOV_PATCHES),
             ("(no glimpse)", "", ""),
@@ -340,9 +350,10 @@ def plot_multistep_pca(
         local_avp_rgb = None
         local_teacher_rgb = None
         pca_cropped: PCA | None = None
-        if show_locals and not is_foveated:
+        if show_locals and not is_sample:
             # Uniform-grid local stream: reshape [g*g, D] into a g x g RGB grid.
-            # Foveated path computes its PCA in the renderer (different shape).
+            # Sample-based paths (foveated/square) compute their PCA in the
+            # renderer (different shape -> patch-Voronoi, not a grid).
             assert locals_avp is not None
             pca_local_avp = fit_pca(locals_avp[t])
             local_avp_rgb = pca_rgb(pca_local_avp, locals_avp[t], G, G)
@@ -422,6 +433,29 @@ def plot_multistep_pca(
                 title="Patches (rel)" if t == 0 else "",
                 show_padding=True,
             )
+        elif is_square:
+            assert square_samples is not None
+            sq = square_samples[t]
+            assert sq is not None
+            assert C_FOV_SCATTER is not None and C_FOV_RECON is not None and C_FOV_PATCHES is not None
+            sample_px = sq.sample_xy_pixel
+            plot_samples_scatter_absolute(
+                axes[row, C_FOV_SCATTER], full_img,
+                sample_px, sq.sample_colors, sizes=sq.sample_sizes,
+                title=f"Samples ({names[t]})" if t == 0 else f"Samples t={t}",
+            )
+            img_h, img_w = full_img.shape[:2]
+            plot_samples_reconstruction_absolute(
+                axes[row, C_FOV_RECON],
+                sample_px, sq.sample_colors, img_h, img_w,
+                title="Sample recon" if t == 0 else "",
+            )
+            plot_square_patches_overlay_relative(
+                axes[row, C_FOV_PATCHES],
+                sq.sample_cart_rowcol, sq.sample_colors, sq.sample_sizes,
+                sq.patch_boxes_rowcol, sq.patch_ring_idx,
+                title="Patches (rel)" if t == 0 else "",
+            )
         else:
             assert C_GLIMPSE is not None
             axes[row, C_GLIMPSE].imshow(glimpses[t])
@@ -464,6 +498,23 @@ def plot_multistep_pca(
                     axes[row, C_LOCAL_AVP],
                     fov.patch_xy_pixel, patch_rgb, fov.sample_xy_pixel, img_h, img_w,
                     title="Local Stream (fov)" if t == 0 else "",
+                )
+            elif is_square:
+                # Square: patch-Voronoi from patch centers, masked by the
+                # non-masked sample hull (matches the foveated path).
+                assert square_samples is not None
+                sq = square_samples[t]
+                assert sq is not None
+                patch_pca = fit_pca(locals_avp[t])  # type: ignore[index]
+                patch_rgb = patch_pca.transform(locals_avp[t])[:, :3]  # type: ignore[index]
+                lo = patch_rgb.min(axis=0, keepdims=True)
+                hi = patch_rgb.max(axis=0, keepdims=True)
+                patch_rgb = (patch_rgb - lo) / np.maximum(hi - lo, 1e-8)
+                img_h, img_w = full_img.shape[:2]
+                plot_patch_voronoi_absolute(
+                    axes[row, C_LOCAL_AVP],
+                    sq.patch_xy_pixel, patch_rgb, sq.sample_xy_pixel, img_h, img_w,
+                    title="Local Stream (sq)" if t == 0 else "",
                 )
             else:
                 assert local_avp_rgb is not None
