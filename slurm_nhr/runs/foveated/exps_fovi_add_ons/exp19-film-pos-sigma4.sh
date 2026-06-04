@@ -6,7 +6,7 @@ set -euo pipefail
 # === ESSENTIALS (ALWAYS NEED TO BE SPECIFIED) ===
 RUN_GROUP=foveated_add_ons
 RUN_NAME=exp19-film-pos-sigma4
-ARRAY=0-48%1                                   # 49 tasks x 4096 steps = 200,704 steps (~200k)
+ARRAY=0-21%1                                   # RESUME: 22 remaining tasks -> 49 total (~200k steps)
 TIME=0-00:45:00
 MEM=128G
 NGPU=1
@@ -33,6 +33,7 @@ sbatch \
     --mem=$MEM \
     --time=$TIME \
     --array="$ARRAY" \
+    --exclude=ggpu150,ggpu123,ggpu152 \
     --output="logs/$RUN_GROUP/$RUN_NAME/log/job-%A_%a.log" \
     --error="logs/$RUN_GROUP/$RUN_NAME/log/job-%A_%a.log" \
     --export=ALL \

@@ -1,13 +1,12 @@
 #!/bin/bash
-# baseline + visual-space KNN (sample_cortex=False) and no patch-count match
-# constraint (force_patches_less_than_matched=False). Otherwise identical to
-# exp19-baseline-res64-doubleres. ~200k steps; W&B jon_exp19_canvit_fovi_add_ons.
+# (6) baseline + MLP patch head [768]
+# Baseline = exp17 foveated res64/cart8/doubleres; ~200k steps; W&B jon_exp19_canvit_fovi_add_ons.
 set -euo pipefail
 
 # === ESSENTIALS (ALWAYS NEED TO BE SPECIFIED) ===
 RUN_GROUP=foveated_add_ons
-RUN_NAME=exp19-visual-noforcematch
-ARRAY=0-25%1                                   # RESUME: 23 jobs done (step 94208) -> 26 remaining -> 49 total (~200k steps)
+RUN_NAME=exp19-mlp768
+ARRAY=0-17%1                                   # CONTINUE: 55 jobs done (step 225280) -> 18 remaining -> 73 total (299,008 steps, ~300k)
 TIME=0-00:45:00
 MEM=128G
 NGPU=1
@@ -20,7 +19,7 @@ CFG_STEPS_PER_JOB=4096
 CFG_VAL_EVERY=4096
 CFG_LOG_EVERY=512
 CFG_NUM_WORKERS=4
-EXTRA_ARGS="--model.patcher-name foveated --model.foveated-patcher.resolution 64 --model.foveated-patcher.cart-patch-size 8 --model.foveated-patcher.arch-flag doubleres --model.foveated-patcher.sample-cortex False --model.foveated-patcher.no-force-patches-less-than-matched"
+EXTRA_ARGS="--model.patcher-name foveated --model.foveated-patcher.resolution 64 --model.foveated-patcher.cart-patch-size 8 --model.foveated-patcher.arch-flag doubleres --model.foveated-patcher.hidden-dims-patch-embed 768"
 # =================
 
 cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-pretrain
@@ -34,6 +33,7 @@ sbatch \
     --mem=$MEM \
     --time=$TIME \
     --array="$ARRAY" \
+    --exclude=ggpu129 \
     --output="logs/$RUN_GROUP/$RUN_NAME/log/job-%A_%a.log" \
     --error="logs/$RUN_GROUP/$RUN_NAME/log/job-%A_%a.log" \
     --export=ALL \

@@ -7,7 +7,7 @@ set -euo pipefail
 # === ESSENTIALS (ALWAYS NEED TO BE SPECIFIED) ===
 RUN_GROUP=foveated_add_ons
 RUN_NAME=exp19-per-ring
-ARRAY=0-48%1                                   # 49 tasks x 4096 steps = 200,704 steps (~200k)
+ARRAY=0-16%1                                   # RESUME: 32 jobs done (step 131072) -> 17 remaining -> 49 total (~200k steps)
 TIME=0-00:45:00
 MEM=128G
 NGPU=1

@@ -7,7 +7,7 @@ set -euo pipefail
 # === ESSENTIALS (ALWAYS NEED TO BE SPECIFIED) ===
 RUN_GROUP=foveated_add_ons
 RUN_NAME=exp19-visual-noforcematch
-ARRAY=0-25%1                                   # RESUME: 23 jobs done (step 94208) -> 26 remaining -> 49 total (~200k steps)
+ARRAY=0-25%1                                   # CONTINUE: 47 jobs done (step 192512) -> 26 remaining -> 73 total (299,008 steps, ~300k)
 TIME=0-00:45:00
 MEM=128G
 NGPU=1
@@ -34,6 +34,7 @@ sbatch \
     --mem=$MEM \
     --time=$TIME \
     --array="$ARRAY" \
+    --exclude=ggpu129 \
     --output="logs/$RUN_GROUP/$RUN_NAME/log/job-%A_%a.log" \
     --error="logs/$RUN_GROUP/$RUN_NAME/log/job-%A_%a.log" \
     --export=ALL \
