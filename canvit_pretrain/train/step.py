@@ -123,7 +123,7 @@ def training_step(
     # DDP wraps forward() but not custom methods — unwrap for direct method calls.
     core_model = getattr(model, "module", model)
     state_init = core_model.init_state(batch_size=B, canvas_grid_size=canvas_grid_size)
-    is_foveated = getattr(core_model.cfg, "patcher_name", "uniform") == "foveated"
+    is_foveated = getattr(core_model.cfg, "patcher_name", "uniform") in ("foveated", "square")
 
     # Sample trajectory length (shared across branches for this step)
     n_glimpses = chunk_size

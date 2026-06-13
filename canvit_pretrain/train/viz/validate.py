@@ -175,7 +175,7 @@ def validate(
                 f"but probe trained on teacher@{probe_res}. IN1k metrics may be unreliable."
             )
 
-    is_foveated = getattr(model.cfg, "patcher_name", "uniform") == "foveated"
+    is_foveated = getattr(model.cfg, "patcher_name", "uniform") in ("foveated", "square")
     has_cls = model.scene_cls_head is not None
 
     model_was_training = model.training
