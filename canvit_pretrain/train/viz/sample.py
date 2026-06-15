@@ -140,12 +140,12 @@ def _extract_foveated_sample0(
 
     img0 = image[0:1]  # [1, 3, H, W]
     H = int(img0.shape[-1])
-    # Use the patcher's CONFIGURED fixation window (matches the model forward),
-    # not the image size. These differ whenever fixation_size != scene_resolution
-    # (e.g. the fixsize722 zoom-out run); hardcoding H here would render every
-    # run as full-image foveation and hide the actual sampling pattern.
-    fix_size = int(getattr(patcher, "fixation_size", H))
-    fix_size_norm = float(fix_size) / float(H)
+    # The deploy window matches the model forward: fix_size = scale * H (sample 0).
+    # scale=1 -> full image; <1 zooms in; >1 zooms out. Using the viewpoint's
+    # actual scale keeps the viz overlay faithful under sampled-scale training.
+    scale0 = float(viewpoint.scales[0].item())
+    fix_size = scale0 * float(H)
+    fix_size_norm = scale0
     fix_loc = (viewpoint.centers[0:1].to(torch.float32) + 1.0) * 0.5  # [1, 2] in [0, 1]
     with torch.no_grad():
         sensor = patcher.retina(img0, fix_loc=fix_loc, fixation_size=fix_size)  # [1, 3, N_samples]
@@ -228,8 +228,10 @@ def _extract_square_sample0(
 
     img0 = image[0:1]  # [1, 3, H, W]
     H = int(img0.shape[-1])
-    fix_size = int(getattr(patcher, "fixation_size", H))
-    fix_size_norm = float(fix_size) / float(H)
+    # Deploy window matches the forward: fix_size = scale * H (sample 0).
+    scale0 = float(viewpoint.scales[0].item())
+    fix_size = scale0 * float(H)
+    fix_size_norm = scale0
     fix_loc = (viewpoint.centers[0:1].to(torch.float32) + 1.0) * 0.5  # [1, 2] in [0, 1]
 
     pos_xy = patcher.sample_positions_xy().detach().cpu()             # [P, K, 2] VF (x, y)
@@ -240,7 +242,7 @@ def _extract_square_sample0(
     # Per-pixel RGB: replicate SquarePatcher.forward's grid_sample (bilinear),
     # then imagenet-denormalize for display.
     with torch.no_grad():
-        fix_size_t = torch.tensor([[fix_size, fix_size]], dtype=torch.float32)
+        fix_size_t = torch.tensor([[fix_size, fix_size]], dtype=torch.float32)  # scale*H px
         grid = transform_sampling_grid(patcher._sample_colrow, fix_loc, fix_size_t, (H, H))
         samp = F.grid_sample(img0.to(torch.float32), grid, mode="bilinear",
                              padding_mode="zeros", align_corners=False)  # [1, 3, 1, P*K]

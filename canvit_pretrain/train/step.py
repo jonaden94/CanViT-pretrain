@@ -15,8 +15,9 @@ from torch import Tensor
 
 from canvit_pretrain import CanViTForPretraining
 
+from .config import FoveatedScaleConfig
 from .viewpoint import Viewpoint as NamedViewpoint
-from .viewpoint import ViewpointType
+from .viewpoint import ViewpointType, random_foveated_viewpoint, sample_view_scales
 from .viz.image import imagenet_denormalize_to_numpy
 from .viz.sample import VizSampleData, extract_sample0_viz
 
@@ -105,6 +106,7 @@ def training_step(
     chunk_size: int,
     continue_prob: float,
     min_viewpoint_scale: float,
+    foveated_scale: FoveatedScaleConfig,
     amp_ctx: AbstractContextManager,
     collect_viz: bool = False,
 ) -> StepMetrics:
@@ -150,16 +152,38 @@ def training_step(
     # Viz collection for first branch only (when enabled)
     viz_data: TrainVizData | None = None
 
-    def make_named_vp(vp_type: ViewpointType) -> NamedViewpoint:
+    def _foveated_random_vp(rollout_scales: Tensor | None) -> NamedViewpoint:
+        """RANDOM viewpoint for the foveated/square path, with the view scale
+        drawn per ``foveated_scale`` (see :class:`FoveatedScaleConfig`).
+        ``rollout_scales`` is the frozen [B] scale for ``mode='per_rollout'``."""
+        fs = foveated_scale
+        if fs.mode == "fixed":
+            scales = torch.full((B,), float(fs.fixed_scale), device=device)
+            center_mode = "full_field"
+        else:
+            if fs.mode == "per_rollout":
+                assert rollout_scales is not None
+                scales = rollout_scales
+            else:  # per_glimpse
+                scales = sample_view_scales(
+                    B, device, distribution=fs.distribution,
+                    min_scale=fs.min_scale, max_scale=fs.max_scale,
+                )
+            center_mode = "safebox" if fs.distribution == "safebox" else "full_field"
+        return random_foveated_viewpoint(B, device, scales=scales, center_mode=center_mode)
+
+    def make_named_vp(
+        vp_type: ViewpointType, rollout_scales: Tensor | None = None
+    ) -> NamedViewpoint:
         """Create a NamedViewpoint (has .name for viz, convertible to canvit Viewpoint).
 
-        Foveated path: random fixations are uniform over [-1, 1]^2 (full visual
-        field). ``min_viewpoint_scale`` is ignored, since foveation always
-        covers the full image. Uniform path: existing safe-box-area sampler.
+        Foveated/square path: RANDOM glimpses draw their view scale per
+        ``foveated_scale`` (center per the chosen distribution); FULL glimpses
+        stay scale=1. Uniform path: existing safe-box-area sampler (unchanged).
         """
         if vp_type == ViewpointType.RANDOM:
             if is_foveated:
-                return NamedViewpoint.random_fixation(batch_size=B, device=device)
+                return _foveated_random_vp(rollout_scales)
             return NamedViewpoint.random(batch_size=B, device=device, min_scale=min_viewpoint_scale)
         assert vp_type == ViewpointType.FULL
         return NamedViewpoint.full_scene(batch_size=B, device=device)
@@ -209,6 +233,15 @@ def training_step(
         nonlocal viz_data
         do_viz = collect_viz and branch_idx == 0
 
+        # Per-rollout scale: one draw per branch (per image), reused across all
+        # of this rollout's RANDOM glimpses. Only sampled when relevant.
+        rollout_scales: Tensor | None = None
+        if is_foveated and foveated_scale.mode == "per_rollout":
+            rollout_scales = sample_view_scales(
+                B, device, distribution=foveated_scale.distribution,
+                min_scale=foveated_scale.min_scale, max_scale=foveated_scale.max_scale,
+            )
+
         # Capture initial state for viz (before any glimpses)
         if do_viz:
             init_scene = core_model.predict_teacher_scene(state_init.canvas)
@@ -224,7 +257,7 @@ def training_step(
 
         # t0 forward
         with amp_ctx:
-            vp0_named = make_named_vp(t0_type)
+            vp0_named = make_named_vp(t0_type, rollout_scales)
             vp0 = to_canvit_vp(vp0_named)
             step_out = forward_step(state=state_init, vp=vp0)
             out = step_out.out
@@ -264,7 +297,7 @@ def training_step(
         for t in range(1, n_glimpses):
             # t>=1: use pre-computed schedule (half RANDOM, half POLICY, shuffled)
             vp_type = t1_schedule[t - 1][branch_idx]
-            vp_named = make_named_vp(vp_type)
+            vp_named = make_named_vp(vp_type, rollout_scales)
             vp = to_canvit_vp(vp_named)
 
             with amp_ctx:

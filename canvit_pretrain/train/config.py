@@ -16,6 +16,31 @@ TEACHER_NAME = "dinov3_vitb16"
 
 
 @dataclass
+class FoveatedScaleConfig:
+    """How the per-glimpse view scale is sampled for the foveated/square patchers.
+
+    The foveation window is ``fix_size = scale * H``. ``scale`` is sampled for
+    ``RANDOM`` glimpses only (``FULL`` glimpses always use ``scale=1``); the
+    uniform patcher path is unaffected by this config.
+    """
+
+    mode: Literal["fixed", "per_rollout", "per_glimpse"] = "fixed"
+    """``fixed``: one constant scale everywhere (= current full-image training).
+    ``per_rollout``: one scale per rollout (per image), held across its glimpses.
+    ``per_glimpse``: a fresh scale every glimpse."""
+    distribution: Literal["uniform", "safebox"] = "uniform"
+    """Sampled-scale distribution (ignored when ``mode='fixed'``). ``uniform``:
+    ``scale ~ U(min_scale, max_scale)`` with centers uniform over ``[-1,1]^2``
+    (``max_scale > 1`` allows zoom-out). ``safebox``: reuse the uniform-patcher
+    safe-box joint sampler (center coupled to scale, no overshoot, ``scale<=1``)."""
+    fixed_scale: float = 1.0
+    """Scale used when ``mode='fixed'`` (1.0 = full-image foveation)."""
+    min_scale: float = 0.5
+    max_scale: float = 1.0
+    """Sampled-scale range (scale units = fraction of the image side)."""
+
+
+@dataclass
 class Config:
     # Teacher
     teacher_repo_id: str = TEACHER_REPO_ID
@@ -40,6 +65,9 @@ class Config:
     min_viewpoint_scale: float = 0.05  # Minimum scale for random viewpoints
     n_full_start_branches: int = 1  # branches starting with FULL viewpoint at t0
     n_random_start_branches: int = 1  # branches starting with RANDOM viewpoint at t0
+    foveated_scale: FoveatedScaleConfig = field(default_factory=FoveatedScaleConfig)
+    """Per-glimpse view-scale sampling for foveated/square patchers (RANDOM
+    glimpses). Default: fixed scale 1.0 = current full-image foveation."""
     chunk_size: int = 2  # BPTT chunk size (glimpses per chunk, gradient flows within)
     continue_prob: float = 0.5  # prob of adding another chunk to trajectory
     enable_scene_patches_loss: bool = True  # Scene (canvas) patch reconstruction loss

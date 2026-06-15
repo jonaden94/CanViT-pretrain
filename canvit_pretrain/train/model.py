@@ -63,7 +63,7 @@ def create_model(
     if cfg.model.patcher_name == "foveated":
         log.info(
             f"Model created (foveated): canvas={cfg.canvas_patch_grid_size}x{cfg.canvas_patch_grid_size}, "
-            f"fixation_size={cfg.model.foveated_patcher.fixation_size}px, "
+            f"pattern_reference_size={cfg.model.foveated_patcher.pattern_reference_size}px, "
             f"n_patches={model.patcher.n_patches}, "
             f"student_dim={student_backbone.embed_dim} -> teacher_dim={teacher_dim}"
         )

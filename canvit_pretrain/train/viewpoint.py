@@ -130,6 +130,52 @@ class Viewpoint(CoreViewpoint):
         return Viewpoint(name="fixation", centers=centers, scales=scales)
 
 
+# --------------------------------------------------------------------------- #
+# Foveated/square per-glimpse scale sampling
+# --------------------------------------------------------------------------- #
+def sample_view_scales(
+    batch_size: int, device: torch.device, *,
+    distribution: str, min_scale: float, max_scale: float,
+) -> Tensor:
+    """Sample ``[B]`` view scales (= ``fix_size / H``) in scale units.
+
+    ``uniform``: ``U(min_scale, max_scale)`` (``max_scale > 1`` allows zoom-out).
+    ``safebox``: the ``p(s) ∝ (1-s)`` marginal of the uniform-patcher safe-box
+    sampler (``L²``-uniform trick); intrinsically ``(0, 1]`` (zoom-in only).
+    """
+    if distribution == "uniform":
+        u = torch.rand(batch_size, device=device)
+        return (min_scale + (max_scale - min_scale) * u).float()
+    if distribution == "safebox":
+        L_min = 1.0 - max_scale
+        L_max = 1.0 - min_scale
+        u = torch.rand(batch_size, device=device)
+        L = torch.sqrt(L_min ** 2 + u * (L_max ** 2 - L_min ** 2))
+        return (1.0 - L).float()
+    raise ValueError(f"unknown scale distribution: {distribution!r}")
+
+
+def random_foveated_viewpoint(
+    batch_size: int, device: torch.device, *, scales: Tensor, center_mode: str,
+) -> "Viewpoint":
+    """RANDOM viewpoint for the foveated/square path with given per-image ``scales``.
+
+    ``center_mode='full_field'``: centers uniform over ``[-1,1]^2`` (independent
+    of scale; edge fixations / overshoot allowed). ``center_mode='safebox'``:
+    centers drawn within the per-image safe box ``U(-1,1)·(1-s)`` (crop fits, no
+    overshoot) — the same coupling as the uniform-patcher sampler.
+    """
+    scales = scales.to(device=device, dtype=torch.float32)
+    if center_mode == "safebox":
+        L = (1.0 - scales).unsqueeze(1)
+        centers = (torch.rand(batch_size, 2, device=device) * 2.0 - 1.0) * L
+    elif center_mode == "full_field":
+        centers = (torch.rand(batch_size, 2, device=device) * 2.0 - 1.0).float()
+    else:
+        raise ValueError(f"unknown center_mode: {center_mode!r}")
+    return Viewpoint(name="fixation", centers=centers, scales=scales)
+
+
 # Fixed-seed RNG for foveated eval grid shuffling. Using a stand-alone
 # Generator avoids polluting the global torch RNG state and keeps validation
 # plots comparable across checkpoints and runs.

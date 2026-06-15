@@ -698,6 +698,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 chunk_size=cfg.chunk_size,
                 continue_prob=cfg.continue_prob,
                 min_viewpoint_scale=cfg.min_viewpoint_scale,
+                foveated_scale=cfg.foveated_scale,
                 amp_ctx=amp_ctx,
 
                 collect_viz=do_pca,

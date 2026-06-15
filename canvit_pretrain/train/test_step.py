@@ -4,6 +4,7 @@ Verifies chunk_size=1 (no temporal BPTT) and chunk_size=2 (baseline)
 both produce correct gradients.
 """
 
+import importlib.util
 import random
 from contextlib import nullcontext
 from unittest.mock import patch
@@ -11,10 +12,12 @@ from unittest.mock import patch
 import pytest
 import torch
 from canvit_pytorch import create_backbone
+from canvit_pytorch.patcher import FoveatedPatcherConfig
 from torch import Tensor
 
 from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
 
+from .config import FoveatedScaleConfig
 from .step import training_step
 
 _DEVICE = torch.device("cpu")
@@ -55,6 +58,7 @@ def _run_step(
     chunk_size: int,
     continue_prob: float,
     n_glimpses_override: int | None = None,
+    foveated_scale: FoveatedScaleConfig | None = None,
 ) -> tuple[float, dict[str, Tensor]]:
     """Run training_step, return (loss, param_grads).
 
@@ -105,6 +109,7 @@ def _run_step(
             chunk_size=chunk_size,
             continue_prob=continue_prob,
             min_viewpoint_scale=0.1,
+            foveated_scale=foveated_scale or FoveatedScaleConfig(),
             amp_ctx=nullcontext(),
             collect_viz=False,
         )
@@ -257,3 +262,40 @@ class TestCrossChunkSizeConsistency:
         assert torch.isfinite(torch.tensor(loss_2))
         assert _has_grads(grads_1)
         assert _has_grads(grads_2)
+
+
+@pytest.mark.skipif(importlib.util.find_spec("fovi") is None, reason="fovi not installed")
+class TestFoveatedScaleModes:
+    """The foveated/square path drives `viewpoint.scales`; verify each scale
+    mode runs end-to-end through training_step (sensor honors `fix_size=scale*H`)."""
+
+    @pytest.fixture()
+    def foveated_model(self) -> CanViTForPretraining:
+        backbone = create_backbone("vits16").to(_DEVICE)
+        cfg = CanViTForPretrainingConfig(
+            teacher_dim=_D,
+            patcher_name="foveated",
+            foveated_patcher=FoveatedPatcherConfig(
+                fov=16.0, cmf_a=2.785765, resolution=32, style="isotropic",
+                sampler="grid_nn", cart_patch_size=8, sample_cortex=True,
+            ),
+        )
+        return CanViTForPretraining(
+            backbone=backbone, cfg=cfg, glimpse_size_px=128,
+            backbone_name="vits16", canvas_patch_grid_sizes=[_G],
+        ).to(_DEVICE)
+
+    @pytest.mark.parametrize("fscale", [
+        FoveatedScaleConfig(mode="fixed", fixed_scale=1.0),
+        FoveatedScaleConfig(mode="fixed", fixed_scale=1.5),  # zoom-out
+        FoveatedScaleConfig(mode="per_rollout", distribution="uniform", min_scale=0.6, max_scale=1.4),
+        FoveatedScaleConfig(mode="per_glimpse", distribution="safebox", min_scale=0.2, max_scale=1.0),
+    ])
+    def test_mode_runs_and_produces_finite_gradients(self, foveated_model, tensors, fscale):
+        torch.manual_seed(0)
+        random.seed(0)
+        loss, grads = _run_step(
+            foveated_model, tensors, chunk_size=2, continue_prob=0.0, foveated_scale=fscale,
+        )
+        assert torch.isfinite(torch.tensor(loss))
+        assert _has_grads(grads)
