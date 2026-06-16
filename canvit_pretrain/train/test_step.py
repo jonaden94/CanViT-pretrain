@@ -11,8 +11,10 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from canvit_pytorch import create_backbone
+from canvit_pytorch import SquarePatcherConfig, Viewpoint, create_backbone
+from canvit_pytorch.modulation import ViTModulationConfig
 from canvit_pytorch.patcher import FoveatedPatcherConfig
+from canvit_pytorch.patcher.conditioning import FiLMConfig, PatchConditioningConfig
 from torch import Tensor
 
 from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
@@ -299,3 +301,98 @@ class TestFoveatedScaleModes:
         )
         assert torch.isfinite(torch.tensor(loss))
         assert _has_grads(grads)
+
+
+# Cheap fovi geometry shared by the foveated/square FiLM cases below.
+_FOVI_KW = dict(
+    fov=16.0, cmf_a=2.785765, resolution=32, style="isotropic",
+    cart_patch_size=8, sample_cortex=True,
+)
+
+
+def _film(encoding: str) -> PatchConditioningConfig:
+    return PatchConditioningConfig(mode="film", film=FiLMConfig(encoding=encoding))
+
+
+def _build(cfg: CanViTForPretrainingConfig, backbone_name: str) -> CanViTForPretraining:
+    backbone = create_backbone(backbone_name).to(_DEVICE)
+    return CanViTForPretraining(
+        backbone=backbone, cfg=cfg, glimpse_size_px=128,
+        backbone_name=backbone_name.removesuffix("_modulate"),
+        canvas_patch_grid_sizes=[_G],
+    ).to(_DEVICE)
+
+
+# Every distinct conditioning setup used across the exp21 runs. Each thunk
+# builds the corresponding pretraining model; the test then drives it through
+# forward_reduce (the exact path validate() uses).
+_FR_CASES = {
+    # No conditioning of any kind (uniform repros, reg-repro, prune30, scale runs).
+    "plain": lambda: _build(CanViTForPretrainingConfig(teacher_dim=_D), "vits16"),
+    # ViT/backbone modulation (the adaLN trunk +/- cross-attn runs) -- this is
+    # the path whose hoisted `modulation=` kwarg crashed validation.
+    "vit_trunk_fourier": lambda: _build(
+        CanViTForPretrainingConfig(
+            teacher_dim=_D,
+            vit_modulation=ViTModulationConfig(enabled=True, encoding="fourier"),
+        ), "vits16_modulate"),
+    "vit_trunk_sinusoidal": lambda: _build(
+        CanViTForPretrainingConfig(
+            teacher_dim=_D,
+            vit_modulation=ViTModulationConfig(enabled=True, encoding="sinusoidal"),
+        ), "vits16_modulate"),
+    "vit_trunk_crossattn_fourier": lambda: _build(
+        CanViTForPretrainingConfig(
+            teacher_dim=_D,
+            vit_modulation=ViTModulationConfig(
+                enabled=True, encoding="fourier", modulate_cross_attn=True),
+        ), "vits16_modulate"),
+    # FiLM *patch* conditioning (applied inside the patcher, not via the kwarg)
+    # -- on foveated and on square/fovi_regularized, fourier + sinusoidal.
+    "foveated_film_fourier": lambda: _build(
+        CanViTForPretrainingConfig(
+            teacher_dim=_D, patcher_name="foveated",
+            foveated_patcher=FoveatedPatcherConfig(
+                sampler="grid_nn", conditioning=_film("fourier"), **_FOVI_KW),
+        ), "vits16"),
+    "foveated_film_sinusoidal": lambda: _build(
+        CanViTForPretrainingConfig(
+            teacher_dim=_D, patcher_name="foveated",
+            foveated_patcher=FoveatedPatcherConfig(
+                sampler="grid_nn", conditioning=_film("sinusoidal"), **_FOVI_KW),
+        ), "vits16"),
+    "square_reg_film_fourier": lambda: _build(
+        CanViTForPretrainingConfig(
+            teacher_dim=_D, patcher_name="square",
+            square_patcher=SquarePatcherConfig(
+                method="fovi_regularized", conditioning=_film("fourier"), **_FOVI_KW),
+        ), "vits16"),
+}
+
+
+class TestForwardReduce:
+    """`validate()` drives the model via ``forward_reduce`` (not training_step).
+
+    forward_reduce hoists the per-token ViT modulation out of the glimpse loop
+    and passes ``modulation=`` into every ``forward`` call -- including the None
+    case for non-modulation runs. The pretraining ``forward`` override must
+    accept and forward that kwarg, else *all* validations raise TypeError and
+    the loop silently swallows them (no val metrics ever reach wandb).
+
+    Parametrized over every conditioning setup in exp21 to confirm validation
+    runs regardless of whether/which modulation is applied: none, ViT trunk
+    (fourier/sinusoidal), ViT trunk+cross-attn, and FiLM patch conditioning on
+    foveated and square patchers.
+    """
+
+    @pytest.mark.parametrize("case", list(_FR_CASES), ids=list(_FR_CASES))
+    def test_forward_reduce_runs(self, case: str):
+        model = _FR_CASES[case]()
+        img = torch.randn(_B, 3, 224, 224, device=_DEVICE)
+        vps = [Viewpoint.full_scene(batch_size=_B, device=_DEVICE) for _ in range(2)]
+        with torch.inference_mode():
+            acc, _ = model.forward_reduce(
+                image=img, viewpoints=vps, canvas_grid_size=_G,
+                init_fn=lambda s: None, step_fn=lambda acc, out, vp: out,
+            )
+        assert torch.isfinite(acc.local_patches).all()
