@@ -5,7 +5,7 @@ set -euo pipefail
 # === ESSENTIALS ===
 RUN_GROUP=jon_exp21_modulation
 RUN_NAME=exp21-uniform16-repro
-ARRAY=0-48%1                                   # 49 tasks x 4096 steps = 200,704 steps (~200k)
+ARRAY=0-39%1                                   # 40 remaining of 49 (resume from step 36864); validation OFF (diagnostic)
 TIME=0-00:45:00
 MEM=128G
 NGPU=1
@@ -15,7 +15,7 @@ CFG_WANDB_PROJECT=jon_exp21_modulation
 CFG_PEAK_LR=0.0004
 CFG_BATCH_SIZE_PER_GPU=64
 CFG_STEPS_PER_JOB=4096
-CFG_VAL_EVERY=4096
+CFG_VAL_EVERY=999999999  # validation disabled: never a multiple of this within a job
 CFG_LOG_EVERY=512
 CFG_NUM_WORKERS=4
 EXTRA_ARGS="--model.patcher-name uniform"

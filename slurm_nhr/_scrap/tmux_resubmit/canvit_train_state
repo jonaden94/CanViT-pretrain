@@ -1,0 +1,4 @@
+REMAINING_JOBS=8
+RUN_NAME=train-20260501-022233
+LOG_DIR=/user/henrich1/u25995/jonathan/repos/CanViT-pretrain/logs/train-20260501-022233
+LAST_JOB_ID=13628068
