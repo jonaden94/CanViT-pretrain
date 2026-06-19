@@ -53,6 +53,41 @@ if [ "${tmpdir_avail_gb:-0}" -lt "$TMPDIR_NEED_GB" ]; then
 fi
 log "TMPDIR=$TMPDIR"
 
+# If PRETRAIN_COMMIT / PYTORCH_COMMIT are exported by the run script, extract
+# those exact commits into TMPDIR and prepend them to PYTHONPATH so they win
+# over the venv's editable install. Both vars are optional and independent.
+_REPO_BASE=/user/henrich1/u25995/jonathan/repos
+_CODE_DIR="$TMPDIR/canvit_src"
+if [ -n "${PRETRAIN_COMMIT:-}" ] || [ -n "${PYTORCH_COMMIT:-}" ]; then
+    mkdir -p "$_CODE_DIR"
+    if [ -n "${PRETRAIN_COMMIT:-}" ]; then
+        mkdir -p "$_CODE_DIR/CanViT-pretrain"
+        git -C "$_REPO_BASE/CanViT-pretrain" archive "$PRETRAIN_COMMIT" \
+            | tar -x -C "$_CODE_DIR/CanViT-pretrain"
+        export PYTHONPATH="$_CODE_DIR/CanViT-pretrain${PYTHONPATH:+:$PYTHONPATH}"
+        log "Pinned canvit_pretrain → $PRETRAIN_COMMIT"
+    fi
+    if [ -n "${PYTORCH_COMMIT:-}" ]; then
+        mkdir -p "$_CODE_DIR/CanViT-PyTorch"
+        git -C "$_REPO_BASE/CanViT-PyTorch" archive "$PYTORCH_COMMIT" \
+            | tar -x -C "$_CODE_DIR/CanViT-PyTorch"
+        export PYTHONPATH="$_CODE_DIR/CanViT-PyTorch${PYTHONPATH:+:$PYTHONPATH}"
+        log "Pinned canvit_pytorch → $PYTORCH_COMMIT"
+    fi
+fi
+
+# Per-JOB, node-local compile caches (Inductor + Triton + NVIDIA JIT) under TMPDIR.
+# TMPDIR is /local/jobs/<jobid> (per-job NVMe, auto-cleaned by SLURM at job end),
+# or the per-job NFS ersatz set above. Putting all three here gives each job a
+# private, fast cache with ZERO cross-job interference — no shared ~/.triton or
+# ~/.nv for ~20 concurrent jobs to race on, and nothing to wipe (SLURM reclaims it).
+export TORCHINDUCTOR_CACHE_DIR="$TMPDIR/torchinductor"
+export TRITON_CACHE_DIR="$TMPDIR/triton"
+export CUDA_CACHE_PATH="$TMPDIR/nv"
+export TORCHINDUCTOR_FX_GRAPH_CACHE=1
+mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR" "$CUDA_CACHE_PATH"
+log "Compile caches (node-local, per-job): inductor+triton+cuda under $TMPDIR"
+
 VENV=".venv-v100"
 if [ ! -d "$VENV" ]; then
     log "ERROR: $VENV not found. Run: bash _setup_v100/setup.sh"
@@ -77,17 +112,11 @@ export WORLD_SIZE=$((SLURM_NNODES * SLURM_NTASKS_PER_NODE))
 
 log "MASTER_ADDR=$MASTER_ADDR  MASTER_PORT=$MASTER_PORT  WORLD_SIZE=$WORLD_SIZE"
 
-# Wipe stale Triton/torch.compile/CUDA caches on the assigned compute node.
-# Cancelled prior jobs leave half-written kernels, KMP shm entries, and
-# NVIDIA module-cache state that can poison subsequent runs.
-log "Clearing per-node caches (Triton, Inductor, NVRTC, NVIDIA Compute, KMP shm, .nv)..."
-srun --ntasks-per-node=1 --ntasks=$SLURM_NNODES bash -c '
-    rm -rf /tmp/triton_cache_rank* /tmp/torchinductor_* /tmp/nvrtc_cache_* /tmp/.nv 2>/dev/null || true
-    rm -rf $HOME/.triton/cache 2>/dev/null || true
-    rm -rf $HOME/.nv/ComputeCache 2>/dev/null || true
-    find /dev/shm -maxdepth 1 -user $USER \( -name "__KMP_REGISTERED_LIB_*" -o -name "torch_*" -o -name "python_*" -o -name "pymp-*" \) -delete 2>/dev/null || true
-    echo "[cache-clear] $(hostname): /tmp + ~/.triton + ~/.nv/ComputeCache + /dev/shm wiped"
-' || true
+# (Removed) Per-node cache wipe. Compile caches now live in the per-job TMPDIR
+# (set above), which SLURM auto-cleans at job end — so there are no stale shared
+# caches to clear. The old wipe also raced across the ~20 concurrent jobs that
+# shared ~/.triton and /dev/shm (one job deleting another's live kernels/shm
+# segments), which is exactly the interference we're eliminating here.
 
 # CFG_* fallbacks for vars whose Python default would fail at runtime.
 # Anything not listed here falls through to canvit_pretrain/train/config.py.
@@ -108,7 +137,13 @@ if [ -n "$EXTRA_ARGS" ]; then log "EXTRA_ARGS: $EXTRA_ARGS"; fi
 log "Starting training (group=$RUN_GROUP, name=$RUN_NAME)..."
 # `env TMPDIR=...` is required because SLURM's TaskProlog clears TMPDIR
 # inside every srun task; setting it in the outer shell does not propagate.
-exec srun env TMPDIR="$TMPDIR" "$VENV/bin/python" -m canvit_pretrain.train \
+exec srun env TMPDIR="$TMPDIR" \
+    ${PYTHONPATH:+PYTHONPATH="$PYTHONPATH"} \
+    TORCHINDUCTOR_CACHE_DIR="$TORCHINDUCTOR_CACHE_DIR" \
+    TRITON_CACHE_DIR="$TRITON_CACHE_DIR" \
+    CUDA_CACHE_PATH="$CUDA_CACHE_PATH" \
+    TORCHINDUCTOR_FX_GRAPH_CACHE=1 \
+    "$VENV/bin/python" -m canvit_pretrain.train \
     --run-group "$RUN_GROUP" \
     --run-name "$RUN_NAME" \
     --logs-dir "$LOGS_DIR" \
