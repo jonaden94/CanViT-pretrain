@@ -59,6 +59,7 @@ from .data import ShardedFeatureLoader, create_loaders, scene_size_px  # noqa: E
 from .data.webdataset import (  # noqa: E402
     WebDatasetTrainLoader,
     init_normalizer_stats_from_tar,
+    init_normalizer_stats_from_tar_raw,
 )
 from .ema import EMATracker  # noqa: E402
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher  # noqa: E402
@@ -492,11 +493,22 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         if ddp.is_main():
             if cfg.webdataset_dir is not None:
                 assert isinstance(train_loader, WebDatasetTrainLoader)
-                init_normalizer_stats_from_tar(
-                    train_loader.first_shard_path(),
-                    scene_norm, cls_norm,
-                    cfg.device, cfg.normalizer_max_samples,
-                )
+                if train_loader.has_features:
+                    init_normalizer_stats_from_tar(
+                        train_loader.first_shard_path(),
+                        scene_norm, cls_norm,
+                        cfg.device, cfg.normalizer_max_samples,
+                    )
+                else:
+                    # Raw shards: compute teacher features on the fly to seed stats.
+                    init_normalizer_stats_from_tar_raw(
+                        train_loader.first_shard_path(),
+                        scene_norm, cls_norm,
+                        image_size=scene_size,
+                        compute_features=lambda imgs: compute_raw_targets(imgs, scene_size),
+                        device=cfg.device,
+                        max_samples=cfg.normalizer_max_samples,
+                    )
             else:
                 assert cfg.feature_base_dir is not None, "feature_base_dir required for standardizer init"
                 shards_dir = cfg.feature_base_dir / cfg.teacher_name / str(cfg.scene_resolution) / "shards"
@@ -546,15 +558,29 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     nb = cfg.non_blocking_transfer  # Ablation flag for async transfers
 
     def load_train_batch() -> TrainBatch:
-        """Load training batch from precomputed features."""
+        """Load a training batch.
+
+        Two source modes (transparent to the rest of the loop):
+          - precomputed features: the loader supplies raw_patches/raw_cls.
+          - raw images (no-feature shards): the loader supplies images only and
+            raw_patches/raw_cls are None, so teacher features are computed on the
+            fly here via `compute_raw_targets` (a GPU forward, no grad — the
+            teacher is frozen). This adds a teacher forward per step.
+        """
         # non_blocking=True: CPU returns immediately, GPU ops serialize on same stream
         # Safe because we don't mutate source tensors after transfer
         images, raw_patches, raw_cls, labels = train_loader.next()
         images = images.to(cfg.device, non_blocking=nb)
         labels = labels.to(cfg.device, non_blocking=nb)
-        # .float() for consistency - stored features may be fp16
-        raw_patches = raw_patches.to(device=cfg.device, dtype=torch.float32, non_blocking=nb)
-        raw_cls = raw_cls.to(device=cfg.device, dtype=torch.float32, non_blocking=nb)
+        if raw_patches is None:
+            # On-the-fly teacher targets from raw images (no precomputed features).
+            with torch.no_grad():
+                feats = compute_raw_targets(images, scene_size)
+            raw_patches, raw_cls = feats.patches, feats.cls
+        else:
+            # .float() for consistency - stored features may be fp16
+            raw_patches = raw_patches.to(device=cfg.device, dtype=torch.float32, non_blocking=nb)
+            raw_cls = raw_cls.to(device=cfg.device, dtype=torch.float32, non_blocking=nb)
         norm_patches = scene_norm(raw_patches)
         norm_cls = cls_norm(raw_cls.unsqueeze(1)).squeeze(1)
         return TrainBatch(images, labels, norm_patches, norm_cls, raw_patches, raw_cls)

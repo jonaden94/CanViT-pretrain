@@ -21,7 +21,7 @@ import io
 import json
 import logging
 import tarfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -71,8 +71,14 @@ def _build_pipeline(
     image_size: int,
     batch_size: int,
     use_worker_split: bool,
+    has_features: bool = True,
 ) -> wds.WebDataset:
-    """Build a WebDataset pipeline that yields (image, label, cls, ptch) batches.
+    """Build a WebDataset pipeline.
+
+    With ``has_features=True`` (precomputed-feature shards) it yields
+    ``(image, label, cls, ptch)`` batches. With ``has_features=False`` (raw
+    shards carrying only ``jpg``/``json``) it yields ``(image, label)`` batches —
+    teacher features are then computed on the fly in the training loop.
 
     wds.WebDataset already applies split_by_worker internally (via its default
     workersplitter parameter) at the shard-URL level — one shard per worker.
@@ -94,13 +100,22 @@ def _build_pipeline(
         nodesplitter=None,
         workersplitter=workersplitter,
     )
+    if has_features:
+        return (
+            ds.to_tuple("jpg", "json", "cls.npy", "ptch.npy")
+            .map_tuple(
+                lambda d: _decode_jpg(d, image_size),
+                _decode_label,
+                _decode_npy_fp16,
+                _decode_npy_fp16,
+            )
+            .batched(batch_size, partial=False)
+        )
     return (
-        ds.to_tuple("jpg", "json", "cls.npy", "ptch.npy")
+        ds.to_tuple("jpg", "json")
         .map_tuple(
             lambda d: _decode_jpg(d, image_size),
             _decode_label,
-            _decode_npy_fp16,
-            _decode_npy_fp16,
         )
         .batched(batch_size, partial=False)
     )
@@ -127,9 +142,15 @@ class WebDatasetTrainLoader:
         num_workers: int,
     ) -> None:
         info = _read_info(train_dir)
-        assert "cls.npy" in info["keys"], (
-            "WebDatasetTrainLoader currently requires precomputed features "
-            f"(info.json keys = {info['keys']})."
+        # Precomputed-feature shards carry cls.npy/ptch.npy. "Raw" shards have
+        # only jpg+json; in that case teacher features are computed on the fly
+        # in the training loop (load_train_batch -> compute_raw_targets).
+        self.has_features: bool = "cls.npy" in info["keys"]
+        log.info(
+            "WebDatasetTrainLoader: %s (info.json keys = %s)",
+            "PRECOMPUTED features" if self.has_features
+            else "RAW images (teacher features computed on the fly)",
+            info["keys"],
         )
         self.samples_per_shard: int = int(info["images_per_shard"])
         assert self.samples_per_shard % batch_size_per_gpu == 0, (
@@ -205,6 +226,7 @@ class WebDatasetTrainLoader:
             image_size=self.image_size,
             batch_size=self.batch_size,
             use_worker_split=True,
+            has_features=self.has_features,
         )
         self._loader = DataLoader(
             ds,
@@ -216,11 +238,21 @@ class WebDatasetTrainLoader:
         )
         self._iter = iter(self._loader)
 
-    def next(self) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Returns (images, raw_patches, raw_cls, labels)."""
+    def next(self) -> tuple[Tensor, Tensor | None, Tensor | None, Tensor]:
+        """Returns (images, raw_patches, raw_cls, labels).
+
+        For raw (no-feature) shards, ``raw_patches`` and ``raw_cls`` are None —
+        the training loop computes teacher features on the fly from ``images``.
+        """
         self._ensure_iter()
         assert self._iter is not None
-        images, labels, raw_cls, raw_patches = next(self._iter)
+        raw_cls: Tensor | None
+        raw_patches: Tensor | None
+        if self.has_features:
+            images, labels, raw_cls, raw_patches = next(self._iter)
+        else:
+            images, labels = next(self._iter)
+            raw_cls = raw_patches = None
         # webdataset's .batched() returns labels as a list[int] — convert.
         if not isinstance(labels, Tensor):
             labels = torch.as_tensor(labels, dtype=torch.long)
@@ -281,5 +313,67 @@ def init_normalizer_stats_from_tar(
     scene_norm.set_stats(patches)
     cls_norm.set_stats(cls.unsqueeze(1))
     log.info(f"  Scene/CLS stats from {n} samples")
+    del cls, patches
+    torch.cuda.empty_cache()
+
+
+def init_normalizer_stats_from_tar_raw(
+    shard_path: Path,
+    scene_norm: PatchStandardizer,
+    cls_norm: CLSStandardizer,
+    *,
+    image_size: int,
+    compute_features: Callable[[Tensor], object],
+    device: torch.device,
+    max_samples: int,
+    sub_batch: int = 64,
+) -> None:
+    """Initialise standardizer stats from a RAW (no-feature) WebDataset shard.
+
+    Streams ``jpg`` images from the tar, decodes them to ``image_size``, and
+    computes teacher features on the fly via ``compute_features`` (which returns
+    an object exposing ``.patches`` [B, T, D] and ``.cls`` [B, D]). Teacher
+    forwards run in sub-batches of ``sub_batch``; features are accumulated on the
+    CPU to bound GPU memory, then ``set_stats`` is called exactly like the
+    precomputed-feature path.
+
+    Only reached for a fresh (step-0) run on raw shards — resumed runs load
+    standardizer stats from the checkpoint and skip init entirely.
+    """
+    # max_samples<=0 means "use the whole shard"; computing teacher features for
+    # a full 4096-image shard is many forwards — cap to keep init quick/bounded.
+    cap = max_samples if max_samples > 0 else 2048
+    log.info(
+        f"Computing normalizer stats from RAW tar (teacher on the fly): "
+        f"{shard_path.name}, up to {cap} samples"
+    )
+
+    imgs: list[Tensor] = []
+    with tarfile.open(shard_path, "r") as tf:
+        for member in tf:
+            if not member.isfile() or not member.name.endswith(".jpg"):
+                continue
+            f = tf.extractfile(member)
+            assert f is not None
+            imgs.append(_decode_jpg(f.read(), image_size))
+            if len(imgs) >= cap:
+                break
+
+    n = len(imgs)
+    assert n > 0, f"No jpg images found in {shard_path}"
+
+    cls_buf: list[Tensor] = []
+    ptch_buf: list[Tensor] = []
+    for i in range(0, n, sub_batch):
+        batch = torch.stack(imgs[i : i + sub_batch]).to(device, non_blocking=True)
+        feats = compute_features(batch)
+        cls_buf.append(feats.cls.detach().float().cpu())       # type: ignore[attr-defined]
+        ptch_buf.append(feats.patches.detach().float().cpu())  # type: ignore[attr-defined]
+
+    cls = torch.cat(cls_buf).to(device)       # [n, D]
+    patches = torch.cat(ptch_buf).to(device)  # [n, T, D]
+    scene_norm.set_stats(patches)
+    cls_norm.set_stats(cls.unsqueeze(1))
+    log.info(f"  Scene/CLS stats from {n} samples (computed live)")
     del cls, patches
     torch.cuda.empty_cache()
