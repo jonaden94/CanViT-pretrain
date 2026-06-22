@@ -9,7 +9,7 @@ set -euo pipefail
 RUN_GROUP=jon_exp21_modulation
 RUN_NAME=exp21-uniform16-repro2
 ARRAY=0-48%1                                   # 49 jobs x 4096 = 200704 steps (full run)
-TIME=0-01:30:00
+TIME=0-01:00:00
 MEM=128G
 NGPU=1
 
@@ -27,8 +27,8 @@ EXTRA_ARGS="--model.patcher-name uniform --backbone-name vitb16"
 # Pin all pretraining code to exact commits. base_train.sbatch extracts these
 # via offline `git archive` from the local clones (no network/SSH), snapshotting
 # the run against any future `git pull` on the originals while the array is in flight.
-PRETRAIN_COMMIT=4544bb8
-PYTORCH_COMMIT=96c35fb
+PRETRAIN_COMMIT=45e6be1
+PYTORCH_COMMIT=d864b83
 FOVI_COMMIT=763bf7a
 
 cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-pretrain

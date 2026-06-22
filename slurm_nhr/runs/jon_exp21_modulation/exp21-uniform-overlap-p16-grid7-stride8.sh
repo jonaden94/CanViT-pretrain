@@ -16,7 +16,7 @@ set -euo pipefail
 RUN_GROUP=jon_exp21_modulation
 RUN_NAME=exp21-uniform-overlap-p16-grid7-stride8
 ARRAY=0-48%1                                   # 49 jobs x 4096 = 200704 steps (full run)
-TIME=0-01:30:00
+TIME=0-01:00:00
 MEM=128G
 NGPU=1
 
@@ -36,7 +36,7 @@ EXTRA_ARGS="--model.patcher-name uniform --backbone-name vitb16 --glimpse-grid-s
 # the run against any future `git pull` on the originals while the array is in flight.
 # NOTE: bump PRETRAIN_COMMIT + PYTORCH_COMMIT to the post-stride-feature commits
 # before submitting (see header).
-PRETRAIN_COMMIT=628d510
+PRETRAIN_COMMIT=45e6be1
 PYTORCH_COMMIT=d864b83
 FOVI_COMMIT=763bf7a
 
