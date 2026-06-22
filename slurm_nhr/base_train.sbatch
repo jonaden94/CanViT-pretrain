@@ -53,12 +53,17 @@ if [ "${tmpdir_avail_gb:-0}" -lt "$TMPDIR_NEED_GB" ]; then
 fi
 log "TMPDIR=$TMPDIR"
 
-# If PRETRAIN_COMMIT / PYTORCH_COMMIT are exported by the run script, extract
-# those exact commits into TMPDIR and prepend them to PYTHONPATH so they win
-# over the venv's editable install. Both vars are optional and independent.
+# If PRETRAIN_COMMIT / PYTORCH_COMMIT / FOVI_COMMIT are exported by the run
+# script, extract those exact commits into TMPDIR and prepend them to PYTHONPATH
+# so they win over the venv's editable install. All three vars are optional and
+# independent. `git archive <commit>` reads the LOCAL clone's object store only
+# (no clone/fetch/pull), so no network or SSH auth is involved even though these
+# are private repos — the commit just has to exist in the local clone. fovi is a
+# pretraining dependency too (foveated/square patchers import it), so pin it as
+# well for fully reproducible runs.
 _REPO_BASE=/user/henrich1/u25995/jonathan/repos
 _CODE_DIR="$TMPDIR/canvit_src"
-if [ -n "${PRETRAIN_COMMIT:-}" ] || [ -n "${PYTORCH_COMMIT:-}" ]; then
+if [ -n "${PRETRAIN_COMMIT:-}" ] || [ -n "${PYTORCH_COMMIT:-}" ] || [ -n "${FOVI_COMMIT:-}" ]; then
     mkdir -p "$_CODE_DIR"
     if [ -n "${PRETRAIN_COMMIT:-}" ]; then
         mkdir -p "$_CODE_DIR/CanViT-pretrain"
@@ -73,6 +78,13 @@ if [ -n "${PRETRAIN_COMMIT:-}" ] || [ -n "${PYTORCH_COMMIT:-}" ]; then
             | tar -x -C "$_CODE_DIR/CanViT-PyTorch"
         export PYTHONPATH="$_CODE_DIR/CanViT-PyTorch${PYTHONPATH:+:$PYTHONPATH}"
         log "Pinned canvit_pytorch → $PYTORCH_COMMIT"
+    fi
+    if [ -n "${FOVI_COMMIT:-}" ]; then
+        mkdir -p "$_CODE_DIR/fovi"
+        git -C "$_REPO_BASE/fovi" archive "$FOVI_COMMIT" \
+            | tar -x -C "$_CODE_DIR/fovi"
+        export PYTHONPATH="$_CODE_DIR/fovi${PYTHONPATH:+:$PYTHONPATH}"
+        log "Pinned fovi → $FOVI_COMMIT"
     fi
 fi
 
@@ -137,7 +149,14 @@ if [ -n "$EXTRA_ARGS" ]; then log "EXTRA_ARGS: $EXTRA_ARGS"; fi
 log "Starting training (group=$RUN_GROUP, name=$RUN_NAME)..."
 # `env TMPDIR=...` is required because SLURM's TaskProlog clears TMPDIR
 # inside every srun task; setting it in the outer shell does not propagate.
+#
+# PYTHONSAFEPATH=1: `python -m` otherwise prepends the cwd (this repo root) to
+# sys.path[0], which shadows the pinned canvit_pretrain snapshot on PYTHONPATH
+# (canvit_pytorch/fovi aren't under cwd so they were unaffected). With safe-path
+# on, PYTHONPATH is authoritative — all three pinned packages win; when unpinned,
+# imports fall back to the venv's editable install as before.
 exec srun env TMPDIR="$TMPDIR" \
+    PYTHONSAFEPATH=1 \
     ${PYTHONPATH:+PYTHONPATH="$PYTHONPATH"} \
     TORCHINDUCTOR_CACHE_DIR="$TORCHINDUCTOR_CACHE_DIR" \
     TRITON_CACHE_DIR="$TRITON_CACHE_DIR" \
