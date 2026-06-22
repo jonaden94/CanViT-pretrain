@@ -36,7 +36,7 @@ EXTRA_ARGS="--model.patcher-name uniform --backbone-name vitb16 --glimpse-grid-s
 # the run against any future `git pull` on the originals while the array is in flight.
 # NOTE: bump PRETRAIN_COMMIT + PYTORCH_COMMIT to the post-stride-feature commits
 # before submitting (see header).
-PRETRAIN_COMMIT=45e6be1
+PRETRAIN_COMMIT=bc2db02
 PYTORCH_COMMIT=d864b83
 FOVI_COMMIT=763bf7a
 

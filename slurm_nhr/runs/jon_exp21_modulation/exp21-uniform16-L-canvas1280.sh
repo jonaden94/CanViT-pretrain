@@ -32,7 +32,7 @@ EXTRA_ARGS="--model.patcher-name uniform --backbone-name vitb16 --model.canvas-n
 # Pin all pretraining code to exact commits. base_train.sbatch extracts these
 # via offline `git archive` from the local clones (no network/SSH), snapshotting
 # the run against any future `git pull` on the originals while the array is in flight.
-PRETRAIN_COMMIT=45e6be1
+PRETRAIN_COMMIT=bc2db02
 PYTORCH_COMMIT=d864b83
 FOVI_COMMIT=763bf7a
 
