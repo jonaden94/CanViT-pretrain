@@ -35,6 +35,7 @@ class CheckpointData(TypedDict):
 
     # --- Training context ---
     glimpse_grid_size: int
+    patch_stride: int | None  # uniform patch-embed conv stride (None = patch_size)
     scene_resolution: int
     step: int | None
     train_loss: float | None
@@ -169,6 +170,7 @@ def save(
     dataset: str,
     glimpse_grid_size: int,
     scene_resolution: int,
+    patch_stride: int | None = None,
     step: int | None = None,
     train_loss: float | None = None,
     comet_id: str | None = None,
@@ -198,6 +200,7 @@ def save(
         "teacher_name": teacher_name,
         "dataset": dataset,
         "glimpse_grid_size": glimpse_grid_size,
+        "patch_stride": patch_stride,
         "scene_resolution": scene_resolution,
         "step": step,
         "train_loss": train_loss,
@@ -258,6 +261,7 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
         "teacher_name": raw["teacher_name"],
         "dataset": raw["dataset"],
         "glimpse_grid_size": raw["glimpse_grid_size"],
+        "patch_stride": raw.get("patch_stride"),
         "scene_resolution": raw["scene_resolution"],
         "step": raw["step"],
         "train_loss": raw["train_loss"],
@@ -331,11 +335,17 @@ def load_model(
     backbone_name = ckpt["backbone_name"]
     cfg = dacite.from_dict(CanViTForPretrainingConfig, ckpt["model_config"])
 
-    backbone = create_backbone(backbone_name)
+    # ``patch_stride`` absent for older runs -> None -> non-overlapping (patch_size).
+    patch_stride = ckpt.get("patch_stride")
+    backbone = create_backbone(backbone_name, patch_stride=patch_stride)
     # ``glimpse_grid_size`` may not be in the checkpoint dict for older runs;
-    # fall back to 8 (the canonical pretraining default).
+    # fall back to 8 (the canonical pretraining default). With overlapping patches
+    # the glimpse window is (grid-1)*stride + patch; patch_stride_px defaults to
+    # patch_size, so this reduces to grid*patch for non-overlapping runs.
     glimpse_grid = ckpt.get("glimpse_grid_size") or 8
-    glimpse_size_px = int(glimpse_grid * backbone.patch_size_px)
+    glimpse_size_px = int(
+        (glimpse_grid - 1) * backbone.patch_stride_px + backbone.patch_size_px
+    )
 
     model = CanViTForPretraining(
         backbone=backbone,

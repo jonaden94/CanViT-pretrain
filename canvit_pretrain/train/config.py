@@ -54,6 +54,9 @@ class Config:
     )
     # Glimpse/canvas sizes (runtime, not in model config)
     glimpse_grid_size: int = 8  # tokens per glimpse side
+    patch_stride: int | None = None  # uniform patcher: patch-embed conv stride;
+    # None = patch_size (non-overlapping, default). Set < patch_size for overlapping
+    # patches; glimpse_size_px is then (grid-1)*stride + patch_size.
     canvas_patch_grid_size: int = 32  # canvas spatial grid side length in tokens
     # Training
     batch_size_per_gpu: int = 64

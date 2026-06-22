@@ -30,8 +30,8 @@ def load_teacher(cfg: Config) -> DINOv3Teacher:
 
 def load_student_backbone(cfg: Config) -> ViTBackbone:
     """Load student backbone (random init; pretrained weights loaded via checkpoint system)."""
-    backbone = create_backbone(cfg.backbone_name)
-    log.info(f"Student backbone: {cfg.backbone_name} (random init)")
+    backbone = create_backbone(cfg.backbone_name, patch_stride=cfg.patch_stride)
+    log.info(f"Student backbone: {cfg.backbone_name} (random init, patch_stride={cfg.patch_stride})")
     return backbone.to(cfg.device)
 
 
@@ -50,7 +50,13 @@ def create_model(
 
     # Uniform crop size is purely a function of training config + backbone.
     # The foveated patcher doesn't use it; pass it through anyway for symmetry.
-    glimpse_size_px = cfg.glimpse_grid_size * student_backbone.patch_size_px
+    # With overlapping patches (patch_stride < patch_size) the glimpse window is
+    # (grid-1)*stride + patch; patch_stride_px defaults to patch_size, so this
+    # reduces to grid*patch (the non-overlapping case) bit-for-bit.
+    glimpse_size_px = (
+        (cfg.glimpse_grid_size - 1) * student_backbone.patch_stride_px
+        + student_backbone.patch_size_px
+    )
 
     model = CanViTForPretraining(
         backbone=student_backbone,
