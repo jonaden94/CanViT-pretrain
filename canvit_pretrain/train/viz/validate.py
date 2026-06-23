@@ -353,8 +353,17 @@ def validate(
                 # Uniform-grid local PCA panel needs g*g tokens; foveated tokens
                 # are a point cloud so we disable the local stream panel.
                 uniform_grid = getattr(model.cfg, "patcher_name", "uniform") == "uniform"
+                # Conv output-size formula (W - kernel)/stride + 1: the number of
+                # PatchEmbed tokens per side, which equals glimpse//patch for the
+                # non-overlapping case (stride == patch) and stays correct when
+                # patches overlap (stride < patch). patch_stride_px defaults to
+                # patch_size_px, so non-overlap runs are unaffected.
                 glimpse_grid_size = (
-                    glimpse_size_px // model.backbone.patch_size_px if uniform_grid else 0
+                    (glimpse_size_px - model.backbone.patch_size_px)
+                    // model.backbone.patch_stride_px
+                    + 1
+                    if uniform_grid
+                    else 0
                 )
 
                 _log_pca(
