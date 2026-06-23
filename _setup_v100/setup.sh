@@ -27,16 +27,12 @@ else
     log "$VENV already exists, skipping creation"
 fi
 
-# Step 2: install all deps from the lock file (installs cu130 torch — overwritten next)
-log "Syncing all dependencies from lock file..."
-UV_PROJECT_ENVIRONMENT="$VENV" uv sync
-
-# Step 3: overwrite torch/torchvision with cu126 builds (V100 compatible)
-log "Installing cu126 torch into $VENV..."
-uv pip install torch torchvision \
-    --index-url https://download.pytorch.org/whl/cu126 \
-    --python "$VENV/bin/python" \
-    --reinstall
+# Step 2: install the locked V100 (cu126) resolution. torch==2.11.0 /
+# torchvision==0.26.0 are pinned in the `v100` dependency group in
+# pyproject.toml and resolved from the cu126 index in uv.lock, so this is fully
+# reproducible — no unpinned post-hoc `uv pip install --reinstall`.
+log "Syncing V100 (cu126) deps from lock file..."
+UV_PROJECT_ENVIRONMENT="$VENV" uv sync --no-group cuda --group v100
 
 log "=== Done ==="
 log "Torch version in $VENV:"

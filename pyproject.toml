@@ -9,8 +9,6 @@ dependencies = [
     "canvit-pytorch[fovi]",
     "dinov3",
     "dinov3-in1k-probes",
-    "torch>=2.10",
-    "torchvision",
     "transformers>=4.50.0",
     "huggingface-hub",
     "safetensors",
@@ -38,10 +36,33 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["canvit_pretrain"]
 
+[tool.uv]
+default-groups = ["dev", "cuda"]
+# The cu126 (V100/sm_70) torch in the `v100` group is a conflicting alternative
+# to the default `cuda` (cu13x) torch, so uv keeps two separate locked
+# resolutions instead of trying to reconcile them — same pattern as
+# CanViT-specialize's cuda/TPU split. Build the V100 env with:
+#   UV_PROJECT_ENVIRONMENT=.venv-v100 uv sync --no-group cuda --group v100
+conflicts = [[{ group = "cuda" }, { group = "v100" }]]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
 [tool.uv.sources]
-canvit-pytorch = { git = "https://github.com/jonaden94/CanViT-PyTorch.git" }
+# Local editable: picks up live edits in the sibling CanViT-PyTorch clone (fovi
+# is pulled in transitively via canvit-pytorch[fovi], also editable). Assumes the
+# 5 project repos are cloned side by side in one parent folder. Swap back to the
+# remote fork —
+# `canvit-pytorch = { git = "https://github.com/jonaden94/CanViT-PyTorch.git" }`
+# — to install without the siblings present. See README "Local multi-repo setup".
+canvit-pytorch = { path = "../CanViT-PyTorch", editable = true }
 dinov3 = { git = "https://github.com/facebookresearch/dinov3.git", rev = "54694f7627fd815f62a5dcc82944ffa6153bbb76" }
 dinov3-in1k-probes = { git = "https://github.com/m2b3/dinov3-in1k-probes.git" }
+# V100 group pulls torch/torchvision from the cu126 index (sm_70-compatible).
+torch = [{ index = "pytorch-cu126", group = "v100" }]
+torchvision = [{ index = "pytorch-cu126", group = "v100" }]
 
 [dependency-groups]
 dev = [
@@ -51,6 +72,19 @@ dev = [
     "pytest>=9.0.2",
     "pytest-cov",
     "ruff>=0.15.0",
+]
+# Default GPU/CUDA path (A100/H100, sm_80+). torch lives here rather than in
+# base dependencies so the cu126 V100 variant can be a conflicting alternative.
+cuda = [
+    "torch>=2.10",
+    "torchvision",
+]
+# V100 (sm_70) path: cu126 wheels, pinned for reproducibility (the working
+# backup had torch 2.11.0 / torchvision 0.26.0). Installed only via:
+#   UV_PROJECT_ENVIRONMENT=.venv-v100 uv sync --no-group cuda --group v100
+v100 = [
+    "torch==2.11.0",
+    "torchvision==0.26.0",
 ]
 
 [tool.pytest.ini_options]

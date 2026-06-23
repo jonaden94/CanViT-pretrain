@@ -35,4 +35,4 @@ misc/
 logs/
 plan_dataloading/
 .claude
-slurm_nhr/canvit_train_state
+slurm_nhr/canvit_train_state.venv-cu126/
