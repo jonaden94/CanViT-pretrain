@@ -100,9 +100,9 @@ export TORCHINDUCTOR_FX_GRAPH_CACHE=1
 mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR" "$CUDA_CACHE_PATH"
 log "Compile caches (node-local, per-job): inductor+triton+cuda under $TMPDIR"
 
-VENV=".venv-v100"
+VENV=".venv-cu126"
 if [ ! -d "$VENV" ]; then
-    log "ERROR: $VENV not found. Run: bash _setup_v100/setup.sh"
+    log "ERROR: $VENV not found. Run: UV_PROJECT_ENVIRONMENT=.venv-cu126 uv sync --no-group cuda --group cu126"
     exit 1
 fi
 

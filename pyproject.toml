@@ -38,12 +38,12 @@ packages = ["canvit_pretrain"]
 
 [tool.uv]
 default-groups = ["dev", "cuda"]
-# The cu126 (V100/sm_70) torch in the `v100` group is a conflicting alternative
+# The cu126 (V100+A100) torch in the `cu126` group is a conflicting alternative
 # to the default `cuda` (cu13x) torch, so uv keeps two separate locked
 # resolutions instead of trying to reconcile them — same pattern as
-# CanViT-specialize's cuda/TPU split. Build the V100 env with:
-#   UV_PROJECT_ENVIRONMENT=.venv-v100 uv sync --no-group cuda --group v100
-conflicts = [[{ group = "cuda" }, { group = "v100" }]]
+# CanViT-specialize's cuda/TPU split. Build the V100 + A100 env with:
+#   UV_PROJECT_ENVIRONMENT=.venv-cu126 uv sync --no-group cuda --group cu126
+conflicts = [[{ group = "cuda" }, { group = "cu126" }]]
 
 [[tool.uv.index]]
 name = "pytorch-cu126"
@@ -60,12 +60,13 @@ explicit = true
 canvit-pytorch = { path = "../CanViT-PyTorch", editable = true }
 dinov3 = { git = "https://github.com/facebookresearch/dinov3.git", rev = "54694f7627fd815f62a5dcc82944ffa6153bbb76" }
 dinov3-in1k-probes = { git = "https://github.com/m2b3/dinov3-in1k-probes.git" }
-# V100 group pulls torch/torchvision from the cu126 index (sm_70-compatible).
-torch = [{ index = "pytorch-cu126", group = "v100" }]
-torchvision = [{ index = "pytorch-cu126", group = "v100" }]
+# cu126 group pulls torch/torchvision from the cu126 index (sm_70-compatible).
+torch = [{ index = "pytorch-cu126", group = "cu126" }]
+torchvision = [{ index = "pytorch-cu126", group = "cu126" }]
 
 [dependency-groups]
 dev = [
+    "ipykernel",  # Jupyter kernel for notebooks (installed in both .venv and .venv-cu126)
     "basedpyright>=1.36.1",
     "ipython",
     "pypatree",
@@ -73,16 +74,16 @@ dev = [
     "pytest-cov",
     "ruff>=0.15.0",
 ]
-# Default GPU/CUDA path (A100/H100, sm_80+). torch lives here rather than in
-# base dependencies so the cu126 V100 variant can be a conflicting alternative.
+# Default GPU/CUDA path (H100, sm_90). torch lives here rather than in
+# base dependencies so the cu126 V100+A100 variant can be a conflicting alternative.
 cuda = [
     "torch>=2.10",
     "torchvision",
 ]
-# V100 (sm_70) path: cu126 wheels, pinned for reproducibility (the working
+# V100 + A100 path: cu126 wheels, pinned for reproducibility (the working
 # backup had torch 2.11.0 / torchvision 0.26.0). Installed only via:
-#   UV_PROJECT_ENVIRONMENT=.venv-v100 uv sync --no-group cuda --group v100
-v100 = [
+#   UV_PROJECT_ENVIRONMENT=.venv-cu126 uv sync --no-group cuda --group cu126
+cu126 = [
     "torch==2.11.0",
     "torchvision==0.26.0",
 ]

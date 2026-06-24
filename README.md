@@ -31,8 +31,18 @@ Each repo has its **own** uv-managed venv. Clone all five **as siblings in the
 same parent folder**, then create the env:
 
 ```bash
-uv sync   # dev venv (.venv); installs CanViT-PyTorch + fovi editable
+# Default env (.venv) — H100 (sm_90), CUDA-13.x torch
+uv sync
+
+# V100 + A100 env (.venv-cu126) — cu126 torch (Grete V100 + A100 partitions)
+UV_PROJECT_ENVIRONMENT=.venv-cu126 uv sync --no-group cuda --group cu126
 ```
+
+The two envs are **conflicting, separately-locked resolutions** of the same
+project: torch is pinned in the `cuda` (default) and `cu126` dependency groups in
+`pyproject.toml`, so each `uv sync` is fully reproducible. cu126 wheels still
+include sm_70 (V100) support, which the default CUDA-13.x wheels dropped. Both
+envs share the same `[tool.uv.sources]`.
 
 The cross-repo link is committed in `pyproject.toml` under `[tool.uv.sources]`
 as a **relative-path editable install** (`canvit-pytorch = { path =
@@ -44,11 +54,6 @@ siblings, and the editable installs mean edits in the local `CanViT-PyTorch` /
 to the remote fork
 (`canvit-pytorch = { git = "https://github.com/jonaden94/CanViT-PyTorch.git" }`)
 and `uv sync`.
-
-On the Grete V100 partition, build the dedicated venv with
-`bash _setup_v100/setup.sh` instead (creates `.venv-v100` from the lock file,
-then overwrites torch with a V100-compatible cu126 build). It uses the same
-committed `[tool.uv.sources]`, so it also picks up the local editable clones.
 
 ### Pinning code for long runs
 
