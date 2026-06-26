@@ -19,8 +19,12 @@ TEACHER_NAME = "dinov3_vitb16"
 class FoveatedScaleConfig:
     """How the per-glimpse view scale is sampled for the foveated/square patchers.
 
-    The foveation window is ``fix_size = scale * H``. ``scale`` is sampled for
-    ``RANDOM`` glimpses only (``FULL`` glimpses always use ``scale=1``); the
+    The foveation window is ``fix_size = scale * H``. The FULL start glimpse is
+    always centered; its scale is ``fixed_scale`` in ``mode='fixed'`` (so it
+    matches every other glimpse) and ``1`` in ``per_rollout``/``per_glimpse`` (a
+    full-image anchor). RANDOM glimpses draw their scale per ``mode``: a single
+    ``fixed_scale`` (``fixed``), one scale frozen across the rollout
+    (``per_rollout``), or a fresh scale each glimpse (``per_glimpse``). The
     uniform patcher path is unaffected by this config.
     """
 

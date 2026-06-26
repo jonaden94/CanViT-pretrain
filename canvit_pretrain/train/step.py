@@ -178,14 +178,25 @@ def training_step(
         """Create a NamedViewpoint (has .name for viz, convertible to canvit Viewpoint).
 
         Foveated/square path: RANDOM glimpses draw their view scale per
-        ``foveated_scale`` (center per the chosen distribution); FULL glimpses
-        stay scale=1. Uniform path: existing safe-box-area sampler (unchanged).
+        ``foveated_scale`` (center per the chosen distribution). The FULL start
+        glimpse is centered at fixation (center=0); its scale depends on mode:
+        ``fixed`` -> the single training scale ``fixed_scale`` (so it matches every
+        other glimpse; ``fixed_scale=1`` reproduces the original scale-1 full view),
+        while ``per_rollout`` / ``per_glimpse`` keep it at scale=1 -- a full-image
+        anchor that eases optimization (the RANDOM glimpses still zoom per the mode).
+        Uniform path: existing safe-box-area sampler, FULL stays scale=1.
         """
         if vp_type == ViewpointType.RANDOM:
             if is_foveated:
                 return _foveated_random_vp(rollout_scales)
             return NamedViewpoint.random(batch_size=B, device=device, min_scale=min_viewpoint_scale)
         assert vp_type == ViewpointType.FULL
+        if is_foveated and foveated_scale.mode == "fixed":
+            return NamedViewpoint(
+                name="full",
+                centers=torch.zeros(B, 2, device=device),
+                scales=torch.full((B,), float(foveated_scale.fixed_scale), device=device),
+            )
         return NamedViewpoint.full_scene(batch_size=B, device=device)
 
     def to_canvit_vp(vp: NamedViewpoint) -> Viewpoint:
@@ -233,14 +244,20 @@ def training_step(
         nonlocal viz_data
         do_viz = collect_viz and branch_idx == 0
 
-        # Per-rollout scale: one draw per branch (per image), reused across all
-        # of this rollout's RANDOM glimpses. Only sampled when relevant.
+        # Per-rollout scale: one scale per branch (per image), held across all of
+        # this rollout's glimpses (per_rollout => constant scale within a rollout).
+        # A FULL-start rollout is the scale-1 global anchor, so ALL its glimpses
+        # (the full t0 AND its subsequent random glimpses) stay at scale=1 to keep
+        # the rollout in-distribution; RANDOM-start rollouts use the sampled scale.
         rollout_scales: Tensor | None = None
         if is_foveated and foveated_scale.mode == "per_rollout":
-            rollout_scales = sample_view_scales(
-                B, device, distribution=foveated_scale.distribution,
-                min_scale=foveated_scale.min_scale, max_scale=foveated_scale.max_scale,
-            )
+            if t0_type == ViewpointType.FULL:
+                rollout_scales = torch.ones(B, device=device)
+            else:
+                rollout_scales = sample_view_scales(
+                    B, device, distribution=foveated_scale.distribution,
+                    min_scale=foveated_scale.min_scale, max_scale=foveated_scale.max_scale,
+                )
 
         # Capture initial state for viz (before any glimpses)
         if do_viz:

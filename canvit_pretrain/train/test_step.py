@@ -302,6 +302,51 @@ class TestFoveatedScaleModes:
         assert torch.isfinite(torch.tensor(loss))
         assert _has_grads(grads)
 
+    @pytest.mark.parametrize("fscale,kind", [
+        (FoveatedScaleConfig(mode="fixed", fixed_scale=1.0), "fixed1"),
+        (FoveatedScaleConfig(mode="fixed", fixed_scale=0.7), "fixed_other"),
+        (FoveatedScaleConfig(mode="per_rollout", distribution="uniform", min_scale=0.5, max_scale=0.9), "per_rollout"),
+        (FoveatedScaleConfig(mode="per_glimpse", distribution="uniform", min_scale=0.5, max_scale=0.9), "per_glimpse"),
+    ])
+    def test_full_start_glimpse_follows_scale_mode(self, foveated_model, tensors, fscale, kind):
+        """FULL start glimpse is always centered (center=0). Its scale: ``fixed``
+        -> the single training scale ``fixed_scale`` (fixed_scale=1 reproduces the
+        old scale-1 full glimpse); ``per_rollout`` -> scale=1, and the whole
+        full-start rollout stays scale=1 (constant scale per rollout); ``per_glimpse``
+        -> full t0 is the scale-1 anchor while its random glimpses draw their own."""
+        torch.manual_seed(0)
+        random.seed(0)
+        # First (only) branch is a FULL-start branch; 2 glimpses -> t0 FULL, t1 RANDOM.
+        metrics = training_step(
+            model=foveated_model,
+            images=tensors["images"], scene_target=tensors["scene_target"],
+            cls_target=tensors["cls_target"], raw_scene_target=tensors["raw_scene_target"],
+            raw_cls_target=tensors["raw_cls_target"], scene_denorm=lambda x: x, cls_denorm=lambda x: x,
+            enable_scene_patches_loss=True, enable_scene_cls_loss=True,
+            glimpse_size_px=128, canvas_grid_size=_G,
+            n_full_start_branches=1, n_random_start_branches=0,
+            chunk_size=2, continue_prob=0.0, min_viewpoint_scale=0.1,
+            foveated_scale=fscale, amp_ctx=nullcontext(), collect_viz=True,
+        )
+        vps = metrics.viz_data.viewpoints
+        full_vp, rand_vp = vps[0], vps[1]
+        # FULL glimpse is always centered at fixation.
+        assert torch.allclose(full_vp.centers, torch.zeros_like(full_vp.centers), atol=1e-6)
+        if kind == "fixed1":
+            assert torch.allclose(full_vp.scales, torch.ones_like(full_vp.scales), atol=1e-6)
+        elif kind == "fixed_other":
+            assert torch.allclose(full_vp.scales, torch.full_like(full_vp.scales, 0.7), atol=1e-6)
+        elif kind == "per_rollout":
+            # FULL-start rollout is entirely scale=1 (one scale per rollout): the
+            # full t0 AND its subsequent random glimpses are all scale 1.
+            assert torch.allclose(full_vp.scales, torch.ones_like(full_vp.scales), atol=1e-6)
+            assert torch.allclose(rand_vp.scales, torch.ones_like(rand_vp.scales), atol=1e-6)
+            assert rand_vp.centers.abs().sum() > 0  # random glimpse center still sampled
+        else:  # per_glimpse: full t0 = scale-1 anchor; random glimpses draw their own
+            assert torch.allclose(full_vp.scales, torch.ones_like(full_vp.scales), atol=1e-6)
+            assert (rand_vp.scales >= 0.5 - 1e-6).all() and (rand_vp.scales <= 0.9 + 1e-6).all()
+            assert rand_vp.centers.abs().sum() > 0  # random glimpse center is sampled
+
 
 # Cheap fovi geometry shared by the foveated/square FiLM cases below.
 _FOVI_KW = dict(
