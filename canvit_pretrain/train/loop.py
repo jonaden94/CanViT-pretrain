@@ -287,7 +287,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     if probe is not None:
         log.info(f"Loaded IN1k probe for {cfg.teacher_name}")
 
-    student_backbone = load_student_backbone(cfg)
+    student_backbone = load_student_backbone(cfg, teacher)
     log.info(f"Student backbone params: {count_parameters(student_backbone):,}")
 
     bundle = create_model(student_backbone, teacher.embed_dim, cfg)

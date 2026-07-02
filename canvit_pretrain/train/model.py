@@ -28,10 +28,24 @@ def load_teacher(cfg: Config) -> DINOv3Teacher:
     return _load_teacher(cfg.teacher_repo_id, cfg.device)
 
 
-def load_student_backbone(cfg: Config) -> ViTBackbone:
-    """Load student backbone (random init; pretrained weights loaded via checkpoint system)."""
+def load_student_backbone(cfg: Config, teacher: DINOv3Teacher | None = None) -> ViTBackbone:
+    """Load student backbone.
+
+    Random init by default (pretrained weights otherwise arrive via the checkpoint /
+    seed system). With ``cfg.init_backbone_from_teacher`` the backbone is instead
+    seeded from the already-loaded DINOv3 ``teacher`` (backbone only; see
+    ``load_dinov3_weights_into_backbone``). A later resume / seed_ckpt overwrites this.
+    """
     backbone = create_backbone(cfg.backbone_name, patch_stride=cfg.patch_stride)
-    log.info(f"Student backbone: {cfg.backbone_name} (random init, patch_stride={cfg.patch_stride})")
+    if cfg.init_backbone_from_teacher:
+        if teacher is None:
+            raise ValueError("init_backbone_from_teacher=True but no teacher was provided.")
+        from canvit_pytorch.backbone.dinov3_init import load_dinov3_weights_into_backbone
+
+        load_dinov3_weights_into_backbone(backbone, teacher.model)
+        log.info(f"Student backbone: {cfg.backbone_name} (init from DINOv3 teacher, patch_stride={cfg.patch_stride})")
+    else:
+        log.info(f"Student backbone: {cfg.backbone_name} (random init, patch_stride={cfg.patch_stride})")
     return backbone.to(cfg.device)
 
 

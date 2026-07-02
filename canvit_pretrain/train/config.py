@@ -114,6 +114,14 @@ class Config:
     """Seed model weights from HF Hub repo (e.g. '<org>/canvitb16-add-vpe-...'). Downloads
     config.json + model.safetensors, overrides cfg.model with the checkpoint's config.
     Mutually exclusive with seed_ckpt."""
+    init_backbone_from_teacher: bool = False
+    """Initialize the student ViT backbone from the (already-loaded) DINOv3 teacher's
+    weights instead of random init. The two share the same ViT-B/16 design (12 layers,
+    12 heads, head_dim 64, RoPE theta 100, LayerScale, 4x MLP), so the full transformer
+    trunk transfers 1:1 (teacher q/k/v fused into the student's qkv, K-bias zero-filled);
+    patch_embed transfers only when the student patch size matches the teacher's (16 ->
+    vitb16 yes, vitb8 no -> left random). Backbone only; the rest of CanViT (canvas, VPE,
+    heads) stays random. Applied on a fresh start; resume/seed_ckpt take precedence."""
     reset_normalizer: bool = False
     """Re-warmup normalizer stats when loading any checkpoint."""
     normalizer_max_samples: int = 0
