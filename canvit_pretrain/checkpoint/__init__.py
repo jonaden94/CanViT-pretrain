@@ -338,11 +338,11 @@ def load_model(
     # ``patch_stride`` absent for older runs -> None -> non-overlapping (patch_size).
     patch_stride = ckpt.get("patch_stride")
     backbone = create_backbone(backbone_name, patch_stride=patch_stride)
-    # ``glimpse_grid_size`` may not be in the checkpoint dict for older runs;
-    # fall back to 8 (the canonical pretraining default). With overlapping patches
-    # the glimpse window is (grid-1)*stride + patch; patch_stride_px defaults to
-    # patch_size, so this reduces to grid*patch for non-overlapping runs.
-    glimpse_grid = ckpt.get("glimpse_grid_size") or 8
+    # ``glimpse_grid_size`` is effectively required: load() above hard-indexes it
+    # (KeyError for checkpoints without it), so no fallback here. With overlapping
+    # patches the glimpse window is (grid-1)*stride + patch; patch_stride_px
+    # defaults to patch_size, so this reduces to grid*patch for non-overlapping runs.
+    glimpse_grid = ckpt["glimpse_grid_size"]
     glimpse_size_px = int(
         (glimpse_grid - 1) * backbone.patch_stride_px + backbone.patch_size_px
     )

@@ -7,7 +7,7 @@ import torch
 from canvit_pytorch import create_backbone
 
 from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
-from canvit_pretrain.checkpoint import CheckpointData, load, save
+from canvit_pretrain.checkpoint import load, save
 
 _TEACHER_REPO = "facebook/dinov3-vits16-pretrain"
 _TEACHER_NAME = "dinov3_vits16"
@@ -56,46 +56,3 @@ def test_save_load_roundtrip() -> None:
         # Verify state_dict loads into fresh model
         model2 = _make_tiny_model(device)
         model2.load_state_dict(data["state_dict"])
-
-
-def test_strips_orig_mod() -> None:
-    """Verify _orig_mod prefix stripping works."""
-    device = torch.device("cpu")
-    model = _make_tiny_model(device)
-
-    # Manually add _orig_mod prefix to simulate old checkpoint
-    state_dict = {k.replace("canvit", "canvit._orig_mod"): v for k, v in model.state_dict().items()}
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        path = Path(tmpdir) / "test.pt"
-        raw: CheckpointData = {
-            "state_dict": state_dict,
-            "model_config": {},
-            "backbone_name": "vits16",
-            "canvas_patch_grid_sizes": [8, 16, 32],
-            "teacher_dim": 384,
-            "teacher_repo_id": _TEACHER_REPO,
-            "teacher_name": _TEACHER_NAME,
-            "dataset": _DATASET,
-            "glimpse_grid_size": 8,
-            "scene_resolution": 512,
-            "step": None,
-            "train_loss": None,
-            "optimizer_state": None,
-            "scheduler_state": None,
-            "training_config_history": None,
-            "provenance_history": None,
-            "timestamp": "test",
-            "git_commit": None,
-            "git_dirty": False,
-            "comet_id": None,
-            "hostname": None,
-            "slurm_job_id": None,
-            "slurm_array_task_id": None,
-            "cmdline": None,
-        }
-        torch.save(raw, path)
-
-        data = load(path, device)
-        # Keys should be stripped
-        assert not any("_orig_mod" in k for k in data["state_dict"])

@@ -312,7 +312,7 @@ def training_step(
                 chunk.chunk_combined_loss = torch.zeros((), device=device)
 
         for t in range(1, n_glimpses):
-            # t>=1: use pre-computed schedule (half RANDOM, half POLICY, shuffled)
+            # t>=1: use pre-computed schedule (currently all-RANDOM, see t1_schedule)
             vp_type = t1_schedule[t - 1][branch_idx]
             vp_named = make_named_vp(vp_type, rollout_scales)
             vp = to_canvit_vp(vp_named)
