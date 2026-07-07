@@ -446,6 +446,20 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         optimizer.load_state_dict(opt_state)
         scheduler.load_state_dict(sched_state)
         log.info(f"RESUME mode: restored optimizer+scheduler (step={sched_state['last_epoch']})")
+        # WebDataset path: start_step is derived from job_index, which assumes
+        # the checkpoint was written at an end-of-job boundary. A mid-job save
+        # (e.g. the signal-triggered SIGUSR1 checkpoint) breaks that: resuming
+        # would silently offset the LR schedule by (end_step - saved_step) and
+        # skip the remainder of that job's shards. Fail loudly instead.
+        if cfg.webdataset_dir is not None:
+            assert scheduler.last_epoch == start_step, (
+                f"WebDataset resume: scheduler.last_epoch={scheduler.last_epoch} != "
+                f"start_step={start_step} (= (saved job_index + 1) * steps_per_job). "
+                f"The checkpoint was not written at an end-of-job boundary "
+                f"(mid-job / signal-triggered save?). Resume from an end-of-job "
+                f"checkpoint, or use --seed-ckpt to start a fresh schedule from "
+                f"these weights."
+            )
     elif is_seeding:
         log.info("SEED mode: fresh optimizer+scheduler (step=0)")
 
