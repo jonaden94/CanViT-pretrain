@@ -149,6 +149,7 @@ def validate(
     run_dir: Path,
     n_eval_viewpoints: int = 10,
     min_viewpoint_scale: float = 0.05,
+    foveated_eval_scale: float = 1.0,
     prefix: str = "val",
     probe: DINOv3LinearClassificationHead | None = None,
     log_curves: bool = False,
@@ -186,7 +187,9 @@ def validate(
         viewpoints, gt_idx, gt_name); per-timestep entries in ``acc`` are batch means."""
         B = images.shape[0]
         if is_foveated:
-            viewpoints = make_eval_viewpoints_foveated(B, images.device, n_viewpoints=n_eval_viewpoints)
+            viewpoints = make_eval_viewpoints_foveated(
+                B, images.device, n_viewpoints=n_eval_viewpoints, scale=foveated_eval_scale
+            )
         else:
             viewpoints = make_eval_viewpoints(B, images.device, n_viewpoints=n_eval_viewpoints)
         has_probe = probe is not None and labels is not None and labels_are_in1k(labels)

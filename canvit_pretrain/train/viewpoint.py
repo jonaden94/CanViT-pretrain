@@ -215,20 +215,24 @@ def make_eval_viewpoints(
 
 
 def make_eval_viewpoints_foveated(
-    B: int, device: torch.device, n_viewpoints: int = 10
+    B: int, device: torch.device, n_viewpoints: int = 10, scale: float = 1.0
 ) -> list[Viewpoint]:
     """Foveated-mode validation trajectory: center fixation + shuffled 3x3 grid centers.
 
-    Deterministic across calls (fixed seed). All ``scales`` are 1.0 (ignored by
-    the foveated patcher; kept for viz boxes). The first ``n_viewpoints`` of
-    the 10-step trajectory are returned.
+    Deterministic across calls (fixed seed). All viewpoints use ``scale``; the
+    foveated/square patchers derive their fixation window from it per forward
+    (``fix_size = scale * H``), so it should match the training scale — pass
+    ``foveated_scale.fixed_scale`` for ``mode='fixed'`` runs. The 1.0 default
+    matches the scale-1 FULL anchor of the sampled modes (``per_rollout`` /
+    ``per_glimpse``) and reproduces the historical behavior. The first
+    ``n_viewpoints`` of the 10-step trajectory are returned.
     """
     assert n_viewpoints >= 1
     centers_seq = _foveated_eval_centers()
     result: list[Viewpoint] = []
     for i, (r, c) in enumerate(centers_seq[:n_viewpoints]):
         center_t = torch.tensor([r, c], device=device, dtype=torch.float32).view(1, 2).expand(B, -1).contiguous()
-        scales_t = torch.ones(B, device=device, dtype=torch.float32)
+        scales_t = torch.full((B,), float(scale), device=device, dtype=torch.float32)
         name = "center" if i == 0 else f"fix_{i}"
         result.append(Viewpoint(name=name, centers=center_t, scales=scales_t))
     return result

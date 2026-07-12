@@ -661,6 +661,14 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                             run_dir=run_dir,
                             n_eval_viewpoints=cfg.n_eval_viewpoints,
                             min_viewpoint_scale=cfg.min_viewpoint_scale,
+                            # Validate the foveated/square path at the training
+                            # scale for mode='fixed' (fix_size = scale * H).
+                            # Sampled modes keep the scale-1 FULL anchor.
+                            foveated_eval_scale=(
+                                cfg.foveated_scale.fixed_scale
+                                if cfg.foveated_scale.mode == "fixed"
+                                else 1.0
+                            ),
                             prefix="val",
                             probe=probe,
                             log_curves=do_curves,
