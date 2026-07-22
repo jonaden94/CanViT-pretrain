@@ -16,20 +16,14 @@ from torch import Tensor
 from canvit_pretrain import CanViTForPretraining
 
 from .config import FoveatedScaleConfig
+from .selector import RandomSelector, Selector
+from .task import DistillTask, LossOutput, Task
 from .viewpoint import Viewpoint as NamedViewpoint
-from .viewpoint import ViewpointType, random_foveated_viewpoint, sample_view_scales
+from .viewpoint import ViewpointType
 from .viz.image import imagenet_denormalize_to_numpy
 from .viz.sample import VizSampleData, extract_sample0_viz
 
-
-class LossOutput(NamedTuple):
-    """Output from compute_loss - individual losses + combined mean."""
-
-    scene_patches_loss: Tensor
-    scene_cls_loss: Tensor
-    combined: Tensor  # sum of active losses
-    scene_pred: Tensor  # for cosine similarity metrics
-    cls_pred: Tensor
+__all__ = ["LossOutput", "StepMetrics", "TrainVizData", "training_step"]  # LossOutput re-exported from .task
 
 
 class BranchMetrics(NamedTuple):
@@ -109,11 +103,18 @@ def training_step(
     foveated_scale: FoveatedScaleConfig,
     amp_ctx: AbstractContextManager,
     collect_viz: bool = False,
+    selector: Selector | None = None,
+    task: Task | None = None,
 ) -> StepMetrics:
     """Training with truncated BPTT and independent branches.
 
     Each branch is fully independent: own t0, own trajectory, own backward.
     No retain_graph needed. Memory is O(chunk_size), not O(n_branches).
+
+    ``selector`` / ``task`` are the harness seams (unification master plan §4.2):
+    None (the default) builds the historical RandomSelector / DistillTask from the
+    other kwargs — behavior is then byte-identical to the pre-seam code (P1 parity
+    gate). Passing them explicitly is how future phases plug policies and tasks.
     """
     n_branches = n_full_start_branches + n_random_start_branches
     assert n_branches >= 1
@@ -126,6 +127,20 @@ def training_step(
     core_model = getattr(model, "module", model)
     state_init = core_model.init_state(batch_size=B, canvas_grid_size=canvas_grid_size)
     is_foveated = getattr(core_model.cfg, "patcher_name", "uniform") in ("foveated", "square")
+
+    if selector is None:
+        selector = RandomSelector(
+            is_foveated=is_foveated,
+            foveated_scale=foveated_scale,
+            min_viewpoint_scale=min_viewpoint_scale,
+        )
+    if task is None:
+        task = DistillTask(
+            scene_target=scene_target,
+            cls_target=cls_target,
+            enable_scene_patches_loss=enable_scene_patches_loss,
+            enable_scene_cls_loss=enable_scene_cls_loss,
+        )
 
     # Sample trajectory length (shared across branches for this step)
     n_glimpses = chunk_size
@@ -152,53 +167,6 @@ def training_step(
     # Viz collection for first branch only (when enabled)
     viz_data: TrainVizData | None = None
 
-    def _foveated_random_vp(rollout_scales: Tensor | None) -> NamedViewpoint:
-        """RANDOM viewpoint for the foveated/square path, with the view scale
-        drawn per ``foveated_scale`` (see :class:`FoveatedScaleConfig`).
-        ``rollout_scales`` is the frozen [B] scale for ``mode='per_rollout'``."""
-        fs = foveated_scale
-        if fs.mode == "fixed":
-            scales = torch.full((B,), float(fs.fixed_scale), device=device)
-            center_mode = "full_field"
-        else:
-            if fs.mode == "per_rollout":
-                assert rollout_scales is not None
-                scales = rollout_scales
-            else:  # per_glimpse
-                scales = sample_view_scales(
-                    B, device, distribution=fs.distribution,
-                    min_scale=fs.min_scale, max_scale=fs.max_scale,
-                )
-            center_mode = "safebox" if fs.distribution == "safebox" else "full_field"
-        return random_foveated_viewpoint(B, device, scales=scales, center_mode=center_mode)
-
-    def make_named_vp(
-        vp_type: ViewpointType, rollout_scales: Tensor | None = None
-    ) -> NamedViewpoint:
-        """Create a NamedViewpoint (has .name for viz, convertible to canvit Viewpoint).
-
-        Foveated/square path: RANDOM glimpses draw their view scale per
-        ``foveated_scale`` (center per the chosen distribution). The FULL start
-        glimpse is centered at fixation (center=0); its scale depends on mode:
-        ``fixed`` -> the single training scale ``fixed_scale`` (so it matches every
-        other glimpse; ``fixed_scale=1`` reproduces the original scale-1 full view),
-        while ``per_rollout`` / ``per_glimpse`` keep it at scale=1 -- a full-image
-        anchor that eases optimization (the RANDOM glimpses still zoom per the mode).
-        Uniform path: existing safe-box-area sampler, FULL stays scale=1.
-        """
-        if vp_type == ViewpointType.RANDOM:
-            if is_foveated:
-                return _foveated_random_vp(rollout_scales)
-            return NamedViewpoint.random(batch_size=B, device=device, min_scale=min_viewpoint_scale)
-        assert vp_type == ViewpointType.FULL
-        if is_foveated and foveated_scale.mode == "fixed":
-            return NamedViewpoint(
-                name="full",
-                centers=torch.zeros(B, 2, device=device),
-                scales=torch.full((B,), float(foveated_scale.fixed_scale), device=device),
-            )
-        return NamedViewpoint.full_scene(batch_size=B, device=device)
-
     def to_canvit_vp(vp: NamedViewpoint) -> Viewpoint:
         return Viewpoint(centers=vp.centers, scales=vp.scales)
 
@@ -206,58 +174,12 @@ def training_step(
         out = model(image=images, state=state, viewpoint=vp)
         return StepOutput(out=out)
 
-    def compute_loss(out: CanViTOutput) -> LossOutput:
-        # `out` is a CanViTForPretrainingOutput coming through the DDP-wrapped
-        # forward — scene_pred / cls_pred were produced INSIDE that forward,
-        # so head-param gradients are part of the autograd graph DDP's
-        # Reducer instruments. Calling `core_model.predict_*` here would
-        # bypass the DDP wrapper and skip AllReduce on the head gradients
-        # (manifests as √N grad-norm scaling on the heads in N-GPU runs).
-        scene_pred = out.scene_pred  # type: ignore[attr-defined]
-        cls_pred = out.cls_pred  # type: ignore[attr-defined]
-
-        scene_patches_loss = torch.zeros((), device=device)
-        scene_cls_loss = torch.zeros((), device=device)
-
-        if enable_scene_patches_loss:
-            scene_patches_loss = F.mse_loss(scene_pred, scene_target)
-        if enable_scene_cls_loss:
-            scene_cls_loss = F.mse_loss(cls_pred, cls_target)
-
-        active: list[Tensor] = []
-        if enable_scene_patches_loss:
-            active.append(scene_patches_loss)
-        if enable_scene_cls_loss:
-            active.append(scene_cls_loss)
-        assert len(active) > 0, "At least one loss must be enabled"
-        combined = torch.stack(active).sum()
-
-        return LossOutput(
-            scene_patches_loss=scene_patches_loss,
-            scene_cls_loss=scene_cls_loss,
-            combined=combined,
-            scene_pred=scene_pred,
-            cls_pred=cls_pred,
-        )
-
     def run_branch(t0_type: ViewpointType, branch_idx: int) -> BranchMetrics:
         nonlocal viz_data
         do_viz = collect_viz and branch_idx == 0
 
-        # Per-rollout scale: one scale per branch (per image), held across all of
-        # this rollout's glimpses (per_rollout => constant scale within a rollout).
-        # A FULL-start rollout is the scale-1 global anchor, so ALL its glimpses
-        # (the full t0 AND its subsequent random glimpses) stay at scale=1 to keep
-        # the rollout in-distribution; RANDOM-start rollouts use the sampled scale.
-        rollout_scales: Tensor | None = None
-        if is_foveated and foveated_scale.mode == "per_rollout":
-            if t0_type == ViewpointType.FULL:
-                rollout_scales = torch.ones(B, device=device)
-            else:
-                rollout_scales = sample_view_scales(
-                    B, device, distribution=foveated_scale.distribution,
-                    min_scale=foveated_scale.min_scale, max_scale=foveated_scale.max_scale,
-                )
+        # Selector owns the per-rollout draw (e.g. foveated per_rollout scales).
+        ctx = selector.start_rollout(t0_type=t0_type, batch_size=B, device=device)
 
         # Capture initial state for viz (before any glimpses)
         if do_viz:
@@ -274,11 +196,13 @@ def training_step(
 
         # t0 forward
         with amp_ctx:
-            vp0_named = make_named_vp(t0_type, rollout_scales)
+            vp0_named = selector.select(
+                vp_type=t0_type, ctx=ctx, t=0, batch_size=B, device=device, state=state_init
+            )
             vp0 = to_canvit_vp(vp0_named)
             step_out = forward_step(state=state_init, vp=vp0)
             out = step_out.out
-            L = compute_loss(out)
+            L = task.step_loss(out)
 
         if do_viz:
             assert viz_data is not None
@@ -314,13 +238,15 @@ def training_step(
         for t in range(1, n_glimpses):
             # t>=1: use pre-computed schedule (currently all-RANDOM, see t1_schedule)
             vp_type = t1_schedule[t - 1][branch_idx]
-            vp_named = make_named_vp(vp_type, rollout_scales)
+            vp_named = selector.select(
+                vp_type=vp_type, ctx=ctx, t=t, batch_size=B, device=device, state=chunk.state
+            )
             vp = to_canvit_vp(vp_named)
 
             with amp_ctx:
                 step_out = forward_step(state=chunk.state, vp=vp)
                 out = step_out.out
-                L = compute_loss(out)
+                L = task.step_loss(out)
 
             if do_viz:
                 assert viz_data is not None
