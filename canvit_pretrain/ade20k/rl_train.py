@@ -46,6 +46,7 @@ from canvit_pretrain.train.rl import PG, Objective, QReg, RunningNorm, entropy_f
 from canvit_pretrain.train.tracker import make_tracker
 
 from .config import _default_ade20k_root, _default_wandb_dir, _default_wandb_entity, _default_wandb_project
+from .config import ResizeMode
 from .data import IGNORE_LABEL, ADE20kDataset, make_val_transforms
 from .rollout import consumes_full_image, derive_glimpse_px
 
@@ -62,6 +63,12 @@ class PolicyTrainConfig:
     scene_size: int = 512
     canvas_grid: int = 64
     glimpse_px: int | None = 128
+    resize_mode: ResizeMode = "center_crop"
+    """Val/eval image resize (train and eval use the same protocol here). Default
+    ``center_crop`` is aspect-preserving (matches pretraining; REQUIRED for
+    foveated/square models). Pass ``--resize-mode squish`` to reproduce the
+    CanViT-PyTorch-RL qband band / EG-C2F numbers, which were measured on
+    aspect-distorting squish resize."""
 
     # Action space / net (uniform models: safebox grid; foveated/square: fixation grid)
     scales: tuple[float, ...] = (0.5, 0.25)
@@ -325,8 +332,10 @@ def train(cfg: PolicyTrainConfig) -> None:
     gen = torch.Generator(device=device)
     gen.manual_seed(cfg.seed)
 
-    # Data: the RL repo's protocol — squish resize, NO augmentation, both splits
-    img_tf, mask_tf = make_val_transforms(cfg.scene_size, "squish")
+    # Data: the RL repo's protocol — NO augmentation, both splits use the val
+    # transform. resize_mode defaults to center_crop (aspect-preserving); pass
+    # --resize-mode squish to reproduce the documented qband/EG-C2F numbers.
+    img_tf, mask_tf = make_val_transforms(cfg.scene_size, cfg.resize_mode)
     train_ds = ADE20kDataset(root=cfg.ade20k_root, split="training", img_transform=img_tf, mask_transform=mask_tf)
     val_ds = ADE20kDataset(root=cfg.ade20k_root, split="validation", img_transform=img_tf, mask_transform=mask_tf)
     train_loader = torch.utils.data.DataLoader(

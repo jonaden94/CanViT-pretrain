@@ -102,3 +102,38 @@ def test_foveated_viewpoints_use_pretraining_scale() -> None:
     assert torch.allclose(uni[0].scales, torch.ones(_B))
     for vp in uni[1:]:
         assert (vp.scales > 0).all() and (vp.scales <= 1.0).all()
+
+
+def test_resize_modes_output_shape_and_geometry() -> None:
+    """Both val modes yield (size, size); center_crop preserves aspect ratio
+    (a circle stays a circle) while squish distorts it. Guards the resize_mode
+    flag lifted into Ade20kConfig/PolicyTrainConfig (default center_crop)."""
+    from PIL import Image, ImageDraw
+
+    from .data import make_val_transforms
+
+    size = 64
+    # 2:1 landscape image with a centered white disk (a distortion probe)
+    img = Image.new("RGB", (128, 64), "black")
+    ImageDraw.Draw(img).ellipse([48, 16, 80, 48], fill="white")  # 32x32 circle, centered
+    mask = Image.new("L", (128, 64), 0)
+
+    for mode in ("center_crop", "squish"):
+        it, mt = make_val_transforms(size, mode)  # type: ignore[arg-type]
+        img_t, mask_t = it(img), mt(mask)
+        assert img_t.shape == (3, size, size), f"{mode}: {img_t.shape}"
+        assert mask_t.shape == (1, size, size), f"{mode}: {mask_t.shape}"
+
+    # geometry: the disk's bounding box in the transformed image
+    def _bbox(mode: str) -> tuple[int, int]:
+        it, _ = make_val_transforms(size, mode)  # type: ignore[arg-type]
+        lum = it(img).mean(0) > 0.5  # bright pixels
+        ys, xs = lum.nonzero(as_tuple=True)
+        return int(xs.max() - xs.min()), int(ys.max() - ys.min())  # (w, h)
+
+    cw, ch = _bbox("center_crop")
+    sw, sh = _bbox("squish")
+    assert abs(cw - ch) <= 2, f"center_crop should keep the circle round: {cw}x{ch}"
+    # squish maps 128x64 -> 64x64, compressing the wide axis 2x: the circle
+    # becomes tall-and-narrow (this is exactly the distortion we're avoiding).
+    assert sh > sw + 4, f"squish should distort the circle's aspect ratio: {sw}x{sh}"

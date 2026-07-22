@@ -196,3 +196,46 @@ byte-unchanged (parity digest holds).
 **Open item:** the pretraining view-scale is NOT stored in the HF config, so
 this is a footgun for every downstream consumer. P6 should write
 `foveated_scale` into the checkpoint metadata at conversion time.
+
+---
+
+# Val resize mode — center_crop default (2026-07-23)
+
+**Problem the user raised:** the val transform was hardcoded `Resize((512,512))`
+squish, which distorts aspect ratio. For foveated/square patchers (biological
+vision) squish is off-distribution and not an option; they need an
+aspect-preserving fit. But if foveated used a different val transform than
+uniform, cross-patcher comparison would break.
+
+**Audit of the four preprocessing sites (all aspect ratios):**
+- pretraining (IN21k, core `preprocess`): `Resize(short)` + `CenterCrop` — PRESERVING.
+- ADE probe TRAIN (dinov3 `make_segmentation_train_transforms`): `FixedSideResize`
+  short side + `RandomCrop(512²)` — PRESERVING.
+- ADE probe VAL: was squish — DISTORTING (only site that distorted).
+- RL policy TRAIN+EVAL: was squish, both splits — DISTORTING.
+
+So squish was an eval-only deviation from how the models were both pretrained
+AND probe-trained; nobody had noticed the uniform train/eval mismatch.
+
+**Decision (user):** lift `resize_mode` into `Ade20kConfig` and
+`PolicyTrainConfig`, default **`center_crop`** (aspect-preserving) for BOTH
+patchers. `make_val_transforms(..., "center_crop")` already existed (resize
+short side → central 512² crop, image + mask). Cost: long-side margins are
+discarded, so val mIoU is over the central crop, not the whole image.
+
+**Comparability:** every existing number (specialize reference, both my gates,
+the qband band, EG-C2F) was measured under squish. So `center_crop` is NOT
+comparable to them — it re-anchors. `--resize-mode squish` reproduces the old
+protocol on demand (kept precisely for validating against the RL repo's
+documented results). Any published cross-run comparison must fix one mode.
+
+Both squish and center_crop still deviate from standard ADE20K protocol (full
+image / native res / sliding window) — internally comparable only, not
+literature-comparable, regardless of choice.
+
+Test: `test_resize_modes_output_shape_and_geometry` (both modes → 512²;
+center_crop keeps a circle round, squish distorts it). Suite 8 green.
+
+**Follow-on (not yet done):** re-run the uniform ADE probe under center_crop to
+establish the new reference; the foveated re-run (after the scale fix) should
+also use center_crop. Neither submitted yet.

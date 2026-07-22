@@ -11,6 +11,8 @@ from canvit_pytorch import resolve_canvit_repo
 
 from ..train.config import FoveatedScaleConfig
 
+ResizeMode = Literal["center_crop", "squish"]
+
 
 def _default_wandb_project() -> str | None:
     return os.environ.get("WANDB_PROJECT")
@@ -84,6 +86,19 @@ class Ade20kConfig:
     # Data augmentation
     aug_scale_range: tuple[float, float] = (0.5, 2.0)
     aug_flip_prob: float = 0.5
+
+    # Validation resize
+    resize_mode: ResizeMode = "center_crop"
+    """How val images/masks are fitted to ``scene_size``. ``center_crop``
+    (default): resize short side then crop the central square — aspect-ratio
+    PRESERVING, so it matches how the backbone was pretrained and how the probe
+    trained (both aspect-preserving); the cost is that long-side margins are
+    discarded, so mIoU is over the central crop. ``squish``: resize to
+    (size, size), distorting aspect ratio — required to reproduce the
+    CanViT-PyTorch-RL documented numbers (qband band / EG-C2F) and the
+    specialize reference, which were all measured under squish. Foveated/square
+    models MUST use an aspect-preserving mode (they model biological vision;
+    squish is off-distribution) — keep the default for them."""
 
     # Logging / checkpoints
     log_every: int = 20

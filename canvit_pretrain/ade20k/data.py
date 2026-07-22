@@ -10,7 +10,7 @@ resize canvit_eval uses.
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal, cast
+from typing import cast
 
 import torch
 from dinov3.eval.segmentation.schedulers import WarmupOneCycleLR
@@ -23,12 +23,10 @@ from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader
 from torchvision import transforms as T
 
-from .config import Ade20kConfig
+from .config import Ade20kConfig, ResizeMode
 
 NUM_CLASSES = 150
 IGNORE_LABEL = 255
-
-ResizeMode = Literal["center_crop", "squish"]
 
 
 class ADE20kDataset(torch.utils.data.Dataset):
@@ -117,7 +115,7 @@ def make_ade20k_loaders(cfg: Ade20kConfig) -> tuple[DataLoader, DataLoader]:
         return img_t, mask_t.squeeze(0)
 
     train_ds = ADE20kDataset(root=cfg.ade20k_root, split="training", joint_transform=train_transform)
-    val_img_tf, val_mask_tf = make_val_transforms(cfg.scene_size, "squish")
+    val_img_tf, val_mask_tf = make_val_transforms(cfg.scene_size, cfg.resize_mode)
     val_ds = ADE20kDataset(root=cfg.ade20k_root, split="validation",
                            img_transform=val_img_tf, mask_transform=val_mask_tf)
 
