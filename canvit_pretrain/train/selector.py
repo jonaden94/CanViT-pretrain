@@ -45,6 +45,119 @@ class Selector(Protocol):
 
 
 @dataclass
+class PolicySelector:
+    """Policy-driven selection through the P1 seam (P4a): featurize the live state
+    with a core StateEncoder, score all candidates with a ViewpointScorer, pick by
+    argmax (deploy semantics) or softmax sampling (on-policy PG). FULL viewpoints
+    (the t0 anchor) delegate to a RandomSelector so patcher-specific FULL handling
+    (foveated fixed-scale) stays in one place.
+
+    The caller controls grad/eval context (run inside torch.no_grad() + net.eval()
+    for pure deployment; leave grad on train-mode net for in-graph training). After
+    each select() the aux needed for a training loss is stashed on `last_aux`
+    (feats, flat_idx, scores) — the joint trainer (P4b) reads it; deployment-only
+    callers ignore it."""
+
+    net: object  # ViewpointScorer (duck-typed: feats -> [B, n_scale, cpa, cpa])
+    encoder: object  # StateEncoder (duck-typed: state -> feats); reset() per rollout
+    vp_flat: Tensor  # [A, 3] (cy, cx, scale) candidate table
+    fallback: "RandomSelector"  # FULL handling + rollout_scales draw
+    mode: str = "argmax"  # "argmax" (deploy/ε-greedy base) | "sample" (PG on-policy)
+    generator: torch.Generator | None = None
+    last_aux: dict | None = None
+
+    def start_rollout(
+        self, *, t0_type: ViewpointType, batch_size: int, device: torch.device
+    ) -> RolloutCtx:
+        if hasattr(self.encoder, "reset"):
+            self.encoder.reset()  # type: ignore[attr-defined]
+        self.last_aux = None
+        return self.fallback.start_rollout(t0_type=t0_type, batch_size=batch_size, device=device)
+
+    def select(
+        self,
+        *,
+        vp_type: ViewpointType,
+        ctx: RolloutCtx,
+        t: int,
+        batch_size: int,
+        device: torch.device,
+        state: RecurrentState,
+    ) -> NamedViewpoint:
+        if vp_type == ViewpointType.FULL:
+            return self.fallback.select(
+                vp_type=vp_type, ctx=ctx, t=t, batch_size=batch_size, device=device, state=state
+            )
+        feats = self.encoder(state)  # type: ignore[operator]
+        scores = self.net(feats.float()).reshape(batch_size, -1)  # type: ignore[operator]
+        if self.mode == "sample":
+            probs = torch.softmax(scores.detach().float(), dim=1)
+            idx = torch.multinomial(probs, 1, generator=self.generator).squeeze(1)
+        else:
+            idx = scores.detach().argmax(dim=1)
+        self.last_aux = {"feats": feats, "flat_idx": idx, "scores": scores}
+        acts = self.vp_flat[idx]
+        return NamedViewpoint(
+            name="policy", centers=acts[:, :2].contiguous(), scales=acts[:, 2].contiguous()
+        )
+
+
+@dataclass
+class MixtureSelector:
+    """ε-mixture of random and policy selection — the warmup curriculum AND the
+    DAgger prime_on_policy generalized (master plan §4.2): per SAMPLE, take the
+    policy's pick with probability `p_policy`, else the random selector's. The
+    trainer owns the schedule and just sets `p_policy` each step (0.0 -> pure
+    random = today's behavior; 1.0 -> pure policy). FULL viewpoints always go to
+    the random selector (t0 anchor). `last_mask` records which rows were
+    policy-chosen (credit assignment in P4b)."""
+
+    random_sel: "RandomSelector"
+    policy_sel: PolicySelector
+    p_policy: float = 0.0
+    generator: torch.Generator | None = None
+    last_mask: Tensor | None = None
+
+    def start_rollout(
+        self, *, t0_type: ViewpointType, batch_size: int, device: torch.device
+    ) -> RolloutCtx:
+        self.policy_sel.start_rollout(t0_type=t0_type, batch_size=batch_size, device=device)
+        return self.random_sel.start_rollout(t0_type=t0_type, batch_size=batch_size, device=device)
+
+    def select(
+        self,
+        *,
+        vp_type: ViewpointType,
+        ctx: RolloutCtx,
+        t: int,
+        batch_size: int,
+        device: torch.device,
+        state: RecurrentState,
+    ) -> NamedViewpoint:
+        if vp_type == ViewpointType.FULL or self.p_policy <= 0.0:
+            self.last_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+            return self.random_sel.select(
+                vp_type=vp_type, ctx=ctx, t=t, batch_size=batch_size, device=device, state=state
+            )
+        pol = self.policy_sel.select(
+            vp_type=vp_type, ctx=ctx, t=t, batch_size=batch_size, device=device, state=state
+        )
+        if self.p_policy >= 1.0:
+            self.last_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
+            return pol
+        rnd = self.random_sel.select(
+            vp_type=vp_type, ctx=ctx, t=t, batch_size=batch_size, device=device, state=state
+        )
+        mask = torch.rand(batch_size, device=device, generator=self.generator) < self.p_policy
+        self.last_mask = mask
+        return NamedViewpoint(
+            name="mixture",
+            centers=torch.where(mask[:, None], pol.centers, rnd.centers),
+            scales=torch.where(mask, pol.scales, rnd.scales),
+        )
+
+
+@dataclass
 class RandomSelector:
     """The historical random viewing policy, patcher-aware and content-independent:
     uniform patcher -> safe-box-area sampler (p(s) ∝ (1-s), centers coupled to the
