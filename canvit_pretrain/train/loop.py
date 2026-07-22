@@ -62,6 +62,7 @@ from .data.webdataset import (  # noqa: E402
     init_normalizer_stats_from_tar_raw,
 )
 from .ema import EMATracker  # noqa: E402
+from .joint import build_joint_policy  # noqa: E402
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher  # noqa: E402
 from .probe import load_probe  # noqa: E402
 from .scheduler import warmup_constant_scheduler, warmup_cosine_scheduler  # noqa: E402
@@ -307,6 +308,32 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     scene_size = scene_size_px(G, patch_size)
     log.info(f"Grid size: {G}, scene size: {scene_size}px")
 
+    # === P4b: joint task+policy training (off unless cfg.rl.use_rl) ===
+    # Built on the raw model (== core_model; DDP wraps `model` later). The scorer is
+    # NOT DDP-wrapped — its grads are AllReduced manually (JointPolicy.allreduce_grads)
+    # and its params broadcast once so all ranks start identical.
+    joint = None
+    if cfg.rl.use_rl:
+        assert not (not cfg.rl.feats_detached and ddp.is_dist()), (
+            "coupled policy gradient (rl.feats_detached=False) under DDP is not supported: "
+            "the policy->backbone path runs through the unwrapped core model and bypasses "
+            "DDP's AllReduce (silent per-rank drift). Use feats_detached=True for multi-GPU."
+        )
+        policy_gen = torch.Generator(device=cfg.device)
+        policy_gen.manual_seed(cfg.seed + ddp.rank())  # decorrelate exploration per rank
+        joint = build_joint_policy(
+            core_model=model, rl=cfg.rl, device=cfg.device, canvas_grid=G,
+            min_viewpoint_scale=cfg.min_viewpoint_scale, foveated_scale=cfg.foveated_scale,
+            generator=policy_gen,
+        )
+        if ddp.is_dist():
+            joint.broadcast(src=0)  # identical scorer init across ranks
+        log.info(
+            f"P4b joint policy: objective={cfg.rl.objective} action={joint.scorer.action_space} "
+            f"scorer_params={count_parameters(joint.scorer):,} feats_detached={cfg.rl.feats_detached} "
+            f"keep_random_branch={cfg.rl.keep_random_branch} rl_weight={cfg.rl.rl_weight}"
+        )
+
     # Extract start_step from checkpoint scheduler state (BEFORE creating loaders)
     # NOTE: PyTorch LRScheduler uses "last_epoch" but we call scheduler.step() once per
     # training step, so last_epoch == number of gradient updates == our "step"
@@ -395,7 +422,19 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     log.info(f"Model total: {n_total:,}, trainable: {n_trainable:,} ({100 * n_trainable / n_total:.1f}%)")
     exp.log_parameters({"trainable_params": n_trainable, "total_params": n_total})
 
-    optimizer = torch.optim.AdamW(trainable, lr=cfg.peak_lr, weight_decay=cfg.weight_decay)
+    if joint is not None:  # separate param group so the policy carries its own lr/wd
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": trainable, "lr": cfg.peak_lr, "weight_decay": cfg.weight_decay},
+                {"params": list(joint.scorer.parameters()), "lr": cfg.rl.policy_lr,
+                 "weight_decay": cfg.rl.policy_weight_decay},
+            ],
+            lr=cfg.peak_lr, weight_decay=cfg.weight_decay,
+        )
+        log.info(f"Policy param group: lr={cfg.rl.policy_lr:.2e} wd={cfg.rl.policy_weight_decay:.2e} "
+                 f"(warms up with the model; holds/decays with the schedule)")
+    else:
+        optimizer = torch.optim.AdamW(trainable, lr=cfg.peak_lr, weight_decay=cfg.weight_decay)
     start_lr = cfg.start_lr if cfg.start_lr is not None else cfg.peak_lr / cfg.warmup_steps
     if cfg.cosine_total_steps is not None:
         scheduler = warmup_cosine_scheduler(
@@ -436,6 +475,17 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
     if weights_to_load is not None:
         load_state_dict_flexible(model, weights_to_load)
+
+    # Restore the policy sidecar (scorer + reward standardizers + PG dual) written
+    # beside the checkpoint. Present for resume/seed from a prior joint run; absent =>
+    # keep the fresh scorer (e.g. seeding policy training from a distill-only run).
+    if joint is not None and ckpt_path_to_load is not None:
+        policy_sidecar = ckpt_path_to_load.with_suffix(".policy.pt")
+        if policy_sidecar.exists():
+            joint.load_state_dict(torch.load(policy_sidecar, map_location=cfg.device, weights_only=False))
+            log.info(f"Restored policy sidecar from {policy_sidecar}")
+        else:
+            log.info(f"No policy sidecar at {policy_sidecar} — starting policy fresh")
 
     # === RESTORE OPTIMIZER/SCHEDULER (RESUME mode only) ===
     if ckpt_data is not None and not is_seeding:
@@ -715,6 +765,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                         if isinstance(train_loader, WebDatasetTrainLoader) else None
                     ),
                 )
+                if joint is not None:  # policy state rides in a sidecar (schema untouched)
+                    torch.save(joint.state_dict(), ckpt_path.with_suffix(".policy.pt"))
                 update_symlink(ckpt_dir / "latest.pt", ckpt_path)
             ddp.barrier()
 
@@ -728,6 +780,9 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
             optimizer.zero_grad()
             t_gpu_start = time.perf_counter()
+
+            if joint is not None:
+                joint.set_prime_for_step(step)  # ε-curriculum
 
             step_metrics = training_step(
                 model=model,  # DDP-wrapped if dist; step.py unwraps via getattr(model, "module", model)
@@ -749,8 +804,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 min_viewpoint_scale=cfg.min_viewpoint_scale,
                 foveated_scale=cfg.foveated_scale,
                 amp_ctx=amp_ctx,
-
                 collect_viz=do_pca,
+                joint=joint,
             )
 
             # === DIAGNOSTIC: did DDP AllReduce the gradients for each top-level
@@ -817,6 +872,10 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                     )
 
             grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
+            if joint is not None:
+                if ddp.is_dist():  # scorer isn't DDP-wrapped — average its grads by hand
+                    joint.allreduce_grads()
+                torch.nn.utils.clip_grad_norm_(joint.scorer.parameters(), cfg.grad_clip)
             optimizer.step()
             scheduler.step()
             t_gpu = time.perf_counter() - t_gpu_start
@@ -857,6 +916,10 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 metrics["train/lr"] = lr
                 metrics["train/grad_norm"] = grad_norm
                 metrics["train/continue_prob"] = cfg.continue_prob
+                if joint is not None and joint.last_step:
+                    metrics["train/policy_loss"] = ddp.all_reduce_mean(joint.last_step["policy_loss"]).item()
+                    metrics["train/reward_frac"] = ddp.all_reduce_mean(joint.last_step["reward_frac"]).item()
+                    metrics["train/prime_on_policy"] = joint.last_step["prime_on_policy"]
                 # Data vs GPU bottleneck: cumulative percentages
                 data_pct = 0.0
                 t_total_so_far = t_data_total + t_gpu_total
@@ -960,6 +1023,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 if isinstance(train_loader, WebDatasetTrainLoader) else None
             ),
         )
+        if joint is not None:
+            torch.save(joint.state_dict(), ckpt_path.with_suffix(".policy.pt"))
         update_symlink(ckpt_dir / "latest.pt", ckpt_path)
     ddp.barrier()
 

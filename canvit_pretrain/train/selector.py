@@ -63,6 +63,13 @@ class PolicySelector:
     vp_flat: Tensor  # [A, 3] (cy, cx, scale) candidate table
     fallback: "RandomSelector"  # FULL handling + rollout_scales draw
     mode: str = "argmax"  # "argmax" (deploy/ε-greedy base) | "sample" (PG on-policy)
+    prime_on_policy: float = 1.0
+    """argmax mode only: fraction of picks taken by the net's argmax; the rest are a
+    uniformly random CANDIDATE (ε-greedy DAgger). 1.0 (default) = pure argmax =
+    deploy, and consumes NO RNG (P4a parity). <1.0 draws the ε-greedy mask/index."""
+    feats_detached: bool = False
+    """Detach the state before featurizing, so the policy gradient reaches only the
+    scorer (not the backbone). Default False keeps P4a's no_grad-context behavior."""
     generator: torch.Generator | None = None
     last_aux: dict | None = None
 
@@ -88,13 +95,22 @@ class PolicySelector:
             return self.fallback.select(
                 vp_type=vp_type, ctx=ctx, t=t, batch_size=batch_size, device=device, state=state
             )
-        feats = self.encoder(state)  # type: ignore[operator]
+        if self.feats_detached:  # cut the backbone from the policy graph (scorer still learns)
+            with torch.no_grad():
+                feats = self.encoder(state)  # type: ignore[operator]
+        else:
+            feats = self.encoder(state)  # type: ignore[operator]
         scores = self.net(feats.float()).reshape(batch_size, -1)  # type: ignore[operator]
         if self.mode == "sample":
             probs = torch.softmax(scores.detach().float(), dim=1)
             idx = torch.multinomial(probs, 1, generator=self.generator).squeeze(1)
         else:
             idx = scores.detach().argmax(dim=1)
+            if self.prime_on_policy < 1.0:  # ε-greedy DAgger: mix in random candidates
+                a = scores.shape[1]
+                rand_idx = torch.randint(a, (batch_size,), device=device, generator=self.generator)
+                on_pol = torch.rand(batch_size, device=device, generator=self.generator) < self.prime_on_policy
+                idx = torch.where(on_pol, idx, rand_idx)
         self.last_aux = {"feats": feats, "flat_idx": idx, "scores": scores}
         acts = self.vp_flat[idx]
         return NamedViewpoint(

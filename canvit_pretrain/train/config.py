@@ -45,6 +45,63 @@ class FoveatedScaleConfig:
 
 
 @dataclass
+class JointPolicyConfig:
+    """Joint task+policy training (unification P4b): learn a ViewpointScorer *while*
+    the distill task trains, driving the glimpses from the policy's candidate grid.
+
+    OFF by default (``use_rl=False``) — the training loop then builds the historical
+    RandomSelector and behaves byte-for-byte like pre-P4b pretraining (the parity
+    gate). When ON, the exploratory glimpses (t>=1) of the policy branches come from
+    the scorer's discrete candidate grid via ε-greedy (QReg) or on-policy sampling
+    (PG); the per-glimpse reward is the fractional reduction in per-image distill MSE
+    (master plan §3), standardized per depth. The action space is the fixation grid
+    for foveated/square models and the safe-box grid for uniform.
+    """
+
+    use_rl: bool = False
+    """Master off-switch. False => no policy, no behavior change (parity gate)."""
+    rl_weight: float = 1.0
+    """Scale on the policy loss added to the per-glimpse distill loss."""
+    feats_detached: bool = True
+    """Detach the canvas state feeding the scorer, so the policy gradient reaches
+    ONLY the scorer (backbone/head shaped purely by the distill loss). False couples
+    them: the policy loss also reshapes the backbone ('glimpse-plannable' features),
+    more ambitious and more memory (backbone activations enter the policy graph)."""
+    keep_random_branch: bool = False
+    """False (default): every branch is a policy branch (all t>=1 glimpses are the
+    policy's grid picks; the distill loss trains on exactly those states). True:
+    the FULL-start branches become policy branches while the RANDOM-start branches
+    stay pure continuous-random (distill-only, no policy loss) for broad view
+    coverage — needs n_full_start_branches>=1 and n_random_start_branches>=1."""
+
+    # Objective
+    objective: Literal["qreg", "pg"] = "qreg"
+    prime_on_policy: float = 0.5
+    """QReg ε-greedy: fraction of glimpses taken by the net's argmax (rest = a random
+    candidate). Ramped 0 -> this over ``policy_warmup_steps`` (the ε-curriculum)."""
+    dueling: bool = True
+    entropy_bonus: float = 0.01
+    entropy_target: float | None = 1.0
+    alpha_lr: float = 0.05
+    policy_warmup_steps: int = 0
+    """Steps to ramp prime_on_policy 0 -> its target (0 = constant target from step 0)."""
+
+    # Action space / scorer net
+    centers_per_axis: int = 16
+    scales: tuple[float, ...] = (0.5, 0.25)
+    """Uniform-patcher candidate scales; ignored for foveated/square (fixation grid)."""
+    width: int = 128
+    block_layers: int = 3
+    feature_groups: tuple[str, ...] = ("cos_prev", "cos_init", "ln_feat", "feat_delta")
+    """= policy.features.INTRINSIC_GROUPS — the probe-free groups (distill has no probe)."""
+
+    # Target standardizer + policy optimizer
+    target_momentum: float = 0.997
+    policy_lr: float = 2e-4
+    policy_weight_decay: float = 1e-2
+
+
+@dataclass
 class Config:
     # Teacher
     teacher_repo_id: str = TEACHER_REPO_ID
@@ -75,6 +132,9 @@ class Config:
     foveated_scale: FoveatedScaleConfig = field(default_factory=FoveatedScaleConfig)
     """Per-glimpse view-scale sampling for foveated/square patchers (RANDOM
     glimpses). Default: fixed scale 1.0 = current full-image foveation."""
+    rl: JointPolicyConfig = field(default_factory=JointPolicyConfig)
+    """Joint task+policy training (P4b). OFF by default => byte-identical to
+    pre-P4b pretraining. See :class:`JointPolicyConfig`."""
     chunk_size: int = 2  # BPTT chunk size (glimpses per chunk, gradient flows within)
     continue_prob: float = 0.5  # prob of adding another chunk to trajectory
     enable_scene_patches_loss: bool = True  # Scene (canvas) patch reconstruction loss

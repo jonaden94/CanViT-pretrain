@@ -74,3 +74,17 @@ class DistillTask:
             scene_pred=scene_pred,
             cls_pred=cls_pred,
         )
+
+    def per_image_loss(self, out: CanViTOutput) -> Tensor:
+        """Per-image combined distill MSE [B] — the policy reward's raw material
+        (master plan §3: ``r_t = (L_t - L_{t+1}) / L_t``). Same active terms as
+        ``step_loss`` but reduced per image instead of to a scalar. Caller detaches."""
+        scene_pred = out.scene_pred  # type: ignore[attr-defined]  # [B, G^2, teacher_dim]
+        cls_pred = out.cls_pred  # type: ignore[attr-defined]  # [B, teacher_dim]
+        parts: list[Tensor] = []
+        if self.enable_scene_patches_loss:
+            parts.append((scene_pred - self.scene_target).pow(2).mean(dim=(1, 2)))
+        if self.enable_scene_cls_loss:
+            parts.append((cls_pred - self.cls_target).pow(2).mean(dim=1))
+        assert parts, "At least one loss must be enabled"
+        return torch.stack(parts).sum(dim=0)

@@ -4,7 +4,7 @@ import random
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import torch
@@ -22,6 +22,9 @@ from .viewpoint import Viewpoint as NamedViewpoint
 from .viewpoint import ViewpointType
 from .viz.image import imagenet_denormalize_to_numpy
 from .viz.sample import VizSampleData, extract_sample0_viz
+
+if TYPE_CHECKING:  # heavy (pulls the scorer net / timm) — kept out of the runtime path
+    from .joint import JointPolicy
 
 __all__ = ["LossOutput", "StepMetrics", "TrainVizData", "training_step"]  # LossOutput re-exported from .task
 
@@ -105,6 +108,7 @@ def training_step(
     collect_viz: bool = False,
     selector: Selector | None = None,
     task: Task | None = None,
+    joint: "JointPolicy | None" = None,
 ) -> StepMetrics:
     """Training with truncated BPTT and independent branches.
 
@@ -115,6 +119,12 @@ def training_step(
     None (the default) builds the historical RandomSelector / DistillTask from the
     other kwargs — behavior is then byte-identical to the pre-seam code (P1 parity
     gate). Passing them explicitly is how future phases plug policies and tasks.
+
+    ``joint`` (P4b) turns on joint task+policy training: its policy branches are
+    FULL-anchored and their t>=1 glimpses come from the scorer's candidate grid, with
+    an in-graph policy loss (fractional distill-MSE-reduction reward) added to each
+    glimpse's distill loss before the chunk's backward. None (the default) => no
+    policy, parity path. Its per-step policy metrics are stashed on ``joint.last_step``.
     """
     n_branches = n_full_start_branches + n_random_start_branches
     assert n_branches >= 1
@@ -167,6 +177,9 @@ def training_step(
     # Viz collection for first branch only (when enabled)
     viz_data: TrainVizData | None = None
 
+    # Policy-metric accumulation (joint mode only): detached per-step means for logging.
+    pol_acc = {"loss": torch.zeros((), device=device), "reward": torch.zeros((), device=device), "n": 0}
+
     def to_canvit_vp(vp: NamedViewpoint) -> Viewpoint:
         return Viewpoint(centers=vp.centers, scales=vp.scales)
 
@@ -178,8 +191,19 @@ def training_step(
         nonlocal viz_data
         do_viz = collect_viz and branch_idx == 0
 
+        # Joint mode: pick this branch's selector. Policy branches are FULL-anchored
+        # (reward needs a well-defined t0 loss) and carry the in-graph policy loss;
+        # non-policy branches (keep_random_branch) run pure-random, distill-only.
+        if joint is not None:
+            sel, is_policy = joint.branch_selector(t0_type)
+            if is_policy:
+                t0_type = ViewpointType.FULL
+        else:
+            sel, is_policy = selector, False
+        prev_pi_loss: Tensor | None = None  # per-image distill loss at t-1 (reward denominator)
+
         # Selector owns the per-rollout draw (e.g. foveated per_rollout scales).
-        ctx = selector.start_rollout(t0_type=t0_type, batch_size=B, device=device)
+        ctx = sel.start_rollout(t0_type=t0_type, batch_size=B, device=device)
 
         # Capture initial state for viz (before any glimpses)
         if do_viz:
@@ -196,13 +220,15 @@ def training_step(
 
         # t0 forward
         with amp_ctx:
-            vp0_named = selector.select(
+            vp0_named = sel.select(
                 vp_type=t0_type, ctx=ctx, t=0, batch_size=B, device=device, state=state_init
             )
             vp0 = to_canvit_vp(vp0_named)
             step_out = forward_step(state=state_init, vp=vp0)
             out = step_out.out
             L = task.step_loss(out)
+        if is_policy:  # seed the reward denominator with the FULL-anchor loss (no policy loss at t0)
+            prev_pi_loss = task.per_image_loss(out).detach()  # type: ignore[attr-defined]
 
         if do_viz:
             assert viz_data is not None
@@ -238,7 +264,7 @@ def training_step(
         for t in range(1, n_glimpses):
             # t>=1: use pre-computed schedule (currently all-RANDOM, see t1_schedule)
             vp_type = t1_schedule[t - 1][branch_idx]
-            vp_named = selector.select(
+            vp_named = sel.select(
                 vp_type=vp_type, ctx=ctx, t=t, batch_size=B, device=device, state=chunk.state
             )
             vp = to_canvit_vp(vp_named)
@@ -256,6 +282,23 @@ def training_step(
                 )
 
             chunk.chunk_combined_loss = chunk.chunk_combined_loss + L.combined.float()
+
+            if is_policy:
+                # Reward = fractional per-image distill-MSE reduction from t-1 to t
+                # (detached); the scorer's train-mode scores for the taken candidate
+                # carry grad, so this glimpse's policy loss backprops with the chunk.
+                assert joint is not None and prev_pi_loss is not None
+                cur_pi = task.per_image_loss(out).detach()  # type: ignore[attr-defined]
+                reward = (prev_pi_loss - cur_pi) / prev_pi_loss.clamp_min(1e-4)
+                prev_pi_loss = cur_pi
+                aux = sel.last_aux  # type: ignore[attr-defined]
+                assert aux is not None, "policy selector produced no aux for a RANDOM glimpse"
+                ploss = joint.glimpse_loss(depth=t, scores=aux["scores"], flat_idx=aux["flat_idx"], reward=reward)
+                chunk.chunk_combined_loss = chunk.chunk_combined_loss + ploss
+                pol_acc["loss"] = pol_acc["loss"] + ploss.detach()
+                pol_acc["reward"] = pol_acc["reward"] + reward.mean().detach()
+                pol_acc["n"] += 1
+
             chunk.total_combined_loss = chunk.total_combined_loss + L.combined.detach().float()
             chunk.total_scene_patches_loss = chunk.total_scene_patches_loss + L.scene_patches_loss.detach().float()
             chunk.total_scene_cls_loss = chunk.total_scene_cls_loss + L.scene_cls_loss.detach().float()
@@ -324,6 +367,14 @@ def training_step(
 
     all_losses = [m.loss for m in full_metrics] + [m.loss for m in random_metrics]
     total_loss = torch.stack(all_losses).mean()
+
+    if joint is not None and pol_acc["n"] > 0:  # detached scalars; caller .item()s when logging
+        n = pol_acc["n"]
+        joint.last_step = {
+            "policy_loss": pol_acc["loss"] / n,
+            "reward_frac": pol_acc["reward"] / n,
+            "prime_on_policy": joint.policy_selector.prime_on_policy,
+        }
 
     return StepMetrics(
         total_loss=total_loss,
