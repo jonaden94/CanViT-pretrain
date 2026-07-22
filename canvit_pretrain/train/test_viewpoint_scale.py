@@ -1,10 +1,30 @@
-"""Tests for foveated/square per-glimpse view-scale sampling."""
+"""Tests for per-glimpse viewpoint sampling: the foveated/square view-scale
+distributions AND the uniform-patcher safe-box sampler. These pin the canonical
+random-viewpoint distributions (unification master plan §3) so neither branch
+can silently change during the harness refactor."""
 
 import torch
 
-from .viewpoint import random_foveated_viewpoint, sample_view_scales
+from .viewpoint import Viewpoint, random_foveated_viewpoint, sample_view_scales
 
 _CPU = torch.device("cpu")
+
+
+def test_named_random_uniform_branch_safebox_law():
+    """Viewpoint.random (the uniform-patcher branch): scales bounded,
+    p(s) ∝ (1-s) favors zoom-in, centers per-sample coupled to |c| ≤ 1-s."""
+    vp = Viewpoint.random(batch_size=50_000, device=_CPU, min_scale=0.05, max_scale=1.0)
+    s, c = vp.scales, vp.centers
+    assert s.min() >= 0.05 - 1e-6 and s.max() <= 1.0 + 1e-6
+    # p(s) ∝ (1-s) on [0.05, 1] -> E[s] ≈ 0.367, far below the 0.525 midpoint.
+    assert float(s.mean()) < 0.45
+    # strongly zoom-in-skewed: mass below 0.35 dwarfs mass above 0.65
+    # (a plain uniform sampler would make these roughly equal).
+    frac_low = float((s < 0.35).float().mean())
+    frac_high = float((s > 0.65).float().mean())
+    assert frac_low > 2 * frac_high
+    # per-sample safe-box coupling: the crop always fits inside the scene.
+    assert bool((c.abs() <= (1 - s).unsqueeze(1) + 1e-6).all())
 
 
 def test_uniform_scales_range_includes_zoom_out():
