@@ -36,7 +36,10 @@ below) — a SLURM job the user submits. Suite: 65 passed; parity digest unchang
 - Viewpoints: core `random_viewpoints` (identical L²-safe-box law; same call
   specialize made) — val always starts full-scene, train per `train_start_full`.
 
-## Gate (pending — user submits)
+## Gate — SUBMITTED 2026-07-22: job **15025278** (pinned PRETRAIN=7e5afac,
+PYTORCH=524d27c; log `logs/ade20k/job-15025278.log`). Compare per-timestep val
+mIoU vs the specialize reference run on the same checkpoint (wandb project of
+`train_ade20k_uniform16_best.sbatch`, launched 2026-07-22).
 
 Reference: the specialize ADE probe run on exp22-uniform16 best checkpoint
 (`.../exp22-uniform16/checkpoints/step-1515520-hf`, specialize launcher

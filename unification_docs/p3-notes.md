@@ -46,7 +46,12 @@ New `[policy]` extra (timm). 5 CPU tests incl. hub round-trip + legacy config.
 5. Data: squish transforms, no augmentation (the RL repo's protocol), its own
    loader in rl_train (train aug pipeline stays probe-training-only).
 
-## Gate (pending — user submits; needs GPU + HF access)
+## Gate — SUBMITTED 2026-07-22: job **15025279** (`--run-name qband-port --seed 0`,
+pinned PRETRAIN=7e5afac, PYTORCH=524d27c; log `logs/ade20k/policy-job-15025279.log`;
+run dir under `checkpoints/canvit-ade20k-policies/`). Pass = final best val CE
+(mean t1–t4) inside the qband band in CanViT-PyTorch-RL `docs/qband_results.md`.
+
+## Gate criteria (original)
 
 1. **Published-ckpt load check**: `ViewpointScorer.from_pretrained(DEFAULT_POLICY_REPO)`
    through the CORE class (needs network; mechanism covered by round-trip test).
