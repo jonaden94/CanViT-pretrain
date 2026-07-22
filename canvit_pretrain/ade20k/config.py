@@ -9,6 +9,8 @@ from typing import Literal
 
 from canvit_pytorch import resolve_canvit_repo
 
+from ..train.config import FoveatedScaleConfig
+
 
 def _default_wandb_project() -> str | None:
     return os.environ.get("WANDB_PROJECT")
@@ -58,6 +60,14 @@ class Ade20kConfig:
     min_vp_scale: float = 0.05
     max_vp_scale: float = 1.0
     train_start_full: bool = False
+    foveated_scale: FoveatedScaleConfig = field(default_factory=FoveatedScaleConfig)
+    """Foveated/square patcher only: the view-scale law for the probe rollout,
+    which MUST match how the backbone was pretrained — the foveated patcher
+    derives its fixation window as ``fix_size = scale * H``, so glimpses at an
+    unseen scale are out of distribution and actively degrade the canvas (this
+    is not a soft mismatch: it shows up as mIoU *falling* with more glimpses).
+    Pass the pretrain run's value, e.g. ``--foveated-scale.fixed-scale 2.0`` for
+    exp22-fovi. Ignored for uniform models, which use ``min/max_vp_scale``."""
 
     # Training
     batch_size: int = 16

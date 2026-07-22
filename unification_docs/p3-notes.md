@@ -71,3 +71,49 @@ run dir under `checkpoints/canvit-ade20k-policies/`). Pass = final best val CE
   `rollout_and_loss` + unfreeze parts of seg + TBPTT-chunk the seg forwards.
 - Distill-task policy: swap the reward for per-glimpse distill-MSE reduction and
   `feature_groups=INTRINSIC_GROUPS` (core supports both already).
+
+---
+
+# GATE RESULT (2026-07-23) — PASS. In-graph rollout + BN mode (a) VALIDATED.
+
+Jobs 15025279 (seed 0) / 15025337 (seed 1), PRETRAIN=7e5afac / 2eeaa29,
+PYTORCH=524d27c. QReg, c64, T=5, 8000 steps, `probe-ade20k-40k-s512-c64-in21k`
+on `canvitb16-...-2026-02-02`. Judged as the reference does: best mean(t1–t4)
+val CE.
+
+```
+                                mean(t1-4) val CE     source
+ qband reference band (8 seeds)   0.6853 ± 0.0007     RL repo docs/qband_results.md
+   per-seed spread of that band   0.6845 … 0.6865     (s2 best, s7 worst)
+ PORT seed 0 (15025279)           0.6855   (@step 6000)
+ PORT seed 1 (15025337)           0.6867   (@step 5000)
+ EG-C2F-c64 (entropy-guided       0.6949
+   coarse-to-fine, deterministic)
+```
+
+- Seed 0 sits **dead center** in the band (+0.3σ of the band mean).
+- Seed 1 is +2σ, marginally above the reference's own worst seed (0.6865) — at
+  the edge, not outside it in any meaningful sense given n=2 vs n=8.
+- Both beat the **EG-C2F baseline by 0.008–0.009 CE (>10σ of the band spread)**,
+  reproducing the headline claim the RL repo makes for the learned policy.
+
+**What this validates:** the two deliberate deviations from the RL repo — the
+**in-graph rollout** (selection forward IS the training forward; no
+collect-detached-then-reforward) and **BN mode (a)** (train-mode rollout
+forward, accepting the DAgger deviation) — reproduce the original band. The
+fallback (b) (eval-mode-with-grad, master plan §4.3) is NOT needed. **P4b is
+unblocked.**
+
+**Gap to close:** the port logs val CE only; the reference band reports CE *and*
+mIoU (42.65→44.97 over t1–t4), and mIoU is what the probe runs report, so
+policy runs are currently not comparable to probe runs. Add mIoU to
+`rl_train.evaluate` (cheap — `mIoUAccumulator` already exists in
+`ade20k/metrics.py`). Filed as a P4b prerequisite.
+
+**Baseline availability (answers "do we even have a reference?"):** yes, for the
+policy — both the qband band and EG-C2F are documented *numbers* in
+`qband_results.md`, with the EG-C2F measurement data under
+`docs/data/measured_baselines/egc2f_c64_t5_ce/`. They are not yet *runnable*
+here (the baselines module wasn't ported). P6 ports `baselines.figure4b` into
+`canvit_eval` so EG-C2F / random / coarse-to-fine can be re-measured on our own
+checkpoints instead of cited from the RL repo's runs.

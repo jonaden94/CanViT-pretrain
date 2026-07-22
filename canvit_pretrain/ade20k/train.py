@@ -82,11 +82,23 @@ def train(cfg: Ade20kConfig) -> None:
     ).to(device)
     seg.canvit.requires_grad_(False)
     seg.canvit.eval()
-    full_image = consumes_full_image(seg)
+    # Same predicate names two things: how the glimpse is fed (full image vs
+    # pre-crop) and which random-viewpoint law applies (foveated vs safe-box).
+    full_image = is_foveated = consumes_full_image(seg)
     log.info(
         f"  backbone FROZEN ({sum(p.numel() for p in seg.canvit.parameters()) / 1e6:.1f}M params), "
         f"patcher={'foveated/square (full-image)' if full_image else 'uniform (pre-crop)'}"
     )
+    if is_foveated:
+        fs = cfg.foveated_scale
+        detail = f"fixed_scale={fs.fixed_scale}" if fs.mode == "fixed" else (
+            f"{fs.distribution} in [{fs.min_scale}, {fs.max_scale}]"
+        )
+        log.warning(
+            f"  foveated view scale: mode={fs.mode}, {detail} — this MUST match the "
+            f"backbone's pretraining scale or every glimpse is out of distribution "
+            f"(symptom: mIoU falls as glimpses accumulate)."
+        )
 
     patch_size = seg.canvit.backbone.patch_size_px
     canvas_grid = cfg.canvas_grid if cfg.canvas_grid is not None else cfg.scene_size // patch_size
@@ -151,6 +163,7 @@ def train(cfg: Ade20kConfig) -> None:
                         vi.shape[0], device, cfg.n_timesteps,
                         min_scale=cfg.min_vp_scale, max_scale=cfg.max_vp_scale,
                         start_with_full_scene=True,
+                        is_foveated=is_foveated, foveated_scale=cfg.foveated_scale,
                     )
                     with amp_ctx:
                         hidden = rollout_canvas_hidden(
@@ -178,6 +191,7 @@ def train(cfg: Ade20kConfig) -> None:
             B, device, cfg.n_timesteps,
             min_scale=cfg.min_vp_scale, max_scale=cfg.max_vp_scale,
             start_with_full_scene=cfg.train_start_full,
+            is_foveated=is_foveated, foveated_scale=cfg.foveated_scale,
         )
         with amp_ctx:
             hidden = rollout_canvas_hidden(

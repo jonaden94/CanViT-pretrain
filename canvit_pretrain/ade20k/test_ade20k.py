@@ -77,3 +77,28 @@ def test_glimpse_px_token_guard() -> None:
         derive_glimpse_px(seg, 129)  # not stride-aligned
     with pytest.raises(AssertionError):
         derive_glimpse_px(seg, 160)  # aligned but 10 tokens != grid 8
+
+
+def test_foveated_viewpoints_use_pretraining_scale() -> None:
+    """Regression (job 15025338): the probe rollout must sample the FOVEATED scale
+    law, not the uniform safe-box one. exp22-fovi pretrained at fixed_scale=2.0;
+    feeding it safe-box scales (<=1) made mIoU DROP with each glimpse (0.217 ->
+    0.198) because every glimpse was out of distribution."""
+    from ..train.config import FoveatedScaleConfig
+
+    fs = FoveatedScaleConfig(mode="fixed", fixed_scale=2.0)
+    vps = make_random_viewpoints(
+        _B, _DEVICE, 4, min_scale=0.05, max_scale=1.0, start_with_full_scene=True,
+        is_foveated=True, foveated_scale=fs,
+    )
+    # mode='fixed' => EVERY glimpse (including the t0 anchor) at the training scale
+    for vp in vps:
+        assert torch.allclose(vp.scales, torch.full((_B,), 2.0)), f"{vp.scales} != 2.0"
+
+    # uniform path untouched: safe-box law, scales in (0, 1], t0 full scene
+    uni = make_random_viewpoints(
+        _B, _DEVICE, 4, min_scale=0.05, max_scale=1.0, start_with_full_scene=True,
+    )
+    assert torch.allclose(uni[0].scales, torch.ones(_B))
+    for vp in uni[1:]:
+        assert (vp.scales > 0).all() and (vp.scales <= 1.0).all()

@@ -134,3 +134,65 @@ on an exp22-fovi checkpoint must train end-to-end (no reference numbers — new)
 - ADE20K data root: specialize reads its own dataset dir; RL repo used
   `canvit_eval.config.ade20k_root` — unify on ONE source in the port (check both
   point at the same files before the gate run).
+
+---
+
+# GATE RESULTS (2026-07-23)
+
+## Uniform probe — PASS (job 15025278, PRETRAIN=7e5afac PYTORCH=524d27c)
+
+Unified port vs the specialize reference (job 15023245), same checkpoint
+(`exp22-uniform16/checkpoints/step-1515520-hf`), same recipe, 40k steps,
+`best/canvas_hidden_t*` val mIoU:
+
+```
+ t        t0      t1      t2      t3      t4      t5      t6      t7      t8      t9
+ ref    .37245  .38849  .39699  .40244  .40665  .41179  .41446  .41746  .41910  .42080
+ port   .37013  .38521  .39303  .39983  .40297  .40753  .40959  .41046  .41222  .41403
+ delta  -.0023  -.0033  -.0040  -.0026  -.0037  -.0043  -.0049  -.0070  -.0069  -.0068
+```
+
+Same shape, same monotone rise, same magnitude — the unified rollout reproduces
+specialize's pipeline. **Caveat, stated honestly:** the port is below the
+reference at *every* t and the gap widens slightly with t (0.23 → 0.68 mIoU
+points, ~1.6% relative at t9). That is small but too consistent to call pure
+noise from one run each. Most likely seed/aug-RNG variance (independent probe
+trainings); worth ONE seed-repeat of each to classify before quoting port
+numbers in the paper. Not a blocker for the unification.
+
+## Foveated probe — FAIL, root-caused and FIXED (job 15025338)
+
+`exp22-fovi/checkpoints/step-516096-hf`, val mIoU *decreased* with glimpses:
+
+```
+ t0 .21703  t1 .21304  t2 .20784  t3 .20489  t4 .19915 ... t9 .19804
+```
+
+Monotone DECREASE is the diagnostic: extra glimpses were corrupting the canvas.
+
+**Root cause — foveated view-scale mismatch.** `make_random_viewpoints` was a
+straight port of specialize's uniform-only sampler (core `random_viewpoints`,
+safe-box law, scales ≤ 1) and was applied to the foveated model too. But
+exp22-fovi was pretrained with `--foveated-scale.fixed-scale 2.0`, i.e. *every*
+glimpse at scale 2.0 (mode `fixed`, `center_mode="full_field"`). The foveated
+patcher derives its fixation window as `fix_size = scale * H`, so every probe
+glimpse landed at a scale/center law the backbone had never seen. Pretrain
+itself already learned this lesson — `make_eval_viewpoints_foveated(scale=...)`
+exists precisely for it, and its docstring says "should match the training
+scale — pass `foveated_scale.fixed_scale`". P2's rollout did not inherit it.
+(Low absolute mIoU is separately expected: 516k vs 1516k pretraining steps. The
+*decrease* is the bug.)
+
+**Fix:** `make_random_viewpoints` is now patcher-aware and, for foveated/square,
+delegates to `RandomSelector` — the canonical random policy already extracted
+from the pretraining loop in P1 — so probe and pretraining share one law by
+construction rather than by copy. `Ade20kConfig.foveated_scale:
+FoveatedScaleConfig` exposes it (`--foveated-scale.fixed-scale 2.0`), and the
+trainer logs a WARNING naming the scale, since nothing in `config.json` records
+what the backbone was pretrained at — it must be passed by the caller.
+Regression test: `test_foveated_viewpoints_use_pretraining_scale`. Uniform path
+byte-unchanged (parity digest holds).
+
+**Open item:** the pretraining view-scale is NOT stored in the HF config, so
+this is a footgun for every downstream consumer. P6 should write
+`foveated_scale` into the checkpoint metadata at conversion time.
