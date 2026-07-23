@@ -1,0 +1,303 @@
+"""Task-agnostic, TrainSpec-driven rollout engine (design doc 07 §3/§6).
+
+This is the shared core of the unified harness: one recurrent glimpse rollout that
+every task (distill / ade20k / in1k) drives, with the gradient regime and grad
+routing taken from a :class:`~canvit_pretrain.harness.spec.TrainSpec`. It subsumes
+the historical ``train/step.py::training_step`` (distill's rollout) as the special
+case ``bptt='chunked'`` + backbone-carrying-grad + ``DistillTask`` — the P1 parity
+digest (``9a0100a1a3de3acd``) is the byte-exact regression guard for that case.
+
+Seams (design §3):
+  * ``RolloutTask`` — forward one glimpse (``forward_glimpse``), score the readout
+    (``step_loss``), and expose the per-image loss for the policy reward
+    (``per_image_loss``). The readout type is opaque to the engine.
+  * ``Selector`` (from ``train/selector.py``) — where the next glimpse goes.
+  * ``JointPolicy`` (optional) — the in-graph policy loss, unchanged from P4b.
+
+Gradient regime (``spec.bptt.mode``):
+  * ``none``    — backbone forward under ``no_grad``; only the head/policy carry
+                  graph (probe / frozen-model policy). One backward at rollout end.
+  * ``full``    — backbone carries grad; ONE backward over the whole rollout
+                  (= ``chunked`` with ``chunk_size == n_glimpses``).
+  * ``chunked`` — backbone carries grad; TBPTT: backward + detach every
+                  ``chunk_size`` glimpses. Length is a fixed ``horizon`` or a
+                  stochastic ``continue_prob`` extension (distill).
+
+Grad routing to the backbone is enforced by the caller (via ``requires_grad`` +
+the selector's ``feats_detached``); the engine only decides the ``no_grad`` context
+of the glimpse forward and the backward cadence.
+"""
+
+from __future__ import annotations
+
+import random as _random
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
+
+import torch
+import torch.distributed as dist
+from canvit_pytorch import RecurrentState, Viewpoint
+from torch import Tensor
+
+from canvit_pretrain.harness.spec import BpttSpec
+from canvit_pretrain.train.selector import RandomSelector, Selector
+from canvit_pretrain.train.viewpoint import Viewpoint as NamedViewpoint
+from canvit_pretrain.train.viewpoint import ViewpointType
+
+if TYPE_CHECKING:  # heavy import kept off the runtime path
+    from canvit_pretrain.train.joint import JointPolicy
+
+
+class GlimpseOut(NamedTuple):
+    """What a task returns from ``forward_glimpse``: the opaque ``readout`` that
+    ``step_loss``/``per_image_loss`` consume, plus the recurrent state and VPE to
+    thread to the next glimpse."""
+
+    readout: Any
+    state: RecurrentState
+    vpe: Tensor | None
+
+
+class GlimpseLoss(Protocol):
+    """Minimal contract the engine needs from ``step_loss``'s return value."""
+
+    combined: Tensor  # scalar, with grad — the per-glimpse task loss
+
+
+class TaskLoss(NamedTuple):
+    """Convenience concrete :class:`GlimpseLoss` for tasks whose step loss is a single
+    scalar (ade20k/in1k). Distill returns its richer ``LossOutput`` (also has
+    ``.combined``), so the engine only ever reads ``.combined``."""
+
+    combined: Tensor
+
+
+class RolloutTask(Protocol):
+    """The rollout-facing task seam (design §3.1). The full harness Task protocol
+    adds data/eval/checkpoint methods; the engine only needs these three."""
+
+    def forward_glimpse(
+        self, *, model: Any, images: Tensor, state: RecurrentState,
+        viewpoint: Viewpoint, backbone_no_grad: bool,
+    ) -> GlimpseOut: ...
+
+    def step_loss(self, readout: Any) -> Any:  # -> GlimpseLoss (has .combined)
+        ...
+
+    def per_image_loss(self, readout: Any) -> Tensor:  # [B], for the policy reward
+        ...
+
+
+@dataclass
+class BranchResult:
+    """Per-branch outcome the caller uses for logging/metrics (task-specific)."""
+
+    t0_type: ViewpointType
+    is_policy: bool
+    mean_loss: Tensor          # detached: mean per-glimpse combined loss
+    n_steps: int
+    final_readout: Any         # last-chunk readout (for task metrics)
+
+
+@dataclass
+class RolloutResult:
+    total_loss: Tensor                          # detached mean over branches
+    branches: list[BranchResult] = field(default_factory=list)
+    n_glimpses: int = 0
+    policy_metrics: dict | None = None          # detached per-step means (joint mode)
+
+
+def _to_vp(vp: NamedViewpoint) -> Viewpoint:
+    return Viewpoint(centers=vp.centers, scales=vp.scales)
+
+
+def sample_n_glimpses(bptt: BpttSpec, *, rng: _random.Random | Any = _random) -> int:
+    """Trajectory length. Fixed ``horizon``, or stochastic TBPTT extension
+    (``n=chunk_size``; ``while rand()<continue_prob: n+=chunk_size``) — the latter
+    reproduces distill's historical draw byte-for-byte (same ``random.random()``
+    call sequence)."""
+    if bptt.continue_prob is not None:
+        n = bptt.chunk_size
+        while rng.random() < bptt.continue_prob:
+            n += bptt.chunk_size
+        return n
+    assert bptt.horizon is not None
+    return bptt.horizon
+
+
+def run_rollout(
+    *,
+    model: Any,
+    images: Tensor,
+    task: RolloutTask,
+    selector: Selector,
+    bptt: BpttSpec,
+    branches: list[ViewpointType],
+    canvas_grid_size: int,
+    amp_ctx: Any,
+    task_weight: float = 1.0,
+    joint: "JointPolicy | None" = None,
+    rng: Any = _random,
+) -> RolloutResult:
+    """Run every branch's rollout and return the total loss (backward already
+    called inside, per the TBPTT cadence — no retain_graph). Mirrors the historical
+    ``training_step`` for the distill config so the parity digest is unchanged.
+
+    ``branches`` lists the t0 viewpoint type per branch (design D-D: distill passes
+    ``[FULL]*n_full + [RANDOM]*n_random``; ade20k/in1k pass a single element).
+
+    ``task_weight`` (design §4: ``loss = task_weight*task_loss + policy_weight*policy_loss``)
+    scales the per-glimpse task loss in the graph; the policy loss is already scaled by
+    ``joint.rl_weight`` (== ``policy_weight``). The default 1.0 is byte-exact to the pre-
+    weight path (the ``==1.0`` guard makes the parity config hit the identical expression).
+    """
+    n_branches = len(branches)
+    assert n_branches >= 1
+    assert bptt.chunk_size >= 1
+    device = images.device
+    B = images.shape[0]
+
+    core_model = getattr(model, "module", model)
+    state_init = core_model.init_state(batch_size=B, canvas_grid_size=canvas_grid_size)
+
+    n_glimpses = sample_n_glimpses(bptt, rng=rng)
+    # DDP: each rank samples independently; broadcast so all ranks call backward()
+    # the same number of times (else NCCL allreduce deadlocks).
+    if dist.is_available() and dist.is_initialized():
+        n_t = torch.tensor(n_glimpses, device=device)
+        dist.broadcast(n_t, src=0)
+        n_glimpses = int(n_t.item())
+
+    # Backward cadence: 'none'/'full' => one backward at the end; 'chunked' => every
+    # chunk_size glimpses. 'none' additionally runs the backbone forward under no_grad.
+    backbone_no_grad = bptt.mode == "none"
+    eff_chunk = n_glimpses if bptt.mode in ("none", "full") else bptt.chunk_size
+
+    pol_acc = {"loss": torch.zeros((), device=device), "reward": torch.zeros((), device=device), "n": 0}
+    results: list[BranchResult] = []
+
+    def _tw_loss(L: Any) -> Tensor:
+        """The per-glimpse task loss scaled by ``task_weight`` (design §4). The
+        ``== 1.0`` guard makes the default/parity path hit the identical expression as
+        before (no float multiply), so the digest ``9a0100a1a3de3acd`` is preserved."""
+        lf = L.combined.float()
+        return lf if task_weight == 1.0 else task_weight * lf
+
+    def run_branch(t0_type: ViewpointType) -> BranchResult:
+        # Joint mode: pick this branch's selector. Policy branches are FULL-anchored
+        # and carry the in-graph policy loss; non-policy branches run pure-random.
+        if joint is not None:
+            sel, is_policy = joint.branch_selector(t0_type)
+            if is_policy:
+                t0_type = ViewpointType.FULL
+        else:
+            sel, is_policy = selector, False
+        prev_pi_loss: Tensor | None = None
+
+        ctx = sel.start_rollout(t0_type=t0_type, batch_size=B, device=device)
+
+        # t0 forward
+        with amp_ctx:
+            vp0_named = sel.select(vp_type=t0_type, ctx=ctx, t=0, batch_size=B, device=device, state=state_init)
+            vp0 = _to_vp(vp0_named)
+            gout = task.forward_glimpse(
+                model=model, images=images, state=state_init, viewpoint=vp0, backbone_no_grad=backbone_no_grad,
+            )
+            L = task.step_loss(gout.readout)
+        if is_policy:  # seed the reward denominator with the FULL-anchor loss (no policy loss at t0)
+            prev_pi_loss = task.per_image_loss(gout.readout).detach()
+
+        chunk_loss = _tw_loss(L)
+        total_detached = L.combined.detach().float()
+        n_steps = 1
+        state = gout.state
+        final_readout = gout.readout
+
+        # chunk_size==1: t0 is already a complete chunk.
+        if eff_chunk == 1:
+            (chunk_loss / n_glimpses / n_branches).backward()
+            if n_glimpses > 1:
+                state = RecurrentState(canvas=gout.state.canvas.detach(),
+                                       recurrent_cls=gout.state.recurrent_cls.detach())
+                chunk_loss = torch.zeros((), device=device)
+
+        for t in range(1, n_glimpses):
+            vp_named = sel.select(vp_type=ViewpointType.RANDOM, ctx=ctx, t=t, batch_size=B, device=device, state=state)
+            vp = _to_vp(vp_named)
+            with amp_ctx:
+                gout = task.forward_glimpse(
+                    model=model, images=images, state=state, viewpoint=vp, backbone_no_grad=backbone_no_grad,
+                )
+                L = task.step_loss(gout.readout)
+
+            chunk_loss = chunk_loss + _tw_loss(L)
+
+            if is_policy:
+                assert joint is not None and prev_pi_loss is not None
+                cur_pi = task.per_image_loss(gout.readout).detach()
+                reward = (prev_pi_loss - cur_pi) / prev_pi_loss.clamp_min(1e-4)
+                prev_pi_loss = cur_pi
+                aux = sel.last_aux  # type: ignore[attr-defined]
+                assert aux is not None, "policy selector produced no aux for a RANDOM glimpse"
+                ploss = joint.glimpse_loss(depth=t, scores=aux["scores"], flat_idx=aux["flat_idx"], reward=reward)
+                chunk_loss = chunk_loss + ploss
+                pol_acc["loss"] = pol_acc["loss"] + ploss.detach()
+                pol_acc["reward"] = pol_acc["reward"] + reward.mean().detach()
+                pol_acc["n"] += 1
+
+            total_detached = total_detached + L.combined.detach().float()
+            final_readout = gout.readout
+            n_steps += 1
+
+            is_chunk_end = ((t + 1) % eff_chunk == 0)
+            is_last = (t == n_glimpses - 1)
+            if is_chunk_end:
+                (chunk_loss / n_glimpses / n_branches).backward()  # no retain_graph
+                if not is_last:
+                    state = RecurrentState(canvas=gout.state.canvas.detach(),
+                                           recurrent_cls=gout.state.recurrent_cls.detach())
+                    chunk_loss = torch.zeros((), device=device)
+                else:
+                    state = gout.state
+            else:
+                state = gout.state
+
+        # A trailing partial chunk (n_glimpses not a multiple of eff_chunk) still
+        # needs its backward. For distill (chunk_size divides its stochastic length
+        # by construction) this never fires, so the parity path is unaffected.
+        if n_glimpses % eff_chunk != 0:
+            (chunk_loss / n_glimpses / n_branches).backward()
+
+        return BranchResult(
+            t0_type=t0_type, is_policy=is_policy,
+            mean_loss=total_detached / n_steps, n_steps=n_steps, final_readout=final_readout,
+        )
+
+    for t0 in branches:
+        results.append(run_branch(t0))
+
+    total_loss = torch.stack([r.mean_loss for r in results]).mean()
+
+    policy_metrics = None
+    if joint is not None and pol_acc["n"] > 0:
+        n = pol_acc["n"]
+        policy_metrics = {
+            "policy_loss": pol_acc["loss"] / n,
+            "reward_frac": pol_acc["reward"] / n,
+            "prime_on_policy": joint.policy_selector.prime_on_policy,
+        }
+
+    return RolloutResult(
+        total_loss=total_loss, branches=results, n_glimpses=n_glimpses, policy_metrics=policy_metrics,
+    )
+
+
+__all__ = [
+    "BranchResult",
+    "GlimpseOut",
+    "RolloutResult",
+    "RolloutTask",
+    "TaskLoss",
+    "run_rollout",
+    "sample_n_glimpses",
+]
