@@ -45,9 +45,9 @@ from tqdm import tqdm
 from canvit_pretrain.train.rl import PG, Objective, QReg, RunningNorm, entropy_floor_step, pg_loss, qreg_loss
 from canvit_pretrain.train.tracker import make_tracker
 
-from .config import _default_ade20k_root, _default_wandb_dir, _default_wandb_entity, _default_wandb_project
-from .config import ResizeMode
-from .data import IGNORE_LABEL, ADE20kDataset, make_val_transforms
+from .config import ResizeMode, _default_ade20k_root, _default_wandb_dir, _default_wandb_entity, _default_wandb_project
+from .data import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset, make_val_transforms
+from .metrics import mIoUAccumulator, upsample_preds
 from .rollout import consumes_full_image, derive_glimpse_px
 
 log = logging.getLogger(__name__)
@@ -251,14 +251,27 @@ def rollout_and_loss(
     return loss, metrics
 
 
+@dataclass
+class EvalResult:
+    """Deploy-eval metrics. ``ce_mean`` (mean per-image CE over t1..horizon) is the
+    model-selection objective (matched to the qband band). ``miou_per_t`` is the
+    global mIoU after each glimpse t1..horizon — makes policy runs directly
+    comparable to the ADE20K probe runs (which report per-timestep mIoU)."""
+
+    ce_mean: float
+    miou_per_t: list[float]
+
+
 @torch.no_grad()
 def evaluate(
     *, seg, net, encoder, loader, vp_flat: Tensor, cfg: PolicyTrainConfig, device, amp_ctx
-) -> float:
-    """Argmax deploy over the val split; returns mean per-image CE over t1..horizon
-    at FULL resolution (the trainer's model-selection objective)."""
+) -> EvalResult:
+    """Argmax deploy over the val split. CE (selection metric) and per-timestep mIoU
+    are read from the SAME rollout at FULL resolution (mIoU on argmax preds upsampled
+    to the mask, exactly as the ade20k probe eval does)."""
     net.eval()
     total, count = 0.0, 0
+    ious = [mIoUAccumulator(NUM_CLASSES, IGNORE_LABEL, device) for _ in range(cfg.train_horizon)]
     for images, masks in loader:
         images, masks = images.to(device), masks.to(device)
         with amp_ctx:
@@ -266,17 +279,18 @@ def evaluate(
             logits = head_logits(seg, st.canvas, canvas_grid=cfg.canvas_grid)
         encoder.reset()
         ces = []
-        for _ in range(cfg.train_horizon):
+        for t in range(cfg.train_horizon):
             f = encoder(st, logits=logits).float()
             idx = net(f).reshape(images.shape[0], -1).argmax(dim=1)
             with amp_ctx:
                 st = advance_state(seg, images, st, vp_flat[idx], cfg.glimpse_px)
                 logits = head_logits(seg, st.canvas, canvas_grid=cfg.canvas_grid)
             ces.append(ce_from_logits(logits, masks, score_res=None))
+            ious[t].update(upsample_preds(logits.argmax(1), masks.shape[1], masks.shape[2]), masks)
         total += torch.stack(ces).mean(dim=0).sum().item()
         count += images.shape[0]
     net.train()
-    return total / count
+    return EvalResult(ce_mean=total / count, miou_per_t=[a.compute() for a in ious])
 
 
 def train(cfg: PolicyTrainConfig) -> None:
@@ -391,18 +405,24 @@ def train(cfg: PolicyTrainConfig) -> None:
             )
 
         if step % cfg.eval_every == 0 or step == cfg.max_steps:
-            val_ce = evaluate(
+            res = evaluate(
                 seg=seg, net=net, encoder=encoder, loader=val_loader, vp_flat=vp_flat,
                 cfg=cfg, device=device, amp_ctx=amp_ctx,
             )
+            val_ce, miou_final = res.ce_mean, res.miou_per_t[-1]
             exp.log_metric("val_ce_mean_t1_tH", val_ce, step=step)
-            log.info(f"Step {step}: val CE (mean t1..t{cfg.train_horizon}) = {val_ce:.4f}")
-            torch.save({"net_state": net.state_dict(), "step": step, "val_ce": val_ce,
-                        "config": {k: str(v) for k, v in asdict(cfg).items()}}, run_dir / "last.pt")
-            if val_ce < best_ce:
+            exp.log_metric("val_miou_final", miou_final, step=step)
+            for t, m in enumerate(res.miou_per_t, start=1):
+                exp.log_metric(f"val_miou_t{t}", m, step=step)
+            log.info(f"Step {step}: val CE (mean t1..t{cfg.train_horizon}) = {val_ce:.4f}, "
+                     f"mIoU t{cfg.train_horizon} = {miou_final:.4f}")
+            ckpt = {"net_state": net.state_dict(), "step": step, "val_ce": val_ce,
+                    "val_miou_final": miou_final, "val_miou_per_t": res.miou_per_t,
+                    "config": {k: str(v) for k, v in asdict(cfg).items()}}
+            torch.save(ckpt, run_dir / "last.pt")
+            if val_ce < best_ce:  # selection stays on CE (qband-comparable); mIoU is reported
                 best_ce = val_ce
-                torch.save({"net_state": net.state_dict(), "step": step, "val_ce": val_ce,
-                            "config": {k: str(v) for k, v in asdict(cfg).items()}}, run_dir / "best.pt")
+                torch.save(ckpt, run_dir / "best.pt")
                 net.save_pretrained(run_dir / "best-hf")
 
     pbar.close()

@@ -11,9 +11,10 @@ from canvit_pytorch import CanViTForSemanticSegmentation
 from canvit_pytorch.patcher import FoveatedPatcherConfig
 from canvit_pytorch.policy import StateEncoder, ViewpointScorer
 
+from canvit_pretrain.train.rl import RunningNorm
+
 from .data import NUM_CLASSES
 from .rl_train import PolicyTrainConfig, build_action_table, rollout_and_loss
-from canvit_pretrain.train.rl import RunningNorm
 
 _B, _G, _IMG = 2, 8, 64
 
@@ -82,3 +83,26 @@ def test_qreg_step_foveated_fixation() -> None:
     )
     assert vp_flat.shape == (cfg.centers_per_axis**2, 3)  # fixation grid, no scale axis
     _one_step("qreg", {"patcher_name": "foveated", "foveated_patcher": FoveatedPatcherConfig()})
+
+
+def test_evaluate_reports_ce_and_miou() -> None:
+    """Deploy eval returns per-image CE (selection metric) AND per-timestep mIoU
+    (comparable to the ade20k probe). mIoU is a valid fraction at every timestep."""
+    import math
+
+    from .rl_train import EvalResult, evaluate
+
+    cfg, obj, seg, net, encoder, vp_flat = _setup("qreg", {})
+    torch.manual_seed(2)
+    loader = [
+        (torch.randn(_B, 3, _IMG, _IMG), torch.randint(0, NUM_CLASSES, (_B, _IMG, _IMG)))
+        for _ in range(2)
+    ]
+    res = evaluate(
+        seg=seg, net=net, encoder=encoder, loader=loader, vp_flat=vp_flat,
+        cfg=cfg, device=torch.device("cpu"), amp_ctx=nullcontext(),
+    )
+    assert isinstance(res, EvalResult)
+    assert math.isfinite(res.ce_mean)
+    assert len(res.miou_per_t) == cfg.train_horizon
+    assert all(0.0 <= m <= 1.0 for m in res.miou_per_t)
