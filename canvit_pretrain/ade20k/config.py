@@ -8,10 +8,9 @@ from pathlib import Path
 from typing import Literal
 
 from canvit_pytorch import resolve_canvit_repo
+from canvit_pytorch.data.ade20k import ResizeMode  # noqa: F401  (re-exported for this repo's consumers)
 
 from ..train.config import FoveatedScaleConfig
-
-ResizeMode = Literal["center_crop", "squish"]
 
 
 def _default_wandb_project() -> str | None:

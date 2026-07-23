@@ -6,9 +6,9 @@ Port of canvit_specialize's loss.py / metrics.py / state.py / eval_utils.py
 from dataclasses import dataclass
 from typing import Any
 
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from canvit_pytorch.metrics import mIoUAccumulator  # noqa: F401  (re-exported for this repo's consumers)
 from canvit_pytorch.probes import SegmentationProbe
 from torch import Tensor
 from torch.optim import AdamW
@@ -27,39 +27,6 @@ def upsample_preds(preds: Tensor, H: int, W: int) -> Tensor:
     if preds.shape[1:] == (H, W):
         return preds
     return F.interpolate(preds.unsqueeze(1).float(), (H, W), mode="nearest").squeeze(1).long()
-
-
-class mIoUAccumulator:
-    """Global mIoU: sum intersection/union across all images, then average over
-    classes. No GPU sync until compute()."""
-
-    def __init__(self, num_classes: int, ignore_index: int, device: torch.device) -> None:
-        self.num_classes = num_classes
-        self.ignore_index = ignore_index
-        self.intersection = torch.zeros(num_classes, device=device)
-        self.union = torch.zeros(num_classes, device=device)
-
-    def update(self, preds: Tensor, targets: Tensor) -> None:
-        assert preds.ndim == 3, f"Expected [B, H, W], got shape {preds.shape}"
-        assert preds.shape == targets.shape, f"Shape mismatch: {preds.shape} vs {targets.shape}"
-        n = self.num_classes
-        p = preds.flatten().long()
-        t = targets.flatten().long()
-        valid = t != self.ignore_index
-        p, t = p[valid], t[valid]
-        cm = torch.bincount(t * n + p, minlength=n * n).view(n, n)
-        diag = cm.diag()
-        self.intersection += diag
-        self.union += cm.sum(dim=1) + cm.sum(dim=0) - diag
-
-    def reset(self) -> None:
-        self.intersection.zero_()
-        self.union.zero_()
-
-    def compute(self) -> float:
-        iou = self.intersection / (self.union + 1e-8)
-        valid = self.union > 0
-        return iou[valid].mean().item() if valid.any() else 0.0
 
 
 def eval_probe_on_batch(probe: nn.Module, features: Tensor, masks: Tensor, iou: mIoUAccumulator) -> None:
