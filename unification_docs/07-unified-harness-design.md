@@ -119,12 +119,25 @@ CPU. Fully offline (random backbone, precomputed features, no teacher/HF).
 - Validation: **8/8 configs PASS** through `run()` on real cached models —
   ade20k{probe,finetune,joint}, in1k{frozen,finetune,joint}, distill{finetune,joint}
   (`unification_docs/harness_run_integration.py`); joint on ade20k/in1k = the flagship NEW capability,
-  head/probe + scorer training with `reward_frac` populated. **53 harness/task CPU tests green**
-  (42 + 9 run-wrapper + 2 task_weight-scaling).
+  head/probe + scorer training with `reward_frac` populated. **59 harness/task CPU tests green**
+  (42 + 9 run-wrapper + 2 task_weight-scaling + 6 loop-ops).
+
+**SINGLE-GPU OPERATIONAL FEATURES — CORE SET DONE + VALIDATED (2026-07-24 pass 2):** ported the CORE
+task-neutral operational features into the harness (single-GPU resume / preemption / crash-safety): resume
+(`find_latest`→`restore_into` before loaders, `start_step` via a `task.resume_start_step` hook), SIGUSR1
+checkpoint-on-signal, FAILED-marker + `cancel_slurm_array` crash-loop guard (opt-in), provenance snapshot
++ `latest.pt` symlink, EMA-smoothed loss + per-module grad-norms. Optuna DROPPED (deprecated).
+Validated: run()-level resume PASSES on real data (`harness_run_resume.py`: leg1→5, resume→9) + 6 CPU
+ops tests (`test_loop_ops.py`) + 8/8 integration re-run (no regression). Built DDP-aware (rank-0-guarded).
+**NOT yet a full drop-in** — the old loop can't be deleted until these ALSO land (beyond DDP): seed-mode
+start (`seed_ckpt`/`hf_seed_ckpt` weights-only @ step 0); full WebDataset shard-aligned `job_index`
+multi-job resume (only the hook seam exists); `pretrain_view_scale` footgun metadata + config/provenance
+history in distill checkpoints (needed by `to_hf`); `torch.compile`; run_dir layout; full wandb metric
+set + distill val viz/PCA/IN1k-probe.
 
 **REMAINING:**
 - `harness/ddp.py` — manual grad-sync for in-rollout modules (backbone/scorer) per the §9 matrix
-  (loop already calls `joint.allreduce_grads()` when dist); assert unsupported cells. **Owner: SKIP for now.**
+  (loop already calls `joint.allreduce_grads()` when dist); assert unsupported cells. **Owner: SKIP until a multi-GPU node.**
 - (optional) port ADE20K's `WarmupOneCycleLR` into `optim.py` (onecycle currently raises); distill
   `evaluate()` full viz/PCA (currently best-effort `validate()` reuse) — both land naturally at the cutover.
 - **Big-bang cutover (owner GREEN LIGHT required — destructive):** repoint `python -m canvit_pretrain.train`

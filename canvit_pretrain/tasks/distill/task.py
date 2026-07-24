@@ -171,6 +171,14 @@ class DistillRunTask:
             groups["policy"] = list(joint.scorer.parameters())
         return groups
 
+    def resume_start_step(self, payload, scheduler):
+        # Continuous single-run resume derives start_step from the scheduler, like the
+        # other tasks. The production SLURM-array path (start_step = job_index *
+        # steps_per_job with shard-aligned WebDataset resume) is wired at the launcher
+        # cutover, where job_index comes from SLURM_ARRAY_TASK_ID + the saved index;
+        # it would override this hook then.
+        return scheduler.last_epoch
+
     def batch_images(self, batch, device):
         return batch[0].to(device, non_blocking=True)
 

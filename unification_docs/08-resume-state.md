@@ -60,6 +60,35 @@ engine cores (Bound*Task). Distill parity byte-exact; config cross-product prove
 - **Full `canvit_pretrain` suite green: 146 passed** (live trainers + harness + tasks) — additive edits
   broke nothing. Also `python -m canvit_pretrain.harness.run --task ade20k --preset probe` ran end-to-end.
 
+### Single-GPU operational features (2026-07-24 pass 2) — CORE set DONE + validated
+Ported the CORE task-neutral operational features (single-GPU resume / preemption / crash-safety).
+**NOT yet a full drop-in** — the old `train/loop.py` CANNOT be deleted without regressing the "Still
+missing" items below. All task-neutral, in the harness:
+- **Resume**: `run()` does `find_latest` → `restore_into` (model/opt/sched/joint) BEFORE `build_loaders`
+  (so distill's model-owned normalizer arrives initialized) → `start_step` via a `task.resume_start_step`
+  hook (default `scheduler.last_epoch`; distill's SLURM-array `job_index` override deferred to the launcher cutover).
+- **SIGUSR1 checkpoint-on-signal** (`install_sigusr1_handler` in run(); the loop polls a flag → saves at a
+  safe boundary; `request_checkpoint()` is the non-signal test hook).
+- **FAILED-marker + `cancel_slurm_array`** crash-loop guard (opt-in `use_failed_marker`).
+- **Provenance** (`current_provenance()`) stamped into checkpoint metadata; `latest.pt` symlink.
+- **EMA-smoothed loss + per-module grad-norms** in the log path (`ema_alpha`, `log_grad_norms`).
+- **Dropped optuna** (owner: deprecated) — no sweep wrapper.
+Validation: **run()-level resume PASSES on real data** (`harness_run_resume.py`: leg1→step5, resume→step9,
+not restarted) + **6 new CPU ops tests** (`harness/tests/test_loop_ops.py`) + integration matrix re-run.
+Built DDP-aware (rank-0-guarded); DDP itself still deferred (needs a multi-GPU node).
+
+**STILL MISSING before the old loop can be deleted (beyond DDP)** — production-fidelity items NOT yet
+ported (land at the cutover / as follow-ups):
+- **seed-mode start**: weights-only load from `seed_ckpt`/`hf_seed_ckpt` at step 0 (distinct from resume;
+  distill starts production runs this way). The harness only does full-state resume today.
+- **full WebDataset shard-aligned multi-job resume**: `job_index` from `SLURM_ARRAY_TASK_ID` + the
+  world_size/batch/steps_per_job/samples_per_shard invariant checks. Only the `resume_start_step` hook
+  seam exists; the real derivation is deferred to the launcher cutover.
+- **`pretrain_view_scale` footgun metadata + config/provenance history** in distill checkpoints (the
+  `to_hf` exporter reads these; harness checkpoints stamp only a single provenance snapshot so far).
+- **`torch.compile`** of the model (perf); **run_dir layout** (`logs_dir/run_group/run_name/{checkpoints,log}`);
+  the **full wandb metric set** + distill validation viz/PCA/IN1k-probe (readout richness).
+
 ## NEXT STEPS (in order)
 1. (optional) Port ADE20K's `WarmupOneCycleLR` into `harness/optim.py` (currently onecycle raises;
    the run wrappers default to warmup_constant/cosine). Not blocking.

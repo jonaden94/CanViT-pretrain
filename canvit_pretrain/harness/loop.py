@@ -17,6 +17,9 @@ wired here for the scorer and completed in the DDP stage.
 from __future__ import annotations
 
 import logging
+import os
+import signal
+import subprocess
 from collections.abc import Callable, Iterator
 from contextlib import nullcontext
 from pathlib import Path
@@ -27,9 +30,77 @@ import torch
 from canvit_pretrain.harness.checkpoint import save_checkpoint
 from canvit_pretrain.harness.rollout import run_rollout
 from canvit_pretrain.harness.spec import TrainSpec
+from canvit_pretrain.train.ema import EMATracker
 from canvit_pretrain.train.viewpoint import ViewpointType
 
 log = logging.getLogger(__name__)
+
+# --- operational helpers (task-neutral; ported from train/loop.py) ---------
+
+# SIGUSR1 (SLURM preemption / manual) → checkpoint after the current step. The
+# handler only flips a flag; the loop does the save at a safe point. Installed by
+# run() (see run.py); the inner loop merely polls the flag, so it stays signal-agnostic
+# and unit-testable without a real signal.
+_checkpoint_requested = False
+
+
+def _handle_sigusr1(signum: int, frame: object) -> None:
+    global _checkpoint_requested
+    _checkpoint_requested = True
+    log.info("SIGUSR1 received — will checkpoint after the current step")
+
+
+def install_sigusr1_handler() -> None:
+    """Install the SIGUSR1 → checkpoint handler. No-op off the main thread / where
+    unsupported (e.g. inside a worker or on platforms without SIGUSR1)."""
+    try:
+        signal.signal(signal.SIGUSR1, _handle_sigusr1)
+    except (ValueError, OSError, AttributeError):
+        log.debug("SIGUSR1 handler not installed (not main thread / unsupported)")
+
+
+def request_checkpoint() -> None:
+    """Programmatically request a checkpoint at the next step boundary (test hook /
+    non-signal trigger)."""
+    global _checkpoint_requested
+    _checkpoint_requested = True
+
+
+def cancel_slurm_array() -> None:
+    """Cancel the remaining tasks of the current SLURM array (crash-loop / done-early
+    prevention). No-op outside a SLURM array job."""
+    job_id = os.environ.get("SLURM_ARRAY_JOB_ID")
+    if not job_id:
+        return
+    log.info("Cancelling remaining SLURM array tasks for job %s", job_id)
+    try:
+        subprocess.run(["scancel", job_id], check=False)
+    except Exception as e:  # scancel missing / not permitted — never fatal
+        log.warning("scancel failed: %s", e)
+
+
+def grad_norms_by_module(
+    module: Any, *, depth: int = 1, deep_prefixes: tuple[str, ...] = (),
+) -> dict[str, float]:
+    """Gradient L2 norms grouped by module-path prefix (ported from train/loop.py,
+    task-agnostic). Each param contributes to the group named by its first ``depth``
+    dot-separated components; params under a ``deep_prefixes`` entry are grouped one
+    level deeper (longest match wins) — e.g. ``deep_prefixes=("patcher",)`` splits
+    ``patcher`` into ``patcher.kpe`` / ``patcher.conditioner`` / … ."""
+    groups: dict[str, list[torch.Tensor]] = {}
+    for name, param in module.named_parameters():
+        if param.grad is None:
+            continue
+        match = max(
+            (p for p in deep_prefixes if name.startswith(p + ".")),
+            key=lambda p: p.count("."), default=None,
+        )
+        ndepth = (len(match.split(".")) + 1) if match is not None else depth
+        groups.setdefault(".".join(name.split(".")[:ndepth]), []).append(param.grad)
+    return {
+        prefix: torch.cat([g.flatten() for g in grads]).norm().item()
+        for prefix, grads in groups.items()
+    }
 
 
 def apply_requires_grad(*, model: Any, head: Any, joint: Any, spec: TrainSpec) -> None:
@@ -75,14 +146,21 @@ def run_training_loop(
     ckpt_dir: Path | None = None,
     ckpt_every: int = 0,             # 0 => only the end-of-run checkpoint
     eval_every: int = 0,             # 0 => no periodic eval
+    ema_alpha: float = 0.0,          # >0 => also log an EMA-smoothed total_loss
+    log_grad_norms: bool = False,    # log per-module grad L2 norms on log steps
+    grad_norm_deep_prefixes: tuple[str, ...] = (),
+    signal_checkpoint: bool = True,  # honor SIGUSR1 -> checkpoint (handler in run())
     on_log: Callable[[int, dict], None] | None = None,
     on_eval: Callable[[int], dict] | None = None,
 ) -> dict:
     """Run ``n_steps`` of training and return the last step's metrics. ``train_batches``
     yields task-native batches; ``task.bind`` turns each into the per-glimpse
     ``RolloutTask`` the engine runs."""
+    global _checkpoint_requested
     amp_ctx = amp_ctx or nullcontext()
     trainable = [p for g in optimizer.param_groups for p in g["params"]]
+    core = getattr(model, "module", model)
+    ema = EMATracker(ema_alpha) if ema_alpha > 0 else None
     last: dict = {}
 
     def _save(step: int) -> None:
@@ -108,6 +186,13 @@ def run_training_loop(
             torch.nn.utils.clip_grad_norm_(trainable, grad_clip)
         if joint is not None and is_dist:  # scorer is not DDP-wrapped (design §9)
             joint.allreduce_grads()
+
+        is_log = on_log is not None and step % log_every == 0
+        # Read grad norms AFTER clip and BEFORE optimizer.step() (grads persist until
+        # the next zero_grad, but reading pre-step keeps it unambiguous); log steps only.
+        gnorms = (grad_norms_by_module(core, deep_prefixes=grad_norm_deep_prefixes)
+                  if (is_log and log_grad_norms) else {})
+
         optimizer.step()
         scheduler.step()
 
@@ -115,15 +200,29 @@ def run_training_loop(
         if result.policy_metrics is not None:
             last["reward_frac"] = float(result.policy_metrics["reward_frac"])
             last["policy_loss"] = float(result.policy_metrics["policy_loss"])
-        if on_log is not None and step % log_every == 0:
+        if ema is not None:
+            last["total_loss_ema"] = ema.update("total_loss", result.total_loss).item()
+        for k, v in gnorms.items():
+            last[f"grad_norm/{k}"] = v
+
+        if is_log:
             on_log(step, last)
         if on_eval is not None and eval_every and step > 0 and step % eval_every == 0:
             last["eval"] = on_eval(step)
         if ckpt_every and step > start_step and step % ckpt_every == 0:
             _save(step)
 
+        # SIGUSR1 (SLURM preemption / manual): checkpoint at this safe boundary.
+        if signal_checkpoint and _checkpoint_requested:
+            log.info("checkpoint-on-signal at step %d", step)
+            _save(step)
+            _checkpoint_requested = False
+
     _save(start_step + n_steps)
     return last
 
 
-__all__ = ["apply_requires_grad", "run_training_loop"]
+__all__ = [
+    "apply_requires_grad", "cancel_slurm_array", "grad_norms_by_module",
+    "install_sigusr1_handler", "request_checkpoint", "run_training_loop",
+]

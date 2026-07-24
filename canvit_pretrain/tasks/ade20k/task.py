@@ -170,6 +170,9 @@ class Ade20kRunTask:
             groups["policy"] = list(joint.scorer.parameters())
         return groups
 
+    def resume_start_step(self, payload, scheduler):
+        return scheduler.last_epoch  # map dataset: steps == scheduler.step() calls
+
     # --- per-batch (engine-facing) ----------------------------------------
     def batch_images(self, batch, device):
         return batch[0].to(device, non_blocking=True)

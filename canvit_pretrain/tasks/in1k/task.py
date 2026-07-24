@@ -152,6 +152,9 @@ class In1kRunTask:
             groups["policy"] = list(joint.scorer.parameters())
         return groups
 
+    def resume_start_step(self, payload, scheduler):
+        return scheduler.last_epoch  # with_epoch wds: steps == scheduler.step() calls
+
     def batch_images(self, batch, device):
         return batch[0].to(device, non_blocking=True)
 

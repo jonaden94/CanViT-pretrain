@@ -28,7 +28,13 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 import torch
 
-from canvit_pretrain.harness.loop import apply_requires_grad, run_training_loop
+from canvit_pretrain.harness.checkpoint import find_latest, load_checkpoint, restore_into
+from canvit_pretrain.harness.loop import (
+    apply_requires_grad,
+    cancel_slurm_array,
+    install_sigusr1_handler,
+    run_training_loop,
+)
 from canvit_pretrain.harness.optim import build_optimizer_and_scheduler
 from canvit_pretrain.harness.spec import TaskCaps, TrainSpec, check_spec
 from canvit_pretrain.train.viewpoint import ViewpointType
@@ -57,6 +63,13 @@ class RunSettings:
     ckpt_every: int = 0          # 0 => only the end-of-run checkpoint
     eval_every: int = 0          # 0 => no periodic eval
     ckpt_dir: Path | None = None
+    # resume + operational (task-neutral; parity with train/loop.py)
+    resume: bool = True          # resume from find_latest(ckpt_dir) if a checkpoint exists
+    signal_checkpoint: bool = True   # SIGUSR1 -> checkpoint after the current step
+    use_failed_marker: bool = False  # SLURM crash-loop guard: FAILED file + scancel array
+    ema_alpha: float = 0.1       # EMA-smoothed total_loss in the logs (0 => off)
+    log_grad_norms: bool = True  # per-module grad L2 norms on log steps
+    grad_norm_deep_prefixes: tuple[str, ...] = ()
     # experiment tracker (off by default so run() is import-safe / offline)
     tracker: Literal["wandb", "none"] = "none"
     wandb_project: str | None = None
@@ -85,6 +98,7 @@ class RunTask(Protocol):
                      generator: torch.Generator) -> Any: ...
     def trainable_param_groups(self, *, model: Any, head: Any, joint: Any,
                                spec: TrainSpec) -> dict[str, list]: ...
+    def resume_start_step(self, payload: dict, scheduler: Any) -> int: ...  # default: scheduler.last_epoch
     def batch_images(self, batch: Any, device: torch.device) -> torch.Tensor: ...
     def bind(self, batch: Any, device: torch.device, *, model: Any, head: Any) -> Any: ...
     def evaluate(self, *, model: Any, head: Any, val_loader: Any, device: torch.device,
@@ -128,6 +142,18 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
              spec.policy_weight, spec.task_grad_to_backbone, spec.policy_grad_to_backbone, spec.bptt)
     log.info("=" * 60)
 
+    if settings.signal_checkpoint:
+        install_sigusr1_handler()
+
+    # SLURM crash-loop guard (opt-in): a FAILED file left by a prior crash stops the
+    # array from re-crashing forever (see the failed-token-blocks-resume incident).
+    failed_marker = (settings.ckpt_dir / "FAILED") if settings.ckpt_dir else None
+    if settings.use_failed_marker and failed_marker is not None and failed_marker.exists():
+        log.error("FAILED marker exists (%s) — a previous job crashed; delete it to retry.", failed_marker)
+        if settings.rank == 0:
+            cancel_slurm_array()
+        raise RuntimeError(f"Refusing to start: {failed_marker} exists")
+
     # --- model + (optional) joint policy -----------------------------------
     model, head = task.build_model(device)
     canvas_grid = task.canvas_grid(model)
@@ -144,6 +170,19 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
     # --- optimizer + scheduler (per trainable group, design D-E) -----------
     param_groups = task.trainable_param_groups(model=model, head=head, joint=joint, spec=spec)
     optimizer, scheduler = build_optimizer_and_scheduler(spec, param_groups)
+
+    # --- resume (task-neutral): restore full state BEFORE loaders, so distill's
+    # model-owned normalizer arrives already-initialized from the checkpoint --------
+    start_step = settings.start_step
+    if settings.resume and settings.ckpt_dir is not None:
+        latest = find_latest(settings.ckpt_dir)
+        if latest is not None:
+            log.info("Resuming from %s", latest)
+            payload = load_checkpoint(latest, device)
+            restore_into(payload, model=model, optimizer=optimizer, scheduler=scheduler,
+                         joint=joint, path=latest, device=device)
+            start_step = task.resume_start_step(payload, scheduler)
+            log.info("Resumed at start_step=%d", start_step)
 
     # --- data + selector ---------------------------------------------------
     train_loader, val_loader = task.build_loaders(world_size=settings.world_size, rank=settings.rank)
@@ -183,16 +222,31 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
             tracker.log_metrics({f"eval/{k}": v for k, v in metrics.items()}, step=step)
         return metrics
 
-    last = run_training_loop(
-        task=task, model=model, head=head, optimizer=optimizer, scheduler=scheduler,
-        selector=selector, spec=spec, branches=branches, canvas_grid=canvas_grid, device=device,
-        train_batches=train_batches, n_steps=settings.n_steps, start_step=settings.start_step,
-        joint=joint, amp_ctx=amp_ctx, grad_clip=settings.grad_clip, is_dist=is_dist,
-        task_name=task.name, model_config=task.model_config(model),
-        metadata=task.checkpoint_metadata(model), log_every=settings.log_every,
-        ckpt_dir=settings.ckpt_dir, ckpt_every=settings.ckpt_every, eval_every=settings.eval_every,
-        on_log=on_log, on_eval=(on_eval if settings.eval_every else None),
-    )
+    from canvit_pretrain.checkpoint import current_provenance
+    metadata = {**task.checkpoint_metadata(model), "provenance": current_provenance()}
+
+    try:
+        last = run_training_loop(
+            task=task, model=model, head=head, optimizer=optimizer, scheduler=scheduler,
+            selector=selector, spec=spec, branches=branches, canvas_grid=canvas_grid, device=device,
+            train_batches=train_batches, n_steps=settings.n_steps, start_step=start_step,
+            joint=joint, amp_ctx=amp_ctx, grad_clip=settings.grad_clip, is_dist=is_dist,
+            task_name=task.name, model_config=task.model_config(model),
+            metadata=metadata, log_every=settings.log_every,
+            ckpt_dir=settings.ckpt_dir, ckpt_every=settings.ckpt_every, eval_every=settings.eval_every,
+            ema_alpha=settings.ema_alpha, log_grad_norms=settings.log_grad_norms,
+            grad_norm_deep_prefixes=settings.grad_norm_deep_prefixes,
+            signal_checkpoint=settings.signal_checkpoint,
+            on_log=on_log, on_eval=(on_eval if settings.eval_every else None),
+        )
+    except Exception:
+        # SLURM crash-loop guard: leave a FAILED marker + stop the array so the next
+        # task doesn't re-crash on the same fault (opt-in; matches train/loop.py).
+        if settings.use_failed_marker and failed_marker is not None and settings.rank == 0:
+            failed_marker.parent.mkdir(parents=True, exist_ok=True)
+            failed_marker.write_text("crashed\n")
+            cancel_slurm_array()
+        raise
     if tracker is not None:
         tracker.end()
     log.info("run complete: %s", last)
