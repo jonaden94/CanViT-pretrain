@@ -78,6 +78,8 @@ def _setup():
 
 
 def test_ema_and_grad_norms_surface_in_metrics():
+    """train/loop.py logs EMA-smoothed values under the plain names (total_loss etc.)
+    and keeps the instantaneous total as total_loss_raw."""
     seg, spec, opt, sched, sel = _setup()
     seen: list[dict] = []
     run_training_loop(
@@ -86,8 +88,40 @@ def test_ema_and_grad_norms_surface_in_metrics():
         train_batches=_batches(), n_steps=3, log_every=1, ema_alpha=0.5, log_grad_norms=True,
         on_log=lambda step, m: seen.append(m),
     )
-    assert seen and "total_loss_ema" in seen[-1]
+    assert seen and {"total_loss", "total_loss_raw", "grad_norm"} <= set(seen[-1])
+    assert seen[-1]["total_loss"] != seen[-1]["total_loss_raw"], "total_loss must be the EMA"
     assert any(k.startswith("grad_norm/") for k in seen[-1])  # head at least
+
+
+def test_per_branch_metrics_are_grouped_and_averaged_by_t0_type():
+    """train/loop.py's full/… and random/… series. The engine groups by t0 type and
+    averages same-type branches; names beyond `loss` come from the task's hooks, so a
+    hookless task (ade20k here) yields exactly `{type}/loss`."""
+    from canvit_pretrain.harness.loop import branch_metrics
+
+    seg, spec, opt, sched, sel = _setup()
+    seen: list[dict] = []
+    run_training_loop(
+        task=_StubTask(), model=seg, head=seg.head, optimizer=opt, scheduler=sched, selector=sel,
+        spec=spec, branches=[ViewpointType.FULL, ViewpointType.RANDOM, ViewpointType.RANDOM],
+        canvas_grid=_G, device=torch.device("cpu"), train_batches=_batches(), n_steps=1,
+        log_every=1, on_log=lambda step, m: seen.append(m),
+    )
+    assert {"full/loss", "random/loss"} <= set(seen[-1])
+
+    # the grouping/averaging rule itself, on synthetic branches
+    class _B:
+        def __init__(self, t0, loss, extra):
+            self.t0_type, self.mean_loss, self.metrics = t0, torch.tensor(loss), extra
+
+    out = branch_metrics([
+        _B(ViewpointType.FULL, 1.0, {"cos": torch.tensor(0.2)}),
+        _B(ViewpointType.RANDOM, 2.0, {"cos": torch.tensor(0.4)}),
+        _B(ViewpointType.RANDOM, 4.0, {"cos": torch.tensor(0.6)}),
+    ])
+    assert float(out["full/loss"]) == 1.0
+    assert float(out["random/loss"]) == 3.0            # (2+4)/2
+    assert abs(float(out["random/cos"]) - 0.5) < 1e-6  # (0.4+0.6)/2
 
 
 def test_signal_checkpoint_saves_midrun(tmp_path):

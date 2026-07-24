@@ -23,6 +23,17 @@ from canvit_pretrain.train.data.webdataset import WebDatasetTrainLoader
 _G, _D, _BS, _PATCH = 8, 16, 2, 16
 
 
+class _IdentityNorm:
+    """Standardizer stub: bind() both standardizes the targets and hands the engine the
+    destandardizer for the raw-space cosine metrics."""
+
+    def __call__(self, x):
+        return x
+
+    def destandardize(self, x):
+        return x
+
+
 def _task(*, initialized, reset=False, has_features=True):
     cfg = Config(webdataset_dir="/nonexistent", batch_size_per_gpu=_BS, steps_per_job=64,
                  canvas_patch_grid_size=_G, reset_normalizer=reset)
@@ -91,8 +102,7 @@ def test_bind_computes_teacher_targets_when_the_batch_has_none(monkeypatch):
     rather than call .to() on a None."""
     t, loader = _task(initialized=True, has_features=False)
     _stub_init(monkeypatch, t, loader)
-    t.scene_norm = lambda x: x
-    t.cls_norm = lambda x: x
+    t.scene_norm = t.cls_norm = _IdentityNorm()
     images = torch.randn(_BS, 3, _G * _PATCH, _G * _PATCH)
     bound = t.bind((images, None, None, None), torch.device("cpu"), model=None, head=None)
     assert bound.distill.scene_target.shape == (_BS, _G * _G, _D)
@@ -137,8 +147,7 @@ def test_checkpoint_model_config_wins_over_cli_defaults():
 def test_bind_uses_precomputed_targets_when_present(monkeypatch):
     t, loader = _task(initialized=True, has_features=True)
     _stub_init(monkeypatch, t, loader)
-    t.scene_norm = lambda x: x
-    t.cls_norm = lambda x: x
+    t.scene_norm = t.cls_norm = _IdentityNorm()
     patches, cls = torch.randn(_BS, _G * _G, _D), torch.randn(_BS, _D)
     bound = t.bind((torch.randn(_BS, 3, 8, 8), patches, cls, None), torch.device("cpu"),
                    model=None, head=None)

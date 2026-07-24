@@ -23,13 +23,15 @@ Pass 4's end-to-end re-read of `train/loop.py` then found FOUR more fidelity gap
 `reset_normalizer`, ckpt `model_config` on resume, scorer clipping) — **all four CLOSED in pass 5**,
 see its section below.
 
-**IMMEDIATE NEXT TASK — full wandb metric richness + distill VALIDATION-time viz/curves/IN1k-probe.**
-Observability, not correctness. Port from `train/loop.py`: per-branch distill EMA metrics
-(`full/…` + `random/…` loss/cos), flattened-config `log_parameters`, and the validation-phase
-PCA/curves + IN1k linear-probe readout (the TRAINING-batch PCA viz is already ported). Owner
-constraint still in force: **distill viz only — no ade20k/in1k viz.**
-SUCCESS CRITERIA: a debug sbatch run logging to wandb project `canvit-pretrain` shows the same metric
-set as an existing `jon_exp22` run for the same step range.
+Pass 6 then ported the full wandb metric richness + the distill validation phase — DONE, see below.
+
+**IMMEDIATE NEXT TASK — DDP. This is the LAST item before the (owner-gated) cutover.**
+BLOCKED: needs a multi-GPU node. Scope: manual grad-sync/broadcast for the in-rollout modules
+(the loop already calls `joint.allreduce_grads()` when `is_dist`), the `ddp.all_reduce_mean` on every
+logged scalar (train/loop.py 913 — the harness currently logs rank-0's local value), and the §9
+support matrix (coupled policy-grad-into-backbone under DDP stays an assert).
+SUCCESS CRITERIA: a 2-rank run where weights are identical across ranks after N steps and the loss
+matches the 1-GPU run.
 Cosmetic/observability, not correctness. Port from `train/loop.py`: per-branch distill EMA metrics,
 flattened-config `log_parameters`, and the validation-phase PCA/curves + IN1k linear-probe readout
 (the TRAINING-batch PCA viz is already ported). Owner constraint still in force: **distill viz only —
@@ -201,11 +203,41 @@ clip-split; full suite 165 → **173 passed**) + the real raw-shard GPU run + **
 still PASS** (both joint configs with `reward_frac` populated) + parity digest `9a0100a1a3de3acd` + a
 re-run of the 2-leg wds resume (`ALL PASS`) after the `run()` reordering.
 
+### Pass 6 (2026-07-24) — full wandb metric richness + the distill validation phase. DONE.
+The harness logged ~6 scalars; `train/loop.py` logs a whole EMA'd series set. Ported:
+- **Per-branch series** `full/…` + `random/…` (loss, scene_patches_loss, scene_cls_loss, and the four
+  cos-sims). The engine already returned per-branch `BranchResult`s, so this needed only two OPTIONAL
+  task hooks — `glimpse_metrics(loss)` (per-glimpse scalars, averaged over the branch) and
+  `final_metrics(readout)` (one-shot on the last readout) — plus a neutral
+  `harness.loop.branch_metrics()` that groups by t0 type and averages, exactly like the historical
+  `aggregate(list[BranchMetrics])`. Hookless tasks (ade20k/in1k) just get `{type}/loss`.
+  The raw-space cosines compare against the TRUE raw teacher targets (passed through
+  `BoundDistillTask(metric_refs=…)`), not `destandardize(standardize(x))`, matching train/loop.py.
+- **EMA over every series, not just total_loss**, logged under the plain names (train/loop.py logs
+  ONLY EMAs). The instantaneous total is kept as `total_loss_raw` — the one key we log that the old
+  loop did not.
+- **`train/` namespace** in `run()`'s tracker payload (`grad_norm/…` keeps its own), plus `train/lr`,
+  `train/grad_norm` (the clip's total norm), `train/continue_prob`, `train/prime_on_policy`.
+- **`log_parameters`**: the task's flattened config + `train_spec` + SLURM job id + trainable/total
+  param counts (171 hyperparameters on a distill run).
+- **The distill VALIDATION phase**, which was silently gutted: `evaluate()` built a throwaway
+  `tracker="none"` and a `tempfile.mkdtemp()` run dir, so every `val/…` series and figure was
+  DISCARDED. The `evaluate` seam now takes `tracker=`/`run_dir=` and distill passes the real ones,
+  plus `probe` (IN1k linear probe), `log_curves`/`log_pca` on their historical val-count cadences,
+  `foveated_eval_scale` (training scale for mode='fixed'), `log_spatial_stats` and `teacher_name`.
+Verified on real data by `unification_docs/harness_metric_parity.py` (**ALL PASS**, GPU, and it
+records instead of uploading so nothing is published): **92 metric keys** — every `train/loop.py`
+series present, the `full/`+`random/` sets, 10 per-module grad-norm series, `val/scene_cos_*_t0..t9`,
+`val/cls_cos_*_t0..t9`, **`val/in1k_tts_top1_t0..t9`** + `val/in1k_teacher_top1`, spatial stats — plus
+171 hyperparameters and a PCA figure on disk. Parity digest `9a0100a1a3de3acd` held (rollout.py was
+touched); full suite **174 passed**.
+NOTE: the val-count cadence assumes the harness's `eval_every` == the config's `val_every`; the
+launcher sets both at the cutover.
+
 **STILL MISSING before the old loop can be deleted:**
-- **DDP** (needs a multi-GPU node): manual grad-sync/broadcast, all-reduce of logged metrics, the §9
-  support matrix. Not connected to any of the above.
-- **Full wandb metric richness** (per-branch distill EMA metrics, flattened-config params) and distill
-  **validation-time** viz/curves/IN1k-probe (training-batch PCA viz IS ported).
+- **DDP** (needs a multi-GPU node): manual grad-sync/broadcast, **all-reduce mean of each logged
+  scalar** (train/loop.py 913 wraps every EMA in `ddp.all_reduce_mean`; the harness logs rank-0's
+  local value), the §9 support matrix. This is now the ONLY remaining item before the cutover.
 
 ## NEXT STEPS (in order)
 1. (optional) Port ADE20K's `WarmupOneCycleLR` into `harness/optim.py` (currently onecycle raises;

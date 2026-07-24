@@ -172,7 +172,9 @@ class In1kRunTask:
         )
 
     @torch.no_grad()
-    def evaluate(self, *, model, head, val_loader, device, step):
+    def evaluate(self, *, model, head, val_loader, device, step, tracker=None, run_dir=None):
+        # tracker/run_dir unused: this task returns its scalars for the caller to log
+        # and renders no validation figures (owner: distill viz only).
         """Top-1/5 over the eval policy (reuses in1k/train.py::evaluate)."""
         if val_loader is None:
             return {}

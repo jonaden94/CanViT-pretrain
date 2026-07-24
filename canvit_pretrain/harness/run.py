@@ -21,6 +21,7 @@ publishing stays the manual ``python -m canvit_pretrain.checkpoint.to_hf`` step.
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -122,9 +123,29 @@ class RunTask(Protocol):
     def batch_images(self, batch: Any, device: torch.device) -> torch.Tensor: ...
     def bind(self, batch: Any, device: torch.device, *, model: Any, head: Any) -> Any: ...
     def evaluate(self, *, model: Any, head: Any, val_loader: Any, device: torch.device,
-                 step: int) -> dict: ...
+                 step: int, tracker: Any = None, run_dir: Path | None = None) -> dict: ...
     def model_config(self, model: Any) -> dict: ...
     def checkpoint_metadata(self, model: Any) -> dict: ...
+
+
+def _as_dict(cfg: Any) -> dict:
+    """A task config as a plain dict (dataclass or not); {} when there is none."""
+    from dataclasses import asdict, is_dataclass
+    if cfg is None:
+        return {}
+    return asdict(cfg) if is_dataclass(cfg) else dict(getattr(cfg, "__dict__", {}))
+
+
+def _flatten(d: dict, prefix: str = "") -> dict[str, Any]:
+    """Nested dict -> dotted keys, non-scalars stringified (train/loop.py flatten_dict)."""
+    flat: dict[str, Any] = {}
+    for k, v in d.items():
+        key = f"{prefix}{k}" if prefix else k
+        if isinstance(v, dict):
+            flat.update(_flatten(v, f"{key}."))
+        else:
+            flat[key] = v if isinstance(v, (int, float, bool, str, type(None))) else str(v)
+    return flat
 
 
 def _infinite(loader: Any):
@@ -252,19 +273,39 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
             wandb_project=settings.wandb_project, wandb_entity=settings.wandb_entity,
             wandb_dir=settings.wandb_dir, prev_comet_id=None, prev_wandb_id=None,
         )
+        # Hyperparameters (train/loop.py 279-282, 423): the task's flattened config,
+        # the resolved TrainSpec, the SLURM job id and the trainable/total param split.
+        n_total = sum(p.numel() for p in model.parameters())
+        n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        params: dict[str, Any] = {
+            **_flatten(_as_dict(getattr(task, "cfg", None))),
+            "train_spec": str(spec), "task": task.name, "run_name": settings.run_name or task.name,
+            "trainable_params": n_trainable, "total_params": n_total,
+        }
+        if slurm_job_id := os.environ.get("SLURM_JOB_ID"):
+            params["slurm_job_id"] = slurm_job_id
+        tracker.log_parameters(params)
 
     def on_log(step: int, m: dict) -> None:
         extra = ""
         if "reward_frac" in m:
             extra = f"  reward_frac={m['reward_frac']:+.4f}  policy_loss={m['policy_loss']:.4f}"
-        log.info("step %d  loss=%.5f  n_glimpses=%d  lr=%.2e%s",
+        log.info("step %d  loss=%.5f  n_glimpses=%.1f  lr=%.2e%s",
                  step, m["total_loss"], m["n_glimpses"], scheduler.get_last_lr()[0], extra)
         if tracker is not None:
-            tracker.log_metrics({**{k: v for k, v in m.items() if k != "step"},
-                                 "lr": scheduler.get_last_lr()[0]}, step=step)
+            # train/loop.py's namespacing: everything under `train/` except the
+            # per-module gradient norms, which have their own `grad_norm/` namespace.
+            payload = {(k if k.startswith("grad_norm/") else f"train/{k}"): v
+                       for k, v in m.items() if k != "step"}
+            payload["train/lr"] = scheduler.get_last_lr()[0]
+            tracker.log_metrics(payload, step=step)
 
     def on_eval(step: int) -> dict:
-        metrics = task.evaluate(model=model, head=head, val_loader=val_loader, device=device, step=step)
+        # tracker/run_dir go through so a task's validation can log its OWN rich series
+        # (distill's per-timestep val curves + probe accuracy) and write its figures to
+        # the run dir — train/loop.py passed `exp` and `run_dir` straight into validate().
+        metrics = task.evaluate(model=model, head=head, val_loader=val_loader, device=device,
+                                step=step, tracker=tracker, run_dir=run_dir)
         log.info("step %d  eval: %s", step, metrics)
         if tracker is not None:
             tracker.log_metrics({f"eval/{k}": v for k, v in metrics.items()}, step=step)
@@ -351,7 +392,6 @@ def _build_task(task_name: str, overrides: dict):
             cfg = replace(cfg, peak_lr=overrides["lr"])
         return In1kRunTask(cfg)
     if task_name == "distill":
-        import os
         from canvit_pretrain.train.config import Config
         from canvit_pretrain.tasks.distill.task import DistillRunTask
         cfg = Config()

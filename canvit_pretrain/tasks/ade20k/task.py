@@ -189,7 +189,9 @@ class Ade20kRunTask:
 
     # --- eval & checkpoint -------------------------------------------------
     @torch.no_grad()
-    def evaluate(self, *, model, head, val_loader, device, step):
+    def evaluate(self, *, model, head, val_loader, device, step, tracker=None, run_dir=None):
+        # tracker/run_dir unused: this task returns its scalars for the caller to log
+        # and renders no validation figures (owner: distill viz only).
         """mIoU per timestep over the val set (the historical ade20k eval), reusing the
         tested rollout + probe-eval helpers. Returns t0 / final / mean mIoU."""
         from canvit_pretrain.ade20k.data import IGNORE_LABEL, NUM_CLASSES

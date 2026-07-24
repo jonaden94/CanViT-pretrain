@@ -104,6 +104,23 @@ def grad_norms_by_module(
     }
 
 
+def branch_metrics(branches: list[Any]) -> dict[str, torch.Tensor]:
+    """Per-branch-group metric series, keyed ``{t0_type}/{name}`` (train/loop.py's
+    ``full/…`` and ``random/…``). Branches of the same t0 type are averaged, exactly like
+    the historical ``aggregate(list[BranchMetrics])``. Beyond ``loss`` the names come
+    from whatever the task's ``glimpse_metrics``/``final_metrics`` hooks produced, so
+    this stays task-neutral (ade20k/in1k supply no hooks => just ``…/loss``)."""
+    groups: dict[str, list[Any]] = {}
+    for br in branches:
+        groups.setdefault(br.t0_type.name.lower(), []).append(br)
+    out: dict[str, torch.Tensor] = {}
+    for name, brs in groups.items():
+        out[f"{name}/loss"] = torch.stack([b.mean_loss for b in brs]).mean()
+        for key in brs[0].metrics:
+            out[f"{name}/{key}"] = torch.stack([b.metrics[key] for b in brs]).mean()
+    return out
+
+
 def apply_requires_grad(*, model: Any, head: Any, joint: Any, spec: TrainSpec) -> None:
     """Set ``requires_grad`` from the spec — the harness, not the task, decides what
     trains (design §3.1). ``model`` owns the backbone (+ head as a submodule); ``head``
@@ -199,8 +216,9 @@ def run_training_loop(
             task_weight=spec.task_weight, collect_viz=do_viz, viz_task=(task if do_viz else None),
             joint=joint,
         )
+        grad_norm = None
         if trainable:
-            torch.nn.utils.clip_grad_norm_(trainable, grad_clip)
+            grad_norm = torch.nn.utils.clip_grad_norm_(trainable, grad_clip)
         if joint is not None:
             if is_dist:  # scorer is not DDP-wrapped (design §9) — average its grads by hand
                 joint.allreduce_grads()
@@ -216,7 +234,23 @@ def run_training_loop(
         scheduler.step()
         t_gpu_total += time.perf_counter() - t1
 
-        last = {"step": step, "total_loss": float(result.total_loss), "n_glimpses": result.n_glimpses}
+        # Metrics that are EMA-smoothed before logging (train/loop.py logs ONLY EMAs
+        # under these names): the totals plus each branch group's per-glimpse series.
+        smoothed: dict[str, torch.Tensor] = {
+            "total_loss": result.total_loss,
+            "n_glimpses": torch.tensor(float(result.n_glimpses)),
+        }
+        smoothed.update(branch_metrics(result.branches))
+
+        last = {"step": step, "total_loss_raw": float(result.total_loss),
+                "n_glimpses": result.n_glimpses}
+        for k, v in smoothed.items():
+            last[k] = ema.update(k, v).item() if ema is not None else float(v)
+        # Instantaneous (never smoothed), matching train/loop.py's metrics dict.
+        if grad_norm is not None:
+            last["grad_norm"] = float(grad_norm)
+        if spec.bptt.continue_prob is not None:
+            last["continue_prob"] = spec.bptt.continue_prob
         if log_timing and (t_data_total + t_gpu_total) > 0:
             tot = t_data_total + t_gpu_total
             last["data_pct"] = 100.0 * t_data_total / tot
@@ -224,8 +258,7 @@ def run_training_loop(
         if result.policy_metrics is not None:
             last["reward_frac"] = float(result.policy_metrics["reward_frac"])
             last["policy_loss"] = float(result.policy_metrics["policy_loss"])
-        if ema is not None:
-            last["total_loss_ema"] = ema.update("total_loss", result.total_loss).item()
+            last["prime_on_policy"] = float(result.policy_metrics["prime_on_policy"])
         for k, v in gnorms.items():
             last[f"grad_norm/{k}"] = v
 
@@ -253,6 +286,6 @@ def run_training_loop(
 
 
 __all__ = [
-    "apply_requires_grad", "cancel_slurm_array", "grad_norms_by_module",
+    "apply_requires_grad", "branch_metrics", "cancel_slurm_array", "grad_norms_by_module",
     "install_sigusr1_handler", "request_checkpoint", "run_training_loop",
 ]

@@ -173,9 +173,20 @@ RESUME now correctly beats `hf_seed_ckpt`). **(d)** the scorer is clipped **sepa
 (after `allreduce_grads()`), matching `train/loop.py` 874-878 — one joint norm had been coupling their
 magnitudes on every RL run.
 
-**NOT yet a full drop-in** — remaining: **DDP** (multi-GPU node) and full wandb metric richness +
-distill validation-time viz/curves/IN1k-probe (training-batch PCA viz IS ported). Neither is a
-correctness gap.
+**Pass 6 (2026-07-24) — full wandb metric richness + the distill validation phase, DONE.** Per-branch
+`full/…` / `random/…` series via two OPTIONAL task hooks (`glimpse_metrics` per glimpse,
+`final_metrics` on the last readout) + a neutral `loop.branch_metrics()` that groups by t0 type and
+averages (hookless tasks just get `{type}/loss`); EMA over every series logged under the plain names
+(instantaneous total kept as `total_loss_raw`); the `train/` namespace + `lr`/`grad_norm`/
+`continue_prob`/`prime_on_policy`; `log_parameters` (flattened config + spec + param counts). The
+distill validation phase had been silently gutted — `evaluate()` used a throwaway `tracker="none"`
+and a temp run dir, DISCARDING every `val/…` series and figure; the `evaluate` seam now carries
+`tracker=`/`run_dir=` and distill passes the probe, curve/PCA cadences, `foveated_eval_scale` and
+spatial stats. Verified by `unification_docs/harness_metric_parity.py` (ALL PASS, records rather than
+uploads): 92 metric keys incl. `val/in1k_tts_top1_t0..t9`, 171 hyperparameters, PCA figure on disk.
+
+**NOT yet a full drop-in** — remaining: **DDP** (multi-GPU node), which also owns the
+`ddp.all_reduce_mean` on each logged scalar. That is the only item left before the cutover.
 
 **REMAINING:**
 - `harness/ddp.py` — manual grad-sync for in-rollout modules (backbone/scorer) per the §9 matrix

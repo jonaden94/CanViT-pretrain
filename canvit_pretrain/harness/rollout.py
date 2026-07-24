@@ -97,6 +97,11 @@ class BranchResult:
     mean_loss: Tensor          # detached: mean per-glimpse combined loss
     n_steps: int
     final_readout: Any         # last-chunk readout (for task metrics)
+    metrics: dict[str, Tensor] = field(default_factory=dict)
+    """Optional detached task metrics for this branch (empty unless the task provides
+    the hooks): per-glimpse scalars from ``glimpse_metrics`` averaged over the branch,
+    merged with one-shot ``final_metrics`` on the last readout. Distill uses these for
+    its historical ``full/…`` / ``random/…`` wandb series."""
 
 
 @dataclass
@@ -226,6 +231,17 @@ def run_rollout(
             sel, is_policy = selector, False
         prev_pi_loss: Tensor | None = None
 
+        # Optional per-glimpse task metrics (distill's scene/cls sub-losses), summed
+        # here and averaged over the branch below. Absent hook => untouched fast path.
+        gm_hook = getattr(task, "glimpse_metrics", None)
+        acc: dict[str, Tensor] = {}
+
+        def _acc(L: Any) -> None:
+            if gm_hook is None:
+                return
+            for k, v in gm_hook(L).items():
+                acc[k] = v if k not in acc else acc[k] + v
+
         ctx = sel.start_rollout(t0_type=t0_type, batch_size=B, device=device)
 
         # Pre-glimpse capture (initial scene/canvas panels), branch 0 only.
@@ -243,6 +259,7 @@ def run_rollout(
             )
             L = task.step_loss(gout.readout)
         _viz_capture(branch_idx, gout, vp0_named, vp0, L)
+        _acc(L)
         if is_policy:  # seed the reward denominator with the FULL-anchor loss (no policy loss at t0)
             prev_pi_loss = task.per_image_loss(gout.readout).detach()
 
@@ -271,6 +288,7 @@ def run_rollout(
 
             chunk_loss = chunk_loss + _tw_loss(L)
             _viz_capture(branch_idx, gout, vp_named, vp, L)
+            _acc(L)
 
             if is_policy:
                 assert joint is not None and prev_pi_loss is not None
@@ -308,9 +326,15 @@ def run_rollout(
         if n_glimpses % eff_chunk != 0:
             (chunk_loss / n_glimpses / n_branches).backward()
 
+        metrics = {k: v / n_steps for k, v in acc.items()}
+        fm_hook = getattr(task, "final_metrics", None)
+        if fm_hook is not None:  # one-shot metrics on the last readout (distill's cos-sims)
+            metrics.update(fm_hook(final_readout))
+
         return BranchResult(
             t0_type=t0_type, is_policy=is_policy,
             mean_loss=total_detached / n_steps, n_steps=n_steps, final_readout=final_readout,
+            metrics=metrics,
         )
 
     for branch_idx, t0 in enumerate(branches):

@@ -35,8 +35,14 @@ class BoundDistillTask:
     """Per-batch distill :class:`RolloutTask`. ``distill`` binds this batch's
     (standardized) teacher targets + the active loss terms."""
 
-    def __init__(self, distill: DistillTask):
+    def __init__(self, distill: DistillTask, metric_refs: dict[str, Any] | None = None):
         self.distill = distill
+        # LOGGING ONLY (`final_metrics`): the destandardizers + this batch's RAW teacher
+        # targets, so the raw-space cosines match train/loop.py's (which compares against
+        # the true raw targets, not destandardize(standardize(x))). The loss path never
+        # touches these, so they stay optional for the parity / A-B harnesses that
+        # construct this class directly.
+        self.metric_refs = metric_refs
 
     def forward_glimpse(
         self, *, model: Any, images: Tensor, state: RecurrentState,
@@ -55,6 +61,32 @@ class BoundDistillTask:
 
     def per_image_loss(self, readout: Any) -> Tensor:
         return self.distill.per_image_loss(readout)
+
+    # --- logging-only hooks (train/loop.py's BranchMetrics; no effect on the loss) ---
+    def glimpse_metrics(self, loss: Any) -> dict[str, Tensor]:
+        """The two sub-losses, summed per glimpse and averaged over the branch by the
+        engine — exactly `BranchMetrics.scene_patches_loss` / `.scene_cls_loss`."""
+        return {"scene_patches_loss": loss.scene_patches_loss.detach(),
+                "scene_cls_loss": loss.scene_cls_loss.detach()}
+
+    def final_metrics(self, readout: Any) -> dict[str, Tensor]:
+        """Cosine similarity of the LAST glimpse's predictions against the teacher, in
+        both normalized and raw (destandardized) space — `BranchMetrics.*_cos_*`.
+        Empty without ``metric_refs`` (raw space is undefined then)."""
+        if not self.metric_refs:
+            return {}
+        import torch.nn.functional as F
+        r = self.metric_refs
+        scene_pred, cls_pred = readout.scene_pred, readout.cls_pred
+        with torch.no_grad():
+            scene_raw = r["scene_denorm"](scene_pred)
+            cls_raw = r["cls_denorm"](cls_pred.unsqueeze(1)).squeeze(1)
+            return {
+                "scene_cos_raw": F.cosine_similarity(scene_raw, r["raw_scene_target"], dim=-1).mean(),
+                "scene_cos_norm": F.cosine_similarity(scene_pred, self.distill.scene_target, dim=-1).mean(),
+                "cls_cos_raw": F.cosine_similarity(cls_raw, r["raw_cls_target"], dim=-1).mean(),
+                "cls_cos_norm": F.cosine_similarity(cls_pred, self.distill.cls_target, dim=-1).mean(),
+            }
 
 
 class DistillRunTask:
@@ -76,6 +108,7 @@ class DistillRunTask:
         self.scene_norm = None
         self.cls_norm = None
         self._teacher = None
+        self._probe = None
         # WebDataset shard schedule (see resume_start_step): index of the job this
         # process runs, and the saved schedule inputs it must still agree with.
         self._start_job_index = 0
@@ -386,24 +419,34 @@ class DistillRunTask:
         else:
             raw_patches = raw_patches.to(device, dtype=torch.float32)
             raw_cls = raw_cls.to(device, dtype=torch.float32)
-        return BoundDistillTask(DistillTask(
-            scene_target=self.scene_norm(raw_patches),
-            cls_target=self.cls_norm(raw_cls.unsqueeze(1)).squeeze(1),
-            enable_scene_patches_loss=self.cfg.enable_scene_patches_loss,
-            enable_scene_cls_loss=self.cfg.enable_scene_cls_loss,
-        ))
+        return BoundDistillTask(
+            DistillTask(
+                scene_target=self.scene_norm(raw_patches),
+                cls_target=self.cls_norm(raw_cls.unsqueeze(1)).squeeze(1),
+                enable_scene_patches_loss=self.cfg.enable_scene_patches_loss,
+                enable_scene_cls_loss=self.cfg.enable_scene_cls_loss,
+            ),
+            metric_refs={  # logging only — the raw-space cosine series
+                "scene_denorm": self.scene_norm.destandardize,
+                "cls_denorm": self.cls_norm.destandardize,
+                "raw_scene_target": raw_patches, "raw_cls_target": raw_cls,
+            },
+        )
 
     @torch.no_grad()
-    def evaluate(self, *, model, head, val_loader, device, step):
-        """Reuse the existing distill ``validate()`` (cos-sim / recon per timestep). Needs
-        the teacher (cached, offline) to compute val targets on the fly. Best-effort: a
-        metric readout, not parity-gated — returns {} if it can't run."""
+    def evaluate(self, *, model, head, val_loader, device, step, tracker=None, run_dir=None):
+        """The full distill validation phase (train/loop.py 689-734): ``validate()`` over
+        the fixed val subset, logging its per-timestep cos/recon series through the REAL
+        tracker, plus the IN1k linear-probe readout, the curve plots and the PCA figure on
+        their historical cadences. Needs the teacher (cached, offline) for val targets.
+        Best-effort: a readout, not parity-gated — returns {} if it can't run."""
         import tempfile
         from pathlib import Path
 
         from canvit_pytorch.backbone.vit import NormFeatures
 
         from canvit_pretrain.train.data import scene_size_px
+        from canvit_pretrain.train.probe import load_probe
         from canvit_pretrain.train.tracker import make_tracker
         from canvit_pretrain.train.viz import validate
         try:
@@ -418,25 +461,41 @@ class DistillRunTask:
                     feats = teacher.forward_norm_features(images)
                     return NormFeatures(patches=feats.patches.float(), cls=feats.cls.float())
 
-            exp = make_tracker(tracker="none", is_main=True, is_seeding=False, run_name="distill-eval",
-                               wandb_project=None, wandb_entity=None, wandb_dir=None,
-                               prev_comet_id=None, prev_wandb_id=None)
-            metric = validate(
-                exp=exp, step=step, model=model, compute_raw_targets=compute_raw_targets,
-                scene_normalizer=self.scene_norm, cls_normalizer=self.cls_norm,
-                val_batches=val_loader.batches(), device=device,
-                canvas_grid_size=self.cfg.canvas_patch_grid_size,
-                scene_size_px=scene_size_px(self.cfg.canvas_patch_grid_size,
-                                            model.backbone.patch_size_px),
-                glimpse_size_px=self._glimpse_size_px,
-                run_dir=Path(tempfile.mkdtemp(prefix="distill_eval_")),
-                n_eval_viewpoints=self.cfg.n_eval_viewpoints,
-                min_viewpoint_scale=self.cfg.min_viewpoint_scale, prefix="val",
-            )
+            exp = tracker or make_tracker(
+                tracker="none", is_main=True, is_seeding=False, run_name="distill-eval",
+                wandb_project=None, wandb_entity=None, wandb_dir=None,
+                prev_comet_id=None, prev_wandb_id=None)
+            # Viz/curve cadence counts VALIDATIONS, as in train/loop.py — which assumes
+            # the harness's eval_every is the config's val_every (the launcher sets both).
+            val_count = step // max(1, self.cfg.val_every)
+            fs = self.cfg.foveated_scale
+            if self._probe is None:  # IN1k linear probe on the teacher's features
+                self._probe = load_probe(self.cfg.teacher_name, device)
+            with amp:
+                metric = validate(
+                    exp=exp, step=step, model=model, compute_raw_targets=compute_raw_targets,
+                    scene_normalizer=self.scene_norm, cls_normalizer=self.cls_norm,
+                    val_batches=val_loader.batches(), device=device,
+                    canvas_grid_size=self.cfg.canvas_patch_grid_size,
+                    scene_size_px=scene_size_px(self.cfg.canvas_patch_grid_size,
+                                                model.backbone.patch_size_px),
+                    glimpse_size_px=self._glimpse_size_px,
+                    run_dir=run_dir or Path(tempfile.mkdtemp(prefix="distill_eval_")),
+                    n_eval_viewpoints=self.cfg.n_eval_viewpoints,
+                    min_viewpoint_scale=self.cfg.min_viewpoint_scale,
+                    # foveated/square validate at the TRAINING scale for mode='fixed';
+                    # sampled modes keep the scale-1 FULL anchor.
+                    foveated_eval_scale=(fs.fixed_scale if fs.mode == "fixed" else 1.0),
+                    prefix="val", probe=self._probe,
+                    log_curves=(val_count % max(1, self.cfg.curve_every_n_vals) == 0),
+                    log_pca=(val_count % max(1, self.cfg.viz_every_n_vals) == 0),
+                    teacher=teacher, log_spatial_stats=self.cfg.log_spatial_stats,
+                    teacher_name=self.cfg.teacher_name,
+                )
             return {"val_metric": float(metric)}
         except Exception as e:  # eval is a readout; never let it kill training
             import logging
-            logging.getLogger(__name__).warning("distill evaluate() skipped: %s", e)
+            logging.getLogger(__name__).warning("distill evaluate() skipped: %s", e, exc_info=True)
             return {}
 
     def model_config(self, model):
