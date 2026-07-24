@@ -23,12 +23,13 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
 import torch
 
+from canvit_pretrain.harness import ddp
 from canvit_pretrain.harness.checkpoint import find_latest, load_checkpoint, restore_into
 from canvit_pretrain.harness.loop import (
     apply_requires_grad,
@@ -164,10 +165,12 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
     """Train ``task`` under ``spec`` for ``settings.n_steps`` and return the last
     step's metrics. Task-neutral; every task-specific decision is delegated to ``task``.
     """
-    use_cuda = settings.device.startswith("cuda") and torch.cuda.is_available()
-    device = torch.device(settings.device if use_cuda else "cpu")
-    torch.manual_seed(settings.seed + settings.rank)
-    is_dist = settings.world_size > 1
+    # Topology first: under srun the environment knows the real rank/world size, and
+    # RunSettings' single-GPU defaults would make every rank think it trains alone.
+    dinfo = ddp.setup(device=settings.device, rank=settings.rank, world_size=settings.world_size)
+    rank, world_size, device, is_dist = dinfo.rank, dinfo.world_size, dinfo.device, dinfo.is_dist
+    use_cuda = device.type == "cuda"
+    torch.manual_seed(settings.seed + rank)
 
     caps = task.caps()
     report = check_spec(spec, caps, is_dist=is_dist)
@@ -196,7 +199,7 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
     failed_marker = ((run_dir or ckpt_dir) / "FAILED") if (run_dir or ckpt_dir) else None
     if settings.use_failed_marker and failed_marker is not None and failed_marker.exists():
         log.error("FAILED marker exists (%s) — a previous job crashed; delete it to retry.", failed_marker)
-        if settings.rank == 0:
+        if rank == 0:
             cancel_slurm_array()
         raise RuntimeError(f"Refusing to start: {failed_marker} exists")
 
@@ -223,7 +226,7 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
 
     joint = None
     if spec.train_policy or spec.policy_loss_active:
-        gen = torch.Generator(device=device).manual_seed(settings.seed + settings.rank)
+        gen = torch.Generator(device=device).manual_seed(settings.seed + rank)
         joint = task.build_policy(model, device=device, canvas_grid=canvas_grid, generator=gen)
 
     # The harness — not the task — decides what trains (design §3.1).
@@ -254,24 +257,43 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
         log.info("FRESH mode: no checkpoint, starting from scratch")
 
     # --- data + selector ---------------------------------------------------
-    train_loader, val_loader = task.build_loaders(world_size=settings.world_size, rank=settings.rank)
+    train_loader, val_loader = task.build_loaders(world_size=world_size, rank=rank)
+    # Every rank must start from IDENTICAL weights and buffers, or averaged gradients are
+    # applied to diverging models. Done after build_loaders because distill's standardizer
+    # stats are model buffers filled there from one shard (train/loop.py 583-585), and
+    # after the resume/seed restore so the loaded state is what gets broadcast.
+    if is_dist:
+        ddp.broadcast_parameters(model, joint.scorer if joint is not None else None)
+        log.info("DDP: broadcast parameters + buffers from rank 0")
     train_batches = _infinite(train_loader)
     selector = task.build_selector(device=device, canvas_grid=canvas_grid, is_foveated=is_foveated)
     branches = task.branches()
 
     amp_ctx: Any = nullcontext()
     if settings.amp and use_cuda:
-        amp_ctx = torch.autocast("cuda", dtype=getattr(torch, settings.amp_dtype))
+        # bfloat16 needs sm_80+ (Ampere); fall back to float16 on older GPUs rather than
+        # silently running an emulated/broken autocast (train/loop.py 455-460).
+        amp_dtype = settings.amp_dtype
+        if amp_dtype == "bfloat16" and torch.cuda.get_device_capability(device) < (8, 0):
+            log.warning("bfloat16 needs sm_80+; this GPU is sm_%d%d — using float16",
+                        *torch.cuda.get_device_capability(device))
+            amp_dtype = "float16"
+        amp_ctx = torch.autocast("cuda", dtype=getattr(torch, amp_dtype))
 
     # --- tracker (optional) ------------------------------------------------
+    prior_meta = (prior_ckpt or {}).get("metadata", {}) if prior_ckpt else {}
     tracker = None
     if settings.tracker == "wandb":
         from canvit_pretrain.train.tracker import make_tracker
+        # Resume the SAME wandb run across SLURM array tasks (train/loop.py 249-253):
+        # a 245-job array is ONE experiment, and without the id round-trip each task
+        # would open its own run and the curves would come out in 245 pieces.
         tracker = make_tracker(
-            tracker="wandb", is_main=(settings.rank == 0), is_seeding=False,
+            tracker="wandb", is_main=(rank == 0), is_seeding=False,
             run_name=settings.run_name or f"{task.name}-unified",
             wandb_project=settings.wandb_project, wandb_entity=settings.wandb_entity,
-            wandb_dir=settings.wandb_dir, prev_comet_id=None, prev_wandb_id=None,
+            wandb_dir=settings.wandb_dir, prev_comet_id=None,
+            prev_wandb_id=prior_meta.get("wandb_run_id"),
         )
         # Hyperparameters (train/loop.py 279-282, 423): the task's flattened config,
         # the resolved TrainSpec, the SLURM job id and the trainable/total param split.
@@ -300,15 +322,29 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
             payload["train/lr"] = scheduler.get_last_lr()[0]
             tracker.log_metrics(payload, step=step)
 
+    def on_best(step: int, name: str, value: float) -> None:
+        """The loop decides + writes ``best.pt``; this only mirrors the running best to
+        the tracker (ade20k/train.py logs a ``best_val_miou_t*`` series alongside)."""
+        if tracker is not None:
+            tracker.log_metrics({f"eval/best_{name}": value}, step=step)
+
     def on_eval(step: int) -> dict:
         # tracker/run_dir go through so a task's validation can log its OWN rich series
         # (distill's per-timestep val curves + probe accuracy) and write its figures to
         # the run dir — train/loop.py passed `exp` and `run_dir` straight into validate().
+        # Validation is rank-0 only over the fixed subset (identical samples regardless of
+        # world size — the same choice train/loop.py 692-696 makes); the others wait at the
+        # barrier. Safe because evaluate() runs under no_grad with no collectives.
+        if is_dist and rank != 0:
+            ddp.barrier()
+            return {}
         metrics = task.evaluate(model=model, head=head, val_loader=val_loader, device=device,
                                 step=step, tracker=tracker, run_dir=run_dir)
         log.info("step %d  eval: %s", step, metrics)
         if tracker is not None:
             tracker.log_metrics({f"eval/{k}": v for k, v in metrics.items()}, step=step)
+        if is_dist:
+            ddp.barrier()
         return metrics
 
     # Checkpoint metadata: ACCUMULATE config + provenance history across resumes
@@ -320,7 +356,6 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
     from canvit_pretrain.checkpoint import current_provenance
 
     task_meta = task.checkpoint_metadata(model)
-    prior_meta = (prior_ckpt or {}).get("metadata", {}) if prior_ckpt else {}
     cfg_history = dict(prior_meta.get("training_config_history") or {})
     prov_history = dict(prior_meta.get("provenance_history") or {})
     _now = datetime.now(UTC).isoformat()
@@ -328,6 +363,10 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
     prov_history[_now] = current_provenance()
     metadata = {
         **task_meta,
+        # Carried forward so the NEXT array task resumes this same wandb run rather
+        # than starting a fresh one (see the tracker block above).
+        "wandb_run_id": (tracker.get_wandb_id() if tracker is not None
+                         else prior_meta.get("wandb_run_id")),
         # What the NEXT job needs to resume this task's DATA schedule (distill's
         # WebDataset job_index + the invariants it is only valid under; {} for the
         # map-style tasks). Built after build_loaders, which is where it becomes known.
@@ -341,7 +380,7 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
             task=task, model=model, head=head, optimizer=optimizer, scheduler=scheduler,
             selector=selector, spec=spec, branches=branches, canvas_grid=canvas_grid, device=device,
             train_batches=train_batches, n_steps=settings.n_steps, start_step=start_step,
-            joint=joint, amp_ctx=amp_ctx, grad_clip=settings.grad_clip, is_dist=is_dist,
+            joint=joint, amp_ctx=amp_ctx, grad_clip=settings.grad_clip, is_dist=is_dist, rank=rank,
             task_name=task.name, model_config=task.model_config(model),
             metadata=metadata, log_every=settings.log_every,
             ckpt_dir=ckpt_dir, ckpt_every=settings.ckpt_every, eval_every=settings.eval_every,
@@ -350,12 +389,14 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
             viz_every=settings.viz_every, run_dir=run_dir,
             grad_norm_deep_prefixes=settings.grad_norm_deep_prefixes,
             signal_checkpoint=settings.signal_checkpoint,
+            best_metric=getattr(task, "best_metric", None),
             on_log=on_log, on_eval=(on_eval if settings.eval_every else None),
+            on_best=on_best,
         )
     except Exception:
         # SLURM crash-loop guard: leave a FAILED marker + stop the array so the next
         # task doesn't re-crash on the same fault (opt-in; matches train/loop.py).
-        if settings.use_failed_marker and failed_marker is not None and settings.rank == 0:
+        if settings.use_failed_marker and failed_marker is not None and rank == 0:
             failed_marker.parent.mkdir(parents=True, exist_ok=True)
             failed_marker.write_text("crashed\n")
             cancel_slurm_array()
@@ -366,147 +407,16 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
     return last
 
 
-def _build_task(task_name: str, overrides: dict):
-    """Construct a task's default per-task config (env-driven defaults) with a curated
-    set of CLI overrides applied, and wrap it in its ``*RunTask``."""
-    from dataclasses import replace
-
-    if task_name == "ade20k":
-        from canvit_pretrain.ade20k.config import Ade20kConfig
-        from canvit_pretrain.tasks.ade20k.task import Ade20kRunTask
-        cfg = Ade20kConfig()
-        for k in ("model_repo", "batch_size", "n_timesteps", "scene_size", "ade20k_root"):
-            if overrides.get(k) is not None:
-                cfg = replace(cfg, **{k: overrides[k]})
-        if overrides.get("lr") is not None:
-            cfg = replace(cfg, peak_lr=overrides["lr"])
-        return Ade20kRunTask(cfg)
-    if task_name == "in1k":
-        from canvit_pretrain.in1k.config import In1kConfig
-        from canvit_pretrain.tasks.in1k.task import In1kRunTask
-        cfg = In1kConfig()
-        for k in ("model_repo", "batch_size", "n_timesteps", "scene_size", "train_dir", "val_dir", "mode"):
-            if overrides.get(k) is not None:
-                cfg = replace(cfg, **{k: overrides[k]})
-        if overrides.get("lr") is not None:
-            cfg = replace(cfg, peak_lr=overrides["lr"])
-        return In1kRunTask(cfg)
-    if task_name == "distill":
-        from canvit_pretrain.train.config import Config
-        from canvit_pretrain.tasks.distill.task import DistillRunTask
-        cfg = Config()
-        wds = overrides.get("webdataset_dir") or os.environ.get("WEBDATASET_DIR")
-        if wds is not None:
-            cfg = replace(cfg, webdataset_dir=Path(wds))
-        for k in ("batch_size_per_gpu", "canvas_patch_grid_size"):
-            if overrides.get(k) is not None:
-                cfg = replace(cfg, **{k: overrides[k]})
-        if overrides.get("lr") is not None:
-            cfg = replace(cfg, peak_lr=overrides["lr"])
-        return DistillRunTask(cfg)
-    raise ValueError(f"unknown task {task_name!r}")
-
-
-def _resolve_spec(task, preset: str, lr: float | None, wd: float | None) -> TrainSpec:
-    """Pick the spec from ``--preset`` (``default`` = the task's own default_spec) and
-    ensure every trainable module has an optimizer group (presets ship empty ``optim``)."""
-    from dataclasses import replace
-
-    from canvit_pretrain.harness.spec import BpttSpec, GroupOptim
-    from canvit_pretrain.train.config import JointPolicyConfig
-
-    if preset == "default":
-        return task.default_spec()
-    horizon = getattr(task.cfg, "n_timesteps", 10)
-    bptt_none = BpttSpec(mode="none", horizon=horizon)
-    bptt_full = BpttSpec(mode="full", horizon=horizon)
-    if preset == "probe":
-        spec = TrainSpec.probe(bptt=bptt_none)
-    elif preset == "finetune":
-        spec = TrainSpec.finetune(bptt=bptt_full)
-    elif preset == "policy_only":
-        spec = TrainSpec.policy_only(bptt=bptt_none)
-    elif preset == "joint":
-        spec = TrainSpec.joint()
-    else:
-        raise ValueError(f"unknown preset {preset!r}")
-    # Headless tasks (distill: heads live inside the forward, caps.has_head=False) can't
-    # train a separate head — drop train_head so the head-bearing presets still apply
-    # (distill 'finetune' => task-only backbone; distill 'joint' => backbone + policy).
-    if not task.caps().has_head and spec.train_head:
-        spec = replace(spec, train_head=False)
-    # fill optim for trainable modules that lack a group
-    _lr = lr if lr is not None else 3e-4
-    _wd = wd if wd is not None else 1e-3
-    pol = JointPolicyConfig()
-    optim = dict(spec.optim)
-    for m in spec.trainable_modules():
-        if m in optim:
-            continue
-        if m == "policy":
-            optim[m] = GroupOptim(lr=pol.policy_lr, weight_decay=pol.policy_weight_decay)
-        else:
-            optim[m] = GroupOptim(lr=_lr, weight_decay=_wd)
-    return replace(spec, optim=optim)
-
-
 def main(argv: list[str] | None = None) -> None:
-    """Additive unified CLI: ``python -m canvit_pretrain.harness.run --task {distill,ade20k,in1k}``.
+    """``python -m canvit_pretrain.harness.run {distill,ade20k,in1k} [flags]``.
 
-    Deliberately does NOT replace the live ``python -m canvit_pretrain.train`` (distill)
-    entry — the big-bang cutover (owner-gated) repoints that name here and rewrites the
-    SLURM launchers. This is a v1 curated surface (preset + common knobs); full per-task
-    config CLI parity lands at the cutover."""
-    import argparse
+    The CLI itself lives in :mod:`canvit_pretrain.harness.cli` — tyro over each task's
+    OWN config dataclass, so every field (incl. the nested ``--cfg.model.*`` patcher and
+    ``--cfg.foveated-scale.*`` trees) is reachable. Imported lazily so ``run.py`` stays
+    import-light and offline-safe."""
+    from canvit_pretrain.harness.cli import main as cli_main
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    p = argparse.ArgumentParser("canvit_pretrain.harness.run")
-    p.add_argument("--task", required=True, choices=["distill", "ade20k", "in1k"])
-    p.add_argument("--preset", default="default",
-                   choices=["default", "probe", "finetune", "policy_only", "joint"])
-    p.add_argument("--n-steps", type=int, default=100)
-    p.add_argument("--start-step", type=int, default=0)
-    p.add_argument("--grad-clip", type=float, default=1.0)
-    p.add_argument("--no-amp", action="store_true")
-    p.add_argument("--device", default="cuda")
-    p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--log-every", type=int, default=20)
-    p.add_argument("--ckpt-every", type=int, default=0)
-    p.add_argument("--eval-every", type=int, default=0)
-    p.add_argument("--ckpt-dir", type=Path, default=None)
-    p.add_argument("--tracker", default="none", choices=["none", "wandb"])
-    p.add_argument("--wandb-project", default=None)
-    p.add_argument("--wandb-entity", default=None)
-    p.add_argument("--run-name", default=None)
-    # curated per-task overrides (paths otherwise come from env defaults)
-    p.add_argument("--lr", type=float, default=None)
-    p.add_argument("--wd", type=float, default=None)
-    p.add_argument("--model-repo", default=None)
-    p.add_argument("--batch-size", type=int, default=None)
-    p.add_argument("--n-timesteps", type=int, default=None)
-    p.add_argument("--scene-size", type=int, default=None)
-    p.add_argument("--mode", default=None, choices=[None, "frozen", "finetune"])
-    p.add_argument("--webdataset-dir", default=None)
-    p.add_argument("--ade20k-root", type=Path, default=None)
-    p.add_argument("--in1k-train-dir", type=Path, default=None)
-    p.add_argument("--in1k-val-dir", type=Path, default=None)
-    a = p.parse_args(argv)
-
-    overrides = {
-        "model_repo": a.model_repo, "batch_size": a.batch_size, "batch_size_per_gpu": a.batch_size,
-        "n_timesteps": a.n_timesteps, "scene_size": a.scene_size, "mode": a.mode,
-        "webdataset_dir": a.webdataset_dir, "ade20k_root": a.ade20k_root,
-        "train_dir": a.in1k_train_dir, "val_dir": a.in1k_val_dir, "lr": a.lr,
-    }
-    task = _build_task(a.task, overrides)
-    spec = _resolve_spec(task, a.preset, a.lr, a.wd)
-    settings = RunSettings(
-        n_steps=a.n_steps, start_step=a.start_step, grad_clip=a.grad_clip, amp=not a.no_amp,
-        device=a.device, seed=a.seed, log_every=a.log_every, ckpt_every=a.ckpt_every,
-        eval_every=a.eval_every, ckpt_dir=a.ckpt_dir, tracker=a.tracker,
-        wandb_project=a.wandb_project, wandb_entity=a.wandb_entity, run_name=a.run_name,
-    )
-    run(task=task, spec=spec, settings=settings)
+    cli_main(argv)
 
 
 __all__ = ["RunSettings", "RunTask", "run", "main"]

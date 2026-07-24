@@ -75,9 +75,12 @@ engine cores (Bound*Task). Distill parity byte-exact; config cross-product prove
 - `harness/run.py` — **the single orchestration** `run(*, task, spec, settings)` (build_model →
   build_policy(joint) → apply_requires_grad → build_optimizer → build_loaders → build_selector →
   run_training_loop, with eval/log/ckpt hooks) + `RunSettings` (composed config, D-B) + a
-  `RunTask` Protocol + an **additive CLI** `python -m canvit_pretrain.harness.run --task {distill,
-  ade20k,in1k} [--preset ...]`. The CLI deliberately does NOT replace `python -m canvit_pretrain.train`
-  (that repoint is the owner-gated big-bang cutover).
+  `RunTask` Protocol + an additive CLI. The CLI deliberately does NOT replace
+  `python -m canvit_pretrain.train` (that repoint is the owner-gated big-bang cutover).
+  **SUPERSEDED 2026-07-24 — see `09-cli-and-checkpoint.md`:** the curated `--task/--preset`
+  argparse is gone, replaced by `harness/cli.py` (tyro over each task's own config, subcommand
+  form `... harness.run distill --cfg.model.patcher-name foveated`). `RunSettings` is now
+  DERIVED from the task config, and `to_hf` reads harness checkpoints.
 - `tasks/{distill,ade20k,in1k}/task.py` — each gained a run-level `*RunTask` (DistillRunTask /
   Ade20kRunTask / In1kRunTask) implementing the full seam: caps/default_spec/build_model
   (from_pretrained_with_new_probe|head / create_model)/build_loaders (ade map / in1k wds+val /

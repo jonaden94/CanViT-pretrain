@@ -80,3 +80,55 @@ def test_loop_trains_probe_and_checkpoint_roundtrips(tmp_path):
     restore_into(payload, model=fresh)
     for (n, p), (_, q) in zip(seg.head.named_parameters(), fresh.head.named_parameters()):
         assert torch.allclose(p, q), f"restored head mismatch at {n}"
+
+
+def test_best_checkpoint_tracks_max_and_leaves_latest_alone(tmp_path):
+    """`best.pt` follows the maximum of the task's best_metric, and must NOT steal the
+    `latest.pt` pointer — otherwise a resumed array task restarts from the best step."""
+    seg = _seg()
+    spec = TrainSpec.probe(
+        bptt=BpttSpec(mode="none", horizon=2),
+        optim={"head": GroupOptim(lr=1e-2, schedule=ScheduleSpec(kind="warmup_constant", warmup_steps=1))},
+    )
+    apply_requires_grad(model=seg, head=seg.head, joint=None, spec=spec)
+    opt, sched = build_optimizer_and_scheduler(spec, {"head": list(seg.head.parameters())})
+    selector = RandomSelector(is_foveated=False, foveated_scale=FoveatedScaleConfig(), min_viewpoint_scale=0.05)
+
+    # mIoU rises then falls: the best is at step 2, which is NOT the last eval.
+    scores = {0: 0.10, 1: 0.30, 2: 0.50, 3: 0.20}
+    seen: list[tuple[int, float]] = []
+    run_training_loop(
+        task=_StubAdeTask(), model=seg, head=seg.head, optimizer=opt, scheduler=sched,
+        selector=selector, spec=spec, branches=[ViewpointType.FULL], canvas_grid=_G,
+        device=torch.device("cpu"), train_batches=_batches(), n_steps=4,
+        task_name="ade20k", model_config={"num_classes": NUM_CLASSES}, ckpt_dir=tmp_path,
+        eval_every=1, best_metric="miou_final",
+        on_eval=lambda s: {"miou_final": scores[s]},
+        on_best=lambda s, n, v: seen.append((s, v)),
+    )
+
+    best = load_checkpoint(tmp_path / "best.pt", "cpu")
+    assert best["step"] == 2, "best.pt should hold the step-2 peak, not the last eval"
+    # the running max is monotone and ends at the peak, not at the final (worse) score
+    assert [v for _, v in seen] == [0.10, 0.30, 0.50, 0.50]
+    # resume still resolves to the NEWEST checkpoint, not the best one
+    assert find_latest(tmp_path).name == "step-4.pt"
+
+
+def test_no_best_metric_writes_no_best_checkpoint(tmp_path):
+    seg = _seg()
+    spec = TrainSpec.probe(
+        bptt=BpttSpec(mode="none", horizon=2),
+        optim={"head": GroupOptim(lr=1e-2, schedule=ScheduleSpec(kind="warmup_constant", warmup_steps=1))},
+    )
+    apply_requires_grad(model=seg, head=seg.head, joint=None, spec=spec)
+    opt, sched = build_optimizer_and_scheduler(spec, {"head": list(seg.head.parameters())})
+    selector = RandomSelector(is_foveated=False, foveated_scale=FoveatedScaleConfig(), min_viewpoint_scale=0.05)
+    run_training_loop(
+        task=_StubAdeTask(), model=seg, head=seg.head, optimizer=opt, scheduler=sched,
+        selector=selector, spec=spec, branches=[ViewpointType.FULL], canvas_grid=_G,
+        device=torch.device("cpu"), train_batches=_batches(), n_steps=2,
+        task_name="ade20k", model_config={"num_classes": NUM_CLASSES}, ckpt_dir=tmp_path,
+        eval_every=1, on_eval=lambda s: {"miou_final": 0.5},
+    )
+    assert not (tmp_path / "best.pt").exists()

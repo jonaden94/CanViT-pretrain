@@ -192,20 +192,28 @@ def test_checkpoint_metadata_history_accumulates_and_carries_view_scale():
 
     from types import SimpleNamespace
 
-    cfg = Config(webdataset_dir="/nonexistent")
+    cfg = Config(webdataset_dir="/nonexistent", patch_stride=8)
     cfg.model.patcher_name = "foveated"
     cfg.foveated_scale = FoveatedScaleConfig(mode="fixed", fixed_scale=2.0)
 
-    # is_foveated() only reads model.cfg.patcher_name
-    meta = DistillRunTask(cfg).checkpoint_metadata(SimpleNamespace(cfg=cfg.model))
+    # is_foveated() reads model.cfg.patcher_name; the grid sizes come off the model
+    stub = SimpleNamespace(cfg=cfg.model, canvas_patch_grid_sizes=[32])
+    meta = DistillRunTask(cfg).checkpoint_metadata(stub)
     assert meta["pretrain_view_scale"] == 2.0, meta
     assert meta["patcher_name"] == "foveated"
+    # Everything to_hf needs for config.json must be recorded, or the HF export loses
+    # the overlapping-patch stride / grid and the sampled-scale description.
+    assert meta["canvas_patch_grid_sizes"] == [32]
+    assert meta["patch_stride"] == 8
+    assert meta["foveated_scale"]["mode"] == "fixed"
 
     # uniform / sampled scale => no fixed view scale to record
     cfg2 = Config(webdataset_dir="/nonexistent")
     cfg2.model.patcher_name = "uniform"
-    meta2 = DistillRunTask(cfg2).checkpoint_metadata(SimpleNamespace(cfg=cfg2.model))
+    meta2 = DistillRunTask(cfg2).checkpoint_metadata(
+        SimpleNamespace(cfg=cfg2.model, canvas_patch_grid_sizes=[32]))
     assert meta2["pretrain_view_scale"] is None
+    assert meta2["patch_stride"] is None
 
     # accumulation rule: prior history is carried forward, not replaced
     prior = {"metadata": {"training_config_history": {"t0": {"a": 1}},

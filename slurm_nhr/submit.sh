@@ -26,9 +26,14 @@ CFG_NUM_WORKERS=4
 EXTRA_ARGS=
 # ========================================================================
 
+# Which sbatch script to run. Default = the per-task launcher; set
+# SBATCH_SCRIPT=slurm_nhr/harness_train.sbatch (plus TASK=...) to run the same
+# config through the unified harness instead.
+SBATCH_SCRIPT="${SBATCH_SCRIPT:-slurm_nhr/base_train.sbatch}"
+
 mkdir -p "logs/$RUN_GROUP/$RUN_NAME/log"
 export RUN_GROUP RUN_NAME NGPU EXTRA_ARGS
-for v in $(compgen -v); do [[ "$v" == CFG_* ]] && export "$v"; done
+for v in $(compgen -v); do [[ "$v" == CFG_* || "$v" == OPT_* ]] && export "$v"; done
 
 sbatch \
     --gpus-per-node=A100:$NGPU \
@@ -40,4 +45,4 @@ sbatch \
     --output="logs/$RUN_GROUP/$RUN_NAME/log/job-%A_%a.log" \
     --error="logs/$RUN_GROUP/$RUN_NAME/log/job-%A_%a.log" \
     --export=ALL \
-    slurm_nhr/base_train.sbatch
+    "$SBATCH_SCRIPT"

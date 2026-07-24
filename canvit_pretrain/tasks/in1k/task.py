@@ -78,10 +78,18 @@ class In1kRunTask:
     config passed in (``rl``)."""
 
     name = "in1k"
+    best_metric = "top1"
+    """Eval key the harness maximizes for `best.pt` — matches `in1k/train.py`'s
+    `best_top1` selection. NB the standalone also writes a `best-hf/` export alongside;
+    here that stays a separate step via `python -m canvit_pretrain.checkpoint.to_hf`."""
 
-    def __init__(self, cfg, *, rl=None):
+    def __init__(self, cfg, *, rl=None, total_steps=None):
         self.cfg = cfg
         self.rl = rl
+        # In1kConfig schedules in EPOCHS, but warmup_cosine needs a step budget. The
+        # runner knows it (it is the job's n_steps, and in1k runs the whole schedule in
+        # one job) and passes it down; None => no decay, warmup only.
+        self.total_steps = total_steps
 
     def caps(self):
         from canvit_pretrain.harness.spec import TaskCaps
@@ -89,11 +97,25 @@ class In1kRunTask:
 
     def default_spec(self):
         """cfg.mode drives the default: 'frozen' => probe (backbone frozen, bptt none);
-        'finetune' => train backbone + head end to end (full-graph)."""
+        'finetune' => train backbone + head end to end (full-graph).
+
+        The LR schedule reproduces ``in1k/train.py``'s AdamW + ``warmup_cosine_scheduler``:
+        warmup from ``peak_lr * warmup_lr_ratio`` then cosine to 0. That file derives its
+        step counts from the loader (``warmup_epochs * batches_per_epoch``, total
+        ``epochs * batches_per_epoch``); here the same ratio is taken against
+        ``self.total_steps``, which is algebraically the same number.
+        """
         from canvit_pretrain.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TrainSpec
         T = self.cfg.n_timesteps
+        if self.total_steps is None:
+            sched = ScheduleSpec(kind="warmup_constant", warmup_steps=0)
+        else:
+            warmup = max(1, int(self.cfg.warmup_epochs * self.total_steps / self.cfg.epochs))
+            sched = ScheduleSpec(kind="warmup_cosine", warmup_steps=warmup,
+                                 total_steps=self.total_steps,
+                                 start_lr=self.cfg.peak_lr * self.cfg.warmup_lr_ratio)
         head_go = GroupOptim(lr=self.cfg.peak_lr, weight_decay=self.cfg.weight_decay,
-                             schedule=ScheduleSpec(kind="warmup_constant", warmup_steps=0))
+                             schedule=sched)
         if self.cfg.mode == "finetune":
             return TrainSpec.finetune(bptt=BpttSpec(mode="full", horizon=T),
                                       optim={"backbone": head_go, "head": head_go})

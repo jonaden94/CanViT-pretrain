@@ -28,6 +28,7 @@ from typing import Any
 
 import torch
 
+from canvit_pretrain.harness import ddp
 from canvit_pretrain.harness.checkpoint import save_checkpoint
 from canvit_pretrain.harness.rollout import run_rollout
 from canvit_pretrain.harness.spec import TrainSpec
@@ -157,6 +158,7 @@ def run_training_loop(
     amp_ctx: Any | None = None,
     grad_clip: float = 1.0,
     is_dist: bool = False,
+    rank: int = 0,
     task_name: str = "task",
     model_config: dict | None = None,
     metadata: dict | None = None,
@@ -171,8 +173,10 @@ def run_training_loop(
     viz_every: int = 0,              # 0 => never; else collect+render viz every N steps
     run_dir: Path | None = None,     # where task.render_viz writes figures (locally)
     signal_checkpoint: bool = True,  # honor SIGUSR1 -> checkpoint (handler in run())
+    best_metric: str | None = None,  # eval key to MAXIMIZE -> writes ckpt_dir/best.pt
     on_log: Callable[[int, dict], None] | None = None,
     on_eval: Callable[[int], dict] | None = None,
+    on_best: Callable[[int, str, float], None] | None = None,
 ) -> dict:
     """Run ``n_steps`` of training and return the last step's metrics. ``train_batches``
     yields task-native batches; ``task.bind`` turns each into the per-glimpse
@@ -188,17 +192,69 @@ def run_training_loop(
     ema = EMATracker(ema_alpha) if ema_alpha > 0 else None
     last: dict = {}
 
+    def _write_ckpt(path: Path, step: int, *, update_latest: bool = True) -> None:
+        save_checkpoint(
+            path, model=model, optimizer=optimizer, scheduler=scheduler,
+            step=step, task_name=task_name, spec=spec, model_config=model_config,
+            metadata=metadata, joint=joint, update_latest=update_latest,
+        )
+
     def _save(step: int) -> None:
+        # Rank 0 writes; the others wait, so no rank races ahead of a half-written file.
+        if is_dist and rank != 0:
+            ddp.barrier()
+            return
         if ckpt_dir is not None:
-            save_checkpoint(
-                ckpt_dir / f"step-{step}.pt", model=model, optimizer=optimizer, scheduler=scheduler,
-                step=step, task_name=task_name, spec=spec, model_config=model_config,
-                metadata=metadata, joint=joint,
-            )
+            _write_ckpt(ckpt_dir / f"step-{step}.pt", step)
+        if is_dist:
+            ddp.barrier()
+
+    # Best-checkpoint selection (ade20k/train.py 177-182, in1k/train.py 210-214): the
+    # task names an eval metric to MAXIMIZE and the improving checkpoint is kept as
+    # `best.pt`, because what you publish is the best probe, not the last one. Per-job,
+    # which is exactly the standalone semantics (neither standalone resumes, and both
+    # run their whole schedule in one job). Tasks with no `best_metric` are unaffected.
+    #
+    # NO barrier here, unlike _save: validation is rank-0-only (on_eval returns {} on the
+    # others), so only rank 0 ever gets a metric to compare. A barrier would deadlock.
+    best_so_far: float | None = None
+
+    def _track_best(step: int, metrics: dict) -> None:
+        nonlocal best_so_far
+        if not best_metric or best_metric not in metrics:
+            return
+        value = metrics[best_metric]
+        if best_so_far is None or value > best_so_far:
+            best_so_far = value
+            if ckpt_dir is not None:
+                # update_latest=False is load-bearing: `latest.pt` must keep pointing at
+                # the NEWEST checkpoint. Repointing it at best.pt would make a resumed
+                # array task silently restart from the best step, not the last one.
+                _write_ckpt(ckpt_dir / "best.pt", step, update_latest=False)
+                log.info("step %d  new best %s=%.4f -> best.pt", step, best_metric, value)
+        if on_best is not None:
+            on_best(step, best_metric, best_so_far)
 
     t_data_total = t_gpu_total = 0.0
 
     for step in range(start_step, start_step + n_steps):
+        # Validate BEFORE the update, at step boundaries INCLUDING step 0 (train/loop.py
+        # 689). Not cosmetic: it makes `step` the number of updates the evaluated weights
+        # have had, so a resumed SLURM array task's val curve continues where the previous
+        # one ended instead of being shifted by an eval interval, and step 0 is the only
+        # record of the seeded model before this job touched it.
+        #
+        # train/loop.py additionally skips its `end_step`, but that is NOT translated
+        # here: its range is `start..end_step` INCLUSIVE with training gated on
+        # `step < end_step`, so its last iteration is a validate-only tail that would
+        # re-validate exactly what the next job's step 0 validates. This loop has no such
+        # tail (it trains every iterated step and checkpoints after), so the duplicate it
+        # guards against cannot occur, and excluding the last step here would instead drop
+        # a real validation point.
+        if on_eval is not None and eval_every and step % eval_every == 0:
+            last["eval"] = on_eval(step)
+            _track_best(step, last["eval"])
+
         t0 = time.perf_counter()
         batch = next(train_batches)
         images = task.batch_images(batch, device)
@@ -216,11 +272,16 @@ def run_training_loop(
             task_weight=spec.task_weight, collect_viz=do_viz, viz_task=(task if do_viz else None),
             joint=joint,
         )
+        # DDP: average gradients across ranks BEFORE clipping (design §9 — nothing is
+        # DDP-wrapped, so every trainable module is synced by hand here). Clipping first
+        # and averaging after is a different operation and would drift from 1-GPU.
+        if is_dist:
+            ddp.allreduce_grads(trainable)
         grad_norm = None
         if trainable:
             grad_norm = torch.nn.utils.clip_grad_norm_(trainable, grad_clip)
         if joint is not None:
-            if is_dist:  # scorer is not DDP-wrapped (design §9) — average its grads by hand
+            if is_dist:  # the scorer carries its own reward standardizers -> its own hook
                 joint.allreduce_grads()
             torch.nn.utils.clip_grad_norm_(joint.scorer.parameters(), grad_clip)
 
@@ -245,7 +306,10 @@ def run_training_loop(
         last = {"step": step, "total_loss_raw": float(result.total_loss),
                 "n_glimpses": result.n_glimpses}
         for k, v in smoothed.items():
-            last[k] = ema.update(k, v).item() if ema is not None else float(v)
+            val = ema.update(k, v).item() if ema is not None else float(v)
+            # Under DDP each rank EMAs its own batches; mean them so the logged series
+            # describes the global training population (train/loop.py 913).
+            last[k] = ddp.all_reduce_mean(val) if is_dist else val
         # Instantaneous (never smoothed), matching train/loop.py's metrics dict.
         if grad_norm is not None:
             last["grad_norm"] = float(grad_norm)
@@ -270,8 +334,6 @@ def run_training_loop(
 
         if is_log:
             on_log(step, last)
-        if on_eval is not None and eval_every and step > 0 and step % eval_every == 0:
-            last["eval"] = on_eval(step)
         if ckpt_every and step > start_step and step % ckpt_every == 0:
             _save(step)
 

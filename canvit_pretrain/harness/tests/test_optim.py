@@ -74,12 +74,66 @@ def test_missing_params_raises():
         build_optimizer_and_scheduler(spec, {"backbone": _params()})
 
 
-def test_onecycle_not_yet_supported():
-    # onecycle with no warmup evaluates the (unsupported) anneal branch at step 0,
-    # so it raises when LambdaLR is constructed inside the builder.
-    spec = _spec(
-        backbone=GroupOptim(lr=1e-4),
-        head=GroupOptim(lr=1e-3, schedule=ScheduleSpec(kind="warmup_onecycle", total_steps=10)),
-    )
-    with pytest.raises(NotImplementedError, match="warmup_onecycle"):
-        build_optimizer_and_scheduler(spec, {"backbone": _params(), "head": _params()})
+# --- schedule fidelity: compare against the REAL schedulers the standalone
+# entry points build, not against a hand-derived expectation. A fixture that
+# encodes my own belief about the shape cannot catch a drifted port.
+
+def _harness_lrs(sched_spec: ScheduleSpec, lr: float, n: int) -> list[float]:
+    spec = _spec(head=GroupOptim(lr=lr, schedule=sched_spec))
+    spec = TrainSpec(train_head=True, task_grad_to_backbone=False,
+                     bptt=BpttSpec(mode="none", horizon=4), optim=spec.optim)
+    opt, sched = build_optimizer_and_scheduler(spec, {"head": _params()})
+    out = []
+    for _ in range(n):
+        out.append(opt.param_groups[0]["lr"])
+        sched.step()
+    return out
+
+
+def _reference_lrs(make, lr: float, n: int) -> list[float]:
+    opt = torch.optim.AdamW(_params(), lr=lr)
+    sched = make(opt)
+    out = []
+    for _ in range(n):
+        out.append(opt.param_groups[0]["lr"])
+        sched.step()
+    return out
+
+
+@pytest.mark.parametrize("warmup_steps,warmup_lr_ratio", [(15, 1e-6), (15, 0.0), (0, 1e-6)])
+def test_onecycle_matches_ade20k_reference_scheduler(warmup_steps, warmup_lr_ratio):
+    """``warmup_onecycle`` must equal ADE20K's AdamW + WarmupOneCycleLR step for step."""
+    from canvit_pretrain.ade20k.data import make_optimizer_and_scheduler
+
+    lr, total = 3e-4, 400
+    got = _harness_lrs(
+        ScheduleSpec(kind="warmup_onecycle", warmup_steps=warmup_steps, total_steps=total,
+                     warmup_lr_ratio=warmup_lr_ratio or None), lr, total)
+    # make_optimizer_and_scheduler builds its own AdamW, so drive that one directly
+    # rather than through _reference_lrs.
+    ref_opt, ref_sched = make_optimizer_and_scheduler(
+        _params(), lr=lr, weight_decay=0.0, max_steps=total,
+        warmup_steps=warmup_steps, warmup_lr_ratio=warmup_lr_ratio)
+    want = []
+    for _ in range(total):
+        want.append(ref_opt.param_groups[0]["lr"])
+        ref_sched.step()
+
+    assert len(got) == len(want) == total
+    for step, (g, w) in enumerate(zip(got, want, strict=True)):
+        assert math.isclose(g, w, rel_tol=1e-9, abs_tol=1e-15), f"step {step}: {g} != {w}"
+
+
+def test_warmup_cosine_matches_in1k_reference_scheduler():
+    """``warmup_cosine`` must equal in1k's AdamW + warmup_cosine_scheduler step for step."""
+    from canvit_pretrain.train.scheduler import warmup_cosine_scheduler
+
+    lr, total, warm = 3e-4, 400, 20
+    start_lr = lr * 1e-6
+    got = _harness_lrs(
+        ScheduleSpec(kind="warmup_cosine", warmup_steps=warm, total_steps=total,
+                     start_lr=start_lr), lr, total)
+    want = _reference_lrs(
+        lambda opt: warmup_cosine_scheduler(opt, warm, total, lr, start_lr=start_lr), lr, total)
+    for step, (g, w) in enumerate(zip(got, want, strict=True)):
+        assert math.isclose(g, w, rel_tol=1e-9, abs_tol=1e-15), f"step {step}: {g} != {w}"

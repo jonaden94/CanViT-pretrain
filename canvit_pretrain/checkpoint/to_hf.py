@@ -59,14 +59,67 @@ def _migrate_standardizers_in_place(raw: dict) -> None:
     log.info("Migrated legacy standardizers (grid=%s)", G)
 
 
+def normalize_schema(raw: dict) -> dict:
+    """Return the checkpoint in the FLAT schema this converter reads.
+
+    Two writers produce checkpoints: the legacy ``train/loop.py`` trainer (flat —
+    ``state_dict`` plus top-level ``backbone_name`` / ``canvas_patch_grid_sizes`` /
+    ``training_config_history`` / …) and the unified harness
+    (``harness/checkpoint.py``: ``model_state`` plus a nested ``metadata`` dict built
+    from the task's ``checkpoint_metadata``). Without this, a harness checkpoint would
+    KeyError on ``state_dict`` — or worse, silently yield ``pretrain_view_scale=None``
+    because ``training_config_history`` is not at the top level, which is exactly the
+    foveated OOD footgun this converter exists to prevent.
+
+    Legacy payloads pass through untouched.
+    """
+    if "model_state" not in raw:
+        return raw
+    md = raw.get("metadata") or {}
+    missing = [k for k in ("backbone_name", "canvas_patch_grid_sizes") if k not in md]
+    if missing:
+        raise KeyError(
+            f"harness checkpoint metadata is missing {missing}; only a distill "
+            f"checkpoint can be converted to the pretraining HF layout (this one is "
+            f"task={md.get('task')!r})")
+    # The harness nests the real architecture under model_config["canvit"] (the rest of
+    # that dict is resume bookkeeping: task/teacher_dim/canvas_grid/backbone_name). The HF
+    # layout — and `patcher_name`, which drives the whole view-scale footgun check — wants
+    # the FLAT CanViTForPretrainingConfig, so unwrap it.
+    mc = raw.get("model_config") or {}
+    mc = mc.get("canvit", mc)
+    return {
+        **raw,
+        "state_dict": raw["model_state"],
+        "model_config": mc,
+        "backbone_name": md["backbone_name"],
+        "canvas_patch_grid_sizes": md["canvas_patch_grid_sizes"],
+        "glimpse_grid_size": md.get("glimpse_grid_size"),
+        "patch_stride": md.get("patch_stride"),
+        "teacher_name": md.get("teacher_name"),
+        "dataset": md.get("dataset"),
+        "training_config_history": md.get("training_config_history"),
+    }
+
+
+def _scale_fields(entry: dict) -> dict[str, Any]:
+    """The ``foveated_scale`` fields of one ``training_config_history`` entry.
+
+    Legacy entries are FLAT (``foveated_scale.mode``, … — ``train/loop.py:flatten_dict``);
+    harness entries carry the config as a NESTED ``foveated_scale`` dict.
+    """
+    if isinstance(nested := entry.get("foveated_scale"), dict):
+        return nested
+    return {k[len("foveated_scale."):]: v for k, v in entry.items()
+            if k.startswith("foveated_scale.")}
+
+
 def extract_pretrain_view_scale(raw: dict) -> dict[str, Any] | None:
     """Recover the pretraining foveated/square view-scale from a checkpoint.
 
-    The scale lives in ``training_config_history[ts]`` as flattened keys
-    (``foveated_scale.mode``, ``foveated_scale.fixed_scale``, …; see
-    ``train/loop.py:flatten_dict``). Returns ``None`` for uniform models or when
-    no history is recorded (older checkpoints) — callers must treat ``None`` as
-    "unknown", not "scale 1.0".
+    The scale lives in ``training_config_history[ts]``. Returns ``None`` for uniform
+    models or when no history is recorded (older checkpoints) — callers must treat
+    ``None`` as "unknown", not "scale 1.0".
     """
     patcher = (raw.get("model_config") or {}).get("patcher_name")
     if patcher not in _SCALE_SENSITIVE_PATCHERS:
@@ -77,17 +130,17 @@ def extract_pretrain_view_scale(raw: dict) -> dict[str, Any] | None:
     # Entries are keyed by ISO-8601 timestamp; the most recent is the config the
     # run finished with. The view-scale is a model-defining choice and is
     # expected constant across a run, but taking the latest is the safe pick.
-    latest = history[max(history)]
-    mode = latest.get("foveated_scale.mode")
+    fields = _scale_fields(history[max(history)])
+    mode = fields.get("mode")
     if mode is None:
         return None
     return {
         "patcher_name": patcher,
         "mode": mode,
-        "distribution": latest.get("foveated_scale.distribution"),
-        "fixed_scale": latest.get("foveated_scale.fixed_scale"),
-        "min_scale": latest.get("foveated_scale.min_scale"),
-        "max_scale": latest.get("foveated_scale.max_scale"),
+        "distribution": fields.get("distribution"),
+        "fixed_scale": fields.get("fixed_scale"),
+        "min_scale": fields.get("min_scale"),
+        "max_scale": fields.get("max_scale"),
     }
 
 
@@ -129,7 +182,7 @@ def build_config(raw: dict, pt_path: Path) -> dict[str, Any]:
 
 def main(args: Args) -> None:
     log.info("Loading %s ...", args.pt_path)
-    raw = torch.load(args.pt_path, map_location="cpu", weights_only=False)
+    raw = normalize_schema(torch.load(args.pt_path, map_location="cpu", weights_only=False))
     _migrate_standardizers_in_place(raw)
 
     config = build_config(raw, args.pt_path)

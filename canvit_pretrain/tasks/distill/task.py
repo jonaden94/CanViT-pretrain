@@ -511,8 +511,11 @@ class DistillRunTask:
         # in the HF config.json, so every downstream consumer must be told explicitly.
         # `to_hf` reads it from here / training_config_history. Only meaningful for the
         # foveated+square patchers at a fixed scale; None otherwise (uniform / sampled).
+        from dataclasses import asdict
+
         fs = self.cfg.foveated_scale
         view_scale = fs.fixed_scale if (self.is_foveated(model) and fs.mode == "fixed") else None
+        core = getattr(model, "module", model)
         return {
             "task": "distill",
             "scene_resolution": self.cfg.scene_resolution,
@@ -522,6 +525,16 @@ class DistillRunTask:
             "pretrain_view_scale": view_scale,
             "backbone_name": self.cfg.backbone_name,
             "glimpse_grid_size": self.cfg.glimpse_grid_size,
+            # Needed to rebuild the model from an HF export (checkpoint/to_hf.py writes
+            # both into config.json). `patch_stride` lives OUTSIDE model_config and is
+            # the only record of an overlapping-patch model (exp21) — without it the
+            # patch-embed conv is rebuilt non-overlapping and the weights mismatch.
+            "canvas_patch_grid_sizes": list(core.canvas_patch_grid_sizes),
+            "patch_stride": self.cfg.patch_stride,
+            # Full view-scale config (not just the scalar above): `to_hf` needs mode +
+            # distribution + range to describe a SAMPLED-scale model, where a single
+            # `pretrain_view_scale` float is meaningless.
+            "foveated_scale": asdict(fs),
             "teacher_repo_id": self.cfg.teacher_repo_id,
             "teacher_name": self.cfg.teacher_name,
         }

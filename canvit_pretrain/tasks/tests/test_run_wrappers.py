@@ -2,12 +2,16 @@
 
 Covers the pure-config surface (caps / default_spec / branches / feature groups /
 RunTask protocol conformance), the trainable-param-group routing on tiny CPU models
-(no HF download), the IN1k head=norm+head wrinkle, and the CLI ``_build_task`` /
-``_resolve_spec`` preset matrix (head-aware). The model-loading + real-data training
-path is covered by the GPU integration script (``unification_docs/harness_run_integration.py``).
+(no HF download), the IN1k head=norm+head wrinkle, and the ``harness.cli`` command
+dataclasses (preset matrix, nested-config parsing, config-derived RunSettings). The
+model-loading + real-data training path is covered by the GPU integration script
+(``unification_docs/harness_run_integration.py``).
 """
 
-import torch
+from pathlib import Path
+
+import pytest
+import tyro
 from canvit_pytorch import (
     CanViTForImageClassification,
     CanViTForSemanticSegmentation,
@@ -17,8 +21,16 @@ from canvit_pytorch import (
 from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
 from canvit_pretrain.ade20k.config import Ade20kConfig
 from canvit_pretrain.ade20k.data import NUM_CLASSES as ADE_CLASSES
+from canvit_pretrain.harness.cli import (
+    Ade20kCmd,
+    Command,
+    DistillCmd,
+    HarnessOpts,
+    In1kCmd,
+    resolve_spec,
+)
 from canvit_pretrain.harness.loop import apply_requires_grad
-from canvit_pretrain.harness.run import RunTask, _build_task, _resolve_spec
+from canvit_pretrain.harness.run import RunTask
 from canvit_pretrain.harness.spec import TrainSpec
 from canvit_pretrain.in1k.config import In1kConfig
 from canvit_pretrain.tasks.ade20k.task import Ade20kRunTask
@@ -124,22 +136,171 @@ def test_distill_param_group_is_whole_model():
     assert len(g["backbone"]) == len(list(model.parameters()))
 
 
-# --- CLI glue: _build_task + _resolve_spec preset matrix -------------------
+# --- CLI glue: command dataclasses + resolve_spec preset matrix ------------
 def test_cli_preset_matrix_head_aware():
-    ade = _build_task("ade20k", {})
-    in1k = _build_task("in1k", {})
-    distill = _build_task("distill", {"webdataset_dir": "/x"})
+    ade, _ = Ade20kCmd().build()
+    in1k, _ = In1kCmd(opts=HarnessOpts(n_steps=10)).build()
+    distill, _ = DistillCmd(cfg=Config(webdataset_dir=Path("/x"))).build()
     # head-bearing tasks: all presets that make sense validate
     for t in (ade, in1k):
         for preset in ("default", "probe", "finetune", "policy_only", "joint"):
-            _resolve_spec(t, preset, None, None).validate(t.caps())
+            resolve_spec(t, preset, 3e-4, 1e-3).validate(t.caps())
     # headless distill: train_head is dropped, so finetune/joint still validate
     for preset in ("default", "finetune", "policy_only", "joint"):
-        spec = _resolve_spec(distill, preset, None, None)
+        spec = resolve_spec(distill, preset, 3e-4, 1e-3)
         spec.validate(distill.caps())
         assert not spec.train_head
 
 
-def test_cli_overrides_apply():
-    t = _build_task("ade20k", {"batch_size": 3, "n_timesteps": 7, "lr": 1e-2})
-    assert t.cfg.batch_size == 3 and t.cfg.n_timesteps == 7 and t.cfg.peak_lr == 1e-2
+def test_cli_parses_nested_config_trees():
+    """The CLI must reach the nested model/foveated-scale trees — the fovi configs are
+    unreproducible without them (the hand-rolled argparse could not express these)."""
+    cmd = tyro.cli(Command, args=[
+        "distill", "--cfg.model.patcher-name", "foveated",
+        "--cfg.foveated-scale.mode", "per_rollout", "--cfg.foveated-scale.min-scale", "0.25",
+        "--cfg.patch-stride", "8", "--cfg.run-group", "fovi", "--cfg.steps-per-job", "512",
+    ])
+    assert cmd.cfg.model.patcher_name == "foveated"
+    assert cmd.cfg.foveated_scale.mode == "per_rollout"
+    assert cmd.cfg.foveated_scale.min_scale == 0.25
+    assert cmd.cfg.patch_stride == 8
+    # RunSettings is DERIVED from the task config: the job length is steps_per_job,
+    # not the harness default (the n_steps footgun).
+    _, settings = cmd.build()
+    assert settings.n_steps == 512
+    assert settings.eval_every == cmd.cfg.val_every
+    assert settings.run_dir == cmd.cfg.logs_dir / "fovi" / settings.run_name
+
+
+def test_cli_task_config_drives_settings():
+    """Every RunSettings knob that has a task-config counterpart comes FROM the config,
+    so there is no second place to set the same thing."""
+    cfg = Config(webdataset_dir=Path("/x"), compile=False, amp=False, grad_clip=0.5,
+                 log_every=7, val_every=13, seed=5, steps_per_job=64, tracker="none")
+    _, s = DistillCmd(cfg=cfg).build()
+    assert (s.compile, s.amp, s.grad_clip, s.log_every, s.eval_every, s.seed, s.n_steps) == \
+        (False, False, 0.5, 7, 13, 5, 64)
+
+
+def test_in1k_requires_explicit_n_steps():
+    """In1kConfig schedules in epochs; the harness loop counts steps. Refuse to guess."""
+    with pytest.raises(ValueError, match="n-steps"):
+        In1kCmd().build()
+
+
+def test_comet_tracker_rejected_loudly():
+    with pytest.raises(NotImplementedError, match="comet"):
+        DistillCmd(cfg=Config(webdataset_dir=Path("/x"), tracker="comet")).build()
+
+
+# --- LR-schedule reproduction (task default_spec vs the standalone recipes) ---
+# test_optim.py checks the schedule PRIMITIVES against the real schedulers; these
+# check the wiring, i.e. that each task's default_spec actually selects and
+# parameterizes the primitive its standalone entry point used.
+
+def _lrs_from_spec(spec, group, n):
+    import torch
+    from torch import nn
+
+    from canvit_pretrain.harness.optim import build_optimizer_and_scheduler
+
+    opt, sched = build_optimizer_and_scheduler(
+        spec, {m: [nn.Parameter(torch.zeros(2))] for m in spec.trainable_modules()})
+    idx = spec.trainable_modules().index(group)
+    out = []
+    for _ in range(n):
+        out.append(opt.param_groups[idx]["lr"])
+        sched.step()
+    return out
+
+
+def test_ade20k_default_spec_reproduces_standalone_lr_schedule():
+    import math
+
+    import torch
+    from torch import nn
+
+    from canvit_pretrain.ade20k.data import make_optimizer_and_scheduler
+
+    cfg = Ade20kConfig(tracker="none", max_steps=300, warmup_steps=20)
+    got = _lrs_from_spec(Ade20kRunTask(cfg).default_spec(), "head", cfg.max_steps)
+    ref_opt, ref_sched = make_optimizer_and_scheduler(
+        [nn.Parameter(torch.zeros(2))],
+        lr=cfg.peak_lr, weight_decay=cfg.weight_decay, max_steps=cfg.max_steps,
+        warmup_steps=cfg.warmup_steps, warmup_lr_ratio=cfg.warmup_lr_ratio)
+    want = []
+    for _ in range(cfg.max_steps):
+        want.append(ref_opt.param_groups[0]["lr"])
+        ref_sched.step()
+    for step, (g, w) in enumerate(zip(got, want, strict=True)):
+        assert math.isclose(g, w, rel_tol=1e-9, abs_tol=1e-15), f"step {step}: {g} != {w}"
+
+
+def test_in1k_default_spec_reproduces_standalone_lr_schedule():
+    import math
+
+    import torch
+    from torch import nn
+
+    from canvit_pretrain.train.scheduler import warmup_cosine_scheduler
+
+    cfg = In1kConfig(tracker="none", epochs=10, warmup_epochs=0.5)
+    total = 300  # = epochs * batches_per_epoch, as the runner computes it
+    got = _lrs_from_spec(In1kRunTask(cfg, total_steps=total).default_spec(), "head", total)
+
+    # in1k/train.py: warmup_steps = max(1, int(warmup_epochs * batches_per_epoch))
+    warmup = max(1, int(cfg.warmup_epochs * (total // cfg.epochs)))
+    ref_opt = torch.optim.AdamW([nn.Parameter(torch.zeros(2))], lr=cfg.peak_lr)
+    ref_sched = warmup_cosine_scheduler(ref_opt, warmup, total, cfg.peak_lr,
+                                        start_lr=cfg.peak_lr * cfg.warmup_lr_ratio)
+    want = []
+    for _ in range(total):
+        want.append(ref_opt.param_groups[0]["lr"])
+        ref_sched.step()
+    for step, (g, w) in enumerate(zip(got, want, strict=True)):
+        assert math.isclose(g, w, rel_tol=1e-9, abs_tol=1e-15), f"step {step}: {g} != {w}"
+
+
+def test_opts_seed_overrides_task_seed():
+    """--opts.seed wins over the task config's own seed; ade20k (no seed field)
+    defaults to 0 and is settable — otherwise every harness ade20k run is byte-identical."""
+    # ade20k: no cfg.seed field -> default 0, overridable
+    assert Ade20kCmd(cfg=Ade20kConfig(tracker="none")).build()[1].seed == 0
+    assert Ade20kCmd(cfg=Ade20kConfig(tracker="none"), opts=HarnessOpts(seed=7)).build()[1].seed == 7
+    # distill: cfg.seed unless overridden
+    d = Config(webdataset_dir=Path("/x"), seed=3)
+    assert DistillCmd(cfg=d).build()[1].seed == 3
+    assert DistillCmd(cfg=d, opts=HarnessOpts(seed=7)).build()[1].seed == 7
+
+
+def test_ade20k_build_model_warns_on_foveated_view_scale(monkeypatch, caplog):
+    """The foveated OOD warning branch must actually be reachable. It only fires for
+    full-image (foveated/square) models, so a plain uniform run — including every GPU
+    smoke so far — never executes it; a bare `log.warning` there once meant a NameError
+    on exactly the foveated path."""
+    import canvit_pretrain.tasks.ade20k.task as adetask
+    from canvit_pretrain.train.config import FoveatedScaleConfig
+
+    class _StubSeg:
+        head = "HEAD"
+
+        def to(self, device):
+            return self
+
+    monkeypatch.setattr(adetask.CanViTForSemanticSegmentation, "from_pretrained_with_new_probe",
+                        classmethod(lambda cls, **kw: _StubSeg()), raising=True)
+    monkeypatch.setattr(adetask, "consumes_full_image", lambda m: True)
+
+    cfg = Ade20kConfig(tracker="none")
+    cfg.foveated_scale = FoveatedScaleConfig(mode="fixed", fixed_scale=2.0)
+    with caplog.at_level("WARNING"):
+        model, head = Ade20kRunTask(cfg).build_model("cpu")
+    assert head == "HEAD" and isinstance(model, _StubSeg)
+    assert "out of distribution" in caplog.text and "fixed_scale=2.0" in caplog.text
+
+
+def test_in1k_without_total_steps_has_no_decay():
+    """A bare In1kRunTask (no runner) can't know the step budget — hold at peak
+    rather than invent a decay horizon."""
+    sched = In1kRunTask(In1kConfig(tracker="none")).default_spec().optim["head"].schedule
+    assert sched.kind == "warmup_constant" and sched.total_steps is None

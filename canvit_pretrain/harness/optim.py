@@ -8,7 +8,9 @@ that group's :class:`ScheduleSpec`.
 
 Not parity-gated: the distill parity probe runs at constant LR (no scheduler), so
 the schedule math here is validated by its own unit tests + the GPU gate, not the
-digest.
+digest. Those unit tests compare step for step against the REAL schedulers the
+standalone entry points build (ADE20K's ``WarmupOneCycleLR``, in1k's
+``warmup_cosine_scheduler``) rather than against hard-coded expected values.
 """
 
 from __future__ import annotations
@@ -23,10 +25,41 @@ from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 from canvit_pretrain.harness.spec import Module, ScheduleSpec, TrainSpec
 
 
+def _onecycle_factor(sched: ScheduleSpec, step: int) -> float:
+    """ADE20K's ``WarmupOneCycleLR`` shape, as a multiplicative factor on the peak lr.
+
+    Ported from ``dinov3.eval.segmentation.schedulers.WarmupOneCycleLR`` under exactly
+    the parametrization ``canvit_pretrain.ade20k.data.make_optimizer_and_scheduler``
+    fixes: ``anneal_strategy='cos'`` and ``final_div_factor=inf`` (so ``min_lr == 0``,
+    which also zeroes the original's ``max_lr / final_div_factor`` warmup offset).
+    Momentum is not touched (``use_beta1=False, update_momentum=False``), so the whole
+    scheduler reduces to this one lr factor. Checked step-for-step against the real
+    scheduler in ``tests/test_optim.py`` rather than by eye.
+
+    Two quirks of the original are reproduced deliberately:
+
+    * warmup is the plain linear ramp ``ratio -> 1`` scaled by an extra
+      ``(1 - step/total_steps)`` decay — the original writes it as ``1 - k`` with
+      ``k = (1 - step/warm)(1 - ratio)``, which expands to ``ratio + (1-ratio)*step/warm``.
+    * the anneal's progress is ``(step + 1) / total_steps`` measured from step 0, NOT
+      from the end of warmup, so the lr never quite reaches the peak.
+    """
+    total = sched.total_steps
+    assert total is not None  # ScheduleSpec.errors() rejects onecycle without it
+    warm = sched.warmup_steps
+    ratio = sched.warmup_lr_ratio or 0.0  # the original tests `if self.warmup_ratio:`
+    if step < warm:
+        if ratio:
+            return (ratio + (1.0 - ratio) * step / warm) * (1.0 - step / total)
+        return (1.0 + math.cos(math.pi * step / total)) / 2.0 * (step / warm)
+    return (1.0 + math.cos(math.pi * (step + 1) / total)) / 2.0
+
+
 def _lr_lambda(sched: ScheduleSpec, base_lr: float) -> Callable[[int], float]:
     """Multiplicative factor on ``base_lr`` at a given step, per the schedule shape.
     Warmup ramps from a start factor to 1.0 over ``warmup_steps`` (relative
-    ``warmup_lr_ratio`` wins over an absolute ``start_lr``); then constant or cosine."""
+    ``warmup_lr_ratio`` wins over an absolute ``start_lr``); then constant or cosine.
+    ``warmup_onecycle`` has its own warmup shape and is handled wholesale."""
     warm = sched.warmup_steps
     if sched.warmup_lr_ratio is not None:
         start_factor = sched.warmup_lr_ratio
@@ -36,6 +69,8 @@ def _lr_lambda(sched: ScheduleSpec, base_lr: float) -> Callable[[int], float]:
         start_factor = 1.0 / max(warm, 1)
 
     def fn(step: int) -> float:
+        if sched.kind == "warmup_onecycle":
+            return _onecycle_factor(sched, step)
         if warm > 0 and step < warm:
             return start_factor + (1.0 - start_factor) * (step / warm)
         if sched.kind == "warmup_constant":
@@ -44,11 +79,6 @@ def _lr_lambda(sched: ScheduleSpec, base_lr: float) -> Callable[[int], float]:
             assert sched.total_steps is not None
             prog = min(1.0, (step - warm) / max(1, sched.total_steps - warm))
             return 0.5 * (1.0 + math.cos(math.pi * prog))
-        if sched.kind == "warmup_onecycle":
-            raise NotImplementedError(
-                "warmup_onecycle is not yet wired into the harness builder; use warmup_cosine, "
-                "or port ADE20K's WarmupOneCycleLR when its exact anneal shape is needed."
-            )
         raise ValueError(f"unknown schedule kind: {sched.kind!r}")
 
     return fn

@@ -13,6 +13,7 @@ loaders, mIoU eval) lands with the neutral loop.
 
 from __future__ import annotations
 
+import logging
 from contextlib import nullcontext
 from typing import Any
 
@@ -29,6 +30,8 @@ from canvit_pytorch.policy.features import FEATURE_GROUPS
 from canvit_pretrain.ade20k.rollout import consumes_full_image, derive_glimpse_px
 from canvit_pretrain.harness.rollout import GlimpseOut, TaskLoss
 from canvit_pretrain.train.viewpoint import ViewpointType
+
+log = logging.getLogger(__name__)
 
 # ade20k has a spatial segmentation probe, so its scorer reads the full feature set
 # INCLUDING probe entropy (ent / ent_delta) — the RL repo's canonical seg-policy features.
@@ -90,6 +93,9 @@ class Ade20kRunTask:
     """
 
     name = "ade20k"
+    best_metric = "miou_final"
+    """Eval key the harness maximizes for `best.pt` — the last-timestep mIoU, which is
+    what `ade20k/train.py` selects its best probe checkpoint on (`probe.best_last_miou`)."""
 
     def __init__(self, cfg, *, rl=None):
         self.cfg = cfg
@@ -102,15 +108,16 @@ class Ade20kRunTask:
 
     def default_spec(self):
         """Frozen-backbone probe (the historical ade20k regime), fixed horizon = n_timesteps.
-        NOTE: the harness schedule registry has no onecycle yet (ade20k's native recipe),
-        so the default uses warmup_constant; switch to warmup_cosine via the spec if decay
-        is wanted."""
+        The LR schedule is ``warmup_onecycle``, which reproduces the standalone probe's
+        AdamW + ``WarmupOneCycleLR`` step for step (``ade20k/data.make_optimizer_and_scheduler``
+        with the same max_steps / warmup_steps / warmup_lr_ratio)."""
         from canvit_pretrain.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TrainSpec
         return TrainSpec.probe(
             bptt=BpttSpec(mode="none", horizon=self.cfg.n_timesteps),
             optim={"head": GroupOptim(
                 lr=self.cfg.peak_lr, weight_decay=self.cfg.weight_decay,
-                schedule=ScheduleSpec(kind="warmup_constant", warmup_steps=self.cfg.warmup_steps,
+                schedule=ScheduleSpec(kind="warmup_onecycle", warmup_steps=self.cfg.warmup_steps,
+                                      total_steps=self.cfg.max_steps,
                                       warmup_lr_ratio=self.cfg.warmup_lr_ratio))},
         )
 
@@ -122,6 +129,19 @@ class Ade20kRunTask:
             pretrained_repo=self.cfg.model_repo, num_classes=self._num_classes(),
             dropout=self.cfg.dropout, use_ln=True,
         ).to(device)
+        # The OOD footgun that silently ruined run 15025338 (ade20k/train.py:97): a
+        # foveated backbone derives its fixation window as `fix_size = scale * H`, so a
+        # probe rollout at a scale the backbone never saw makes EVERY glimpse
+        # out-of-distribution. It does not crash — mIoU just falls as glimpses
+        # accumulate. Warn loudly, exactly as the standalone does.
+        if consumes_full_image(seg):
+            fs = self.cfg.foveated_scale
+            detail = (f"fixed_scale={fs.fixed_scale}" if fs.mode == "fixed"
+                      else f"{fs.distribution} in [{fs.min_scale}, {fs.max_scale}]")
+            log.warning(
+                "  foveated view scale: mode=%s, %s — this MUST match the backbone's "
+                "pretraining scale or every glimpse is out of distribution "
+                "(symptom: mIoU falls as glimpses accumulate).", fs.mode, detail)
         return seg, seg.head
 
     def _num_classes(self):
@@ -217,7 +237,14 @@ class Ade20kRunTask:
         mious = [m.compute() for m in ious]
         if was_training:
             model.head.train()
-        return {"miou_t0": mious[0], "miou_final": mious[-1], "miou_mean": sum(mious) / T}
+        # EVERY timestep, not just the endpoints: mIoU-vs-glimpse-count is the whole
+        # point of a canvas probe (and how the foveated OOD symptom shows up — mIoU
+        # FALLING as glimpses accumulate). ade20k/train.py:179 logs val_miou_t{t} for
+        # all t; the caller namespaces these as eval/miou_t{t}.
+        out = {f"miou_t{t}": v for t, v in enumerate(mious)}
+        out["miou_final"] = mious[-1]   # the best-checkpoint key (see best_metric)
+        out["miou_mean"] = sum(mious) / T
+        return out
 
     def model_config(self, model):
         return {"task": "ade20k", "num_classes": self._num_classes(),
