@@ -129,11 +129,22 @@ checkpoint-on-signal, FAILED-marker + `cancel_slurm_array` crash-loop guard (opt
 + `latest.pt` symlink, EMA-smoothed loss + per-module grad-norms. Optuna DROPPED (deprecated).
 Validated: run()-level resume PASSES on real data (`harness_run_resume.py`: leg1→5, resume→9) + 6 CPU
 ops tests (`test_loop_ops.py`) + 8/8 integration re-run (no regression). Built DDP-aware (rank-0-guarded).
-**NOT yet a full drop-in** — the old loop can't be deleted until these ALSO land (beyond DDP): seed-mode
-start (`seed_ckpt`/`hf_seed_ckpt` weights-only @ step 0); full WebDataset shard-aligned `job_index`
-multi-job resume (only the hook seam exists); `pretrain_view_scale` footgun metadata + config/provenance
-history in distill checkpoints (needed by `to_hf`); `torch.compile`; run_dir layout; full wandb metric
-set + distill val viz/PCA/IN1k-probe.
+**PASS 3 — the rest of the single-GPU fidelity gap (2026-07-24).** (Pass 2 had planned from a targeted
+grep rather than reading `training_loop` end to end, so several features were missed and the result was
+overclaimed as "feature-complete"; pass 3 read it top-to-bottom.) Ported: **seed-mode** start
+(`RunSettings.seed_ckpt` weights-only @ step 0, priority resume>seed>fresh; distill also honors
+`cfg.hf_seed_ckpt` in `build_model` with the HF config winning); **`torch.compile`**; **config +
+provenance HISTORY accumulated across resumes** + distill's **`pretrain_view_scale`** stamping (what
+`to_hf` reads — the foveated footgun); **run_dir layout**; **data%/gpu% timing**; and the **distill PCA
+viz** (owner: distill only). Viz uses a new engine seam `run_rollout(collect_viz=, viz_task=)` +
+`task.viz_init/viz_frame/render_viz` — branch-0 only, **off by default so the parity path is untouched** —
+reusing `extract_sample0_viz`/`plot_multistep_pca`/`save_figure` so figures are identical and land
+**LOCALLY** under `{run_dir}/visualization/pca_train/` (never uploaded). GPU-verified rendering.
+
+**NOT yet a full drop-in** — remaining before the old loop can be deleted: **DDP** (multi-GPU node);
+the `SLURM_ARRAY_TASK_ID` sliver of WebDataset multi-job resume (`job_index` derivation + shard
+invariants — the hook seam exists, the derivation belongs with the launcher rewrite); full wandb metric
+richness + distill **validation-time** viz/curves/IN1k-probe (training-batch PCA viz IS ported).
 
 **REMAINING:**
 - `harness/ddp.py` — manual grad-sync for in-rollout modules (backbone/scorer) per the §9 matrix

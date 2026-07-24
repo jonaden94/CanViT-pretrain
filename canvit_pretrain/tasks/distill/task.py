@@ -100,6 +100,20 @@ class DistillRunTask:
 
     def build_model(self, device):
         from canvit_pretrain.train.model import create_model, load_student_backbone
+        assert not (self.cfg.seed_ckpt and self.cfg.hf_seed_ckpt), (
+            "seed_ckpt and hf_seed_ckpt are mutually exclusive"
+        )
+        # HF SEED: the checkpoint's model config MUST win over CLI defaults, or the
+        # arch won't match the weights (missing/unexpected keys on load).
+        hf_seed_state = None
+        if self.cfg.hf_seed_ckpt:
+            from canvit_pytorch.model.pretraining.hub import CanViTForPretrainingHFHub
+            log = __import__("logging").getLogger(__name__)
+            log.info("HF SEED mode: loading %s", self.cfg.hf_seed_ckpt)
+            hf_model = CanViTForPretrainingHFHub.from_pretrained(self.cfg.hf_seed_ckpt)
+            hf_seed_state = dict(hf_model.state_dict())
+            self.cfg.model = hf_model.cfg
+            del hf_model
         teacher = None
         if self.cfg.init_backbone_from_teacher:
             teacher = self._load_teacher(device)
@@ -108,6 +122,9 @@ class DistillRunTask:
         self._model, self._device = bundle.model, device
         self._glimpse_size_px = bundle.glimpse_size_px
         self.cls_norm, self.scene_norm = bundle.model.standardizers(self.cfg.canvas_patch_grid_size)
+        if hf_seed_state is not None:
+            from canvit_pretrain.checkpoint import load_state_dict_flexible
+            load_state_dict_flexible(bundle.model, hf_seed_state)
         return bundle.model, None
 
     def _load_teacher(self, device):
@@ -170,6 +187,65 @@ class DistillRunTask:
             assert joint is not None
             groups["policy"] = list(joint.scorer.parameters())
         return groups
+
+    # --- visualization (ported from train/loop.py; saved LOCALLY, never uploaded) ---
+    def viz_frame(self, *, model, images, gout, viewpoint, loss):
+        """Per-glimpse viz sample for branch 0 / sample 0 — the engine's ``collect_viz``
+        hook. Reuses the existing, tested ``extract_sample0_viz`` so the figure content
+        is identical to the historical loop."""
+        from canvit_pretrain.train.viz.sample import extract_sample0_viz
+        core = getattr(model, "module", model)
+        return extract_sample0_viz(
+            gout.readout, images, viewpoint, loss.scene_pred, core, self._glimpse_size_px,
+        )
+
+    def viz_init(self, *, model, images, state):
+        """Pre-glimpse panels (initial scene prediction + canvas) for sample 0, plus the
+        denormalized input image — the engine calls this once per viz step, before t0."""
+        from canvit_pretrain.train.viz.image import imagenet_denormalize_to_numpy
+        core = getattr(model, "module", model)
+        with torch.no_grad():
+            init_scene = core.predict_teacher_scene(state.canvas)
+            init_spatial = core.get_spatial(state.canvas[0:1])[0]
+        return {
+            "image": imagenet_denormalize_to_numpy(images[0]),
+            "initial_scene": init_scene[0].detach().cpu().float().numpy(),
+            "initial_canvas_spatial": init_spatial.detach().cpu().float().numpy(),
+        }
+
+    def render_viz(self, viz, *, batch, run_dir, step):
+        """Render + save the multistep PCA figure to
+        ``{run_dir}/visualization/pca_train/step-{step}.png`` (LOCAL disk — the current
+        pretrain convention; the older wandb-backed upload path is deliberately NOT used)."""
+        from canvit_pretrain.train.viz import plot_multistep_pca, save_figure
+
+        if not viz.frames or not viz.initial:
+            return
+        samples, init = viz.frames, viz.initial
+        # Teacher target for sample 0 (standardized), the figure's reference panel.
+        _, raw_patches, _, _ = batch
+        teacher = self.scene_norm(raw_patches[:1].to(self._device, dtype=torch.float32))
+
+        img = init["image"]
+        H, W = img.shape[:2]
+        fov = [getattr(s, "foveated", None) for s in samples]
+        sq = [getattr(s, "square", None) for s in samples]
+        fig = plot_multistep_pca(
+            full_img=img,
+            teacher=teacher[0].detach().cpu().float().numpy(),
+            scenes=[s.predicted_scene for s in samples],
+            glimpses=[s.glimpse for s in samples],
+            boxes=[vp.to_pixel_box(0, H, W) for vp in viz.viewpoints],
+            names=[vp.name for vp in viz.viewpoints],
+            scene_grid_size=self.cfg.canvas_patch_grid_size,
+            glimpse_grid_size=self.cfg.glimpse_grid_size,
+            initial_scene=init["initial_scene"],
+            hidden_spatials=[s.canvas_spatial for s in samples],
+            initial_hidden_spatial=init["initial_canvas_spatial"],
+            foveated_samples=fov if any(f is not None for f in fov) else None,
+            square_samples=sq if any(f is not None for f in sq) else None,
+        )
+        save_figure(fig, run_dir, "pca_train", step)
 
     def resume_start_step(self, payload, scheduler):
         # Continuous single-run resume derives start_step from the scheduler, like the
@@ -244,8 +320,24 @@ class DistillRunTask:
                 "canvas_grid": self.cfg.canvas_patch_grid_size, "backbone_name": self.cfg.backbone_name}
 
     def checkpoint_metadata(self, model):
-        return {"task": "distill", "scene_resolution": self.cfg.scene_resolution,
-                "dataset": self.cfg.dataset}
+        # pretrain_view_scale is the P6 FOOTGUN: the foveated/square view scale is NOT
+        # in the HF config.json, so every downstream consumer must be told explicitly.
+        # `to_hf` reads it from here / training_config_history. Only meaningful for the
+        # foveated+square patchers at a fixed scale; None otherwise (uniform / sampled).
+        fs = self.cfg.foveated_scale
+        view_scale = fs.fixed_scale if (self.is_foveated(model) and fs.mode == "fixed") else None
+        return {
+            "task": "distill",
+            "scene_resolution": self.cfg.scene_resolution,
+            "dataset": self.cfg.dataset,
+            "patcher_name": getattr(self.cfg.model, "patcher_name", "uniform"),
+            "foveated_scale_mode": fs.mode,
+            "pretrain_view_scale": view_scale,
+            "backbone_name": self.cfg.backbone_name,
+            "glimpse_grid_size": self.cfg.glimpse_grid_size,
+            "teacher_repo_id": self.cfg.teacher_repo_id,
+            "teacher_name": self.cfg.teacher_name,
+        }
 
 
 __all__ = ["POLICY_FEATURE_GROUPS", "BoundDistillTask", "DistillRunTask"]

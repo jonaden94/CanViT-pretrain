@@ -20,6 +20,7 @@ import logging
 import os
 import signal
 import subprocess
+import time
 from collections.abc import Callable, Iterator
 from contextlib import nullcontext
 from pathlib import Path
@@ -149,6 +150,9 @@ def run_training_loop(
     ema_alpha: float = 0.0,          # >0 => also log an EMA-smoothed total_loss
     log_grad_norms: bool = False,    # log per-module grad L2 norms on log steps
     grad_norm_deep_prefixes: tuple[str, ...] = (),
+    log_timing: bool = False,        # cumulative data% vs gpu% (bottleneck analysis)
+    viz_every: int = 0,              # 0 => never; else collect+render viz every N steps
+    run_dir: Path | None = None,     # where task.render_viz writes figures (locally)
     signal_checkpoint: bool = True,  # honor SIGUSR1 -> checkpoint (handler in run())
     on_log: Callable[[int, dict], None] | None = None,
     on_eval: Callable[[int], dict] | None = None,
@@ -171,16 +175,25 @@ def run_training_loop(
                 metadata=metadata, joint=joint,
             )
 
+    t_data_total = t_gpu_total = 0.0
+
     for step in range(start_step, start_step + n_steps):
+        t0 = time.perf_counter()
         batch = next(train_batches)
         images = task.batch_images(batch, device)
         bound = task.bind(batch, device, model=model, head=head)
+        t_data_total += time.perf_counter() - t0
 
+        t1 = time.perf_counter()
+        # Viz rides the SAME forward as training (no recomputation), like train/loop.py.
+        do_viz = bool(viz_every) and run_dir is not None and step % viz_every == 0 \
+            and hasattr(task, "render_viz")
         optimizer.zero_grad()
         result = run_rollout(
             model=model, images=images, task=bound, selector=selector, bptt=spec.bptt,
             branches=branches, canvas_grid_size=canvas_grid, amp_ctx=amp_ctx,
-            task_weight=spec.task_weight, joint=joint,
+            task_weight=spec.task_weight, collect_viz=do_viz, viz_task=(task if do_viz else None),
+            joint=joint,
         )
         if trainable:
             torch.nn.utils.clip_grad_norm_(trainable, grad_clip)
@@ -195,8 +208,13 @@ def run_training_loop(
 
         optimizer.step()
         scheduler.step()
+        t_gpu_total += time.perf_counter() - t1
 
         last = {"step": step, "total_loss": float(result.total_loss), "n_glimpses": result.n_glimpses}
+        if log_timing and (t_data_total + t_gpu_total) > 0:
+            tot = t_data_total + t_gpu_total
+            last["data_pct"] = 100.0 * t_data_total / tot
+            last["gpu_pct"] = 100.0 * t_gpu_total / tot
         if result.policy_metrics is not None:
             last["reward_frac"] = float(result.policy_metrics["reward_frac"])
             last["policy_loss"] = float(result.policy_metrics["policy_loss"])
@@ -204,6 +222,12 @@ def run_training_loop(
             last["total_loss_ema"] = ema.update("total_loss", result.total_loss).item()
         for k, v in gnorms.items():
             last[f"grad_norm/{k}"] = v
+
+        if result.viz is not None and run_dir is not None:
+            try:  # viz is a diagnostic — never let a plotting error kill training
+                task.render_viz(result.viz, batch=batch, run_dir=run_dir, step=step)
+            except Exception:
+                log.exception("viz rendering failed at step %d (training continues)", step)
 
         if is_log:
             on_log(step, last)

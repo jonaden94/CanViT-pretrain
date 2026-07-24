@@ -100,11 +100,27 @@ class BranchResult:
 
 
 @dataclass
+class RolloutViz:
+    """Per-glimpse visualization data collected from branch 0 when ``collect_viz=True``.
+
+    The engine stays task-neutral: it records the viewpoints and calls the task's
+    optional ``viz_frame`` hook, whose return value is opaque here (distill returns
+    teacher/predicted-scene sample data for the PCA figure; ade20k returns predicted
+    masks for the segmentation overlay). Rendering + saving is the task's job.
+    """
+
+    viewpoints: list[NamedViewpoint] = field(default_factory=list)
+    frames: list[Any] = field(default_factory=list)
+    initial: Any = None   # optional task.viz_init(state_init) capture (pre-glimpse panels)
+
+
+@dataclass
 class RolloutResult:
     total_loss: Tensor                          # detached mean over branches
     branches: list[BranchResult] = field(default_factory=list)
     n_glimpses: int = 0
     policy_metrics: dict | None = None          # detached per-step means (joint mode)
+    viz: RolloutViz | None = None               # only when collect_viz=True
 
 
 def _to_vp(vp: NamedViewpoint) -> Viewpoint:
@@ -136,6 +152,8 @@ def run_rollout(
     canvas_grid_size: int,
     amp_ctx: Any,
     task_weight: float = 1.0,
+    collect_viz: bool = False,
+    viz_task: Any = None,
     joint: "JointPolicy | None" = None,
     rng: Any = _random,
 ) -> RolloutResult:
@@ -175,6 +193,20 @@ def run_rollout(
 
     pol_acc = {"loss": torch.zeros((), device=device), "reward": torch.zeros((), device=device), "n": 0}
     results: list[BranchResult] = []
+    # Viz is collected from branch 0 only (sample 0 inside the task's hook), matching
+    # the historical training_step. Off by default => the parity path never touches it.
+    # Hooks live on the RUN-level task (which also owns render_viz), not the per-batch
+    # bound task the engine otherwise talks to — hence the explicit ``viz_task``.
+    _viz_owner = viz_task if viz_task is not None else task
+    viz_hook = getattr(_viz_owner, "viz_frame", None) if collect_viz else None
+    viz = RolloutViz() if viz_hook is not None else None
+
+    def _viz_capture(branch_idx: int, gout: GlimpseOut, vp_named: NamedViewpoint,
+                     vp: Viewpoint, L: Any) -> None:
+        if viz is None or branch_idx != 0:
+            return
+        viz.viewpoints.append(vp_named)
+        viz.frames.append(viz_hook(model=model, images=images, gout=gout, viewpoint=vp, loss=L))
 
     def _tw_loss(L: Any) -> Tensor:
         """The per-glimpse task loss scaled by ``task_weight`` (design §4). The
@@ -183,7 +215,7 @@ def run_rollout(
         lf = L.combined.float()
         return lf if task_weight == 1.0 else task_weight * lf
 
-    def run_branch(t0_type: ViewpointType) -> BranchResult:
+    def run_branch(t0_type: ViewpointType, branch_idx: int = 0) -> BranchResult:
         # Joint mode: pick this branch's selector. Policy branches are FULL-anchored
         # and carry the in-graph policy loss; non-policy branches run pure-random.
         if joint is not None:
@@ -196,6 +228,12 @@ def run_rollout(
 
         ctx = sel.start_rollout(t0_type=t0_type, batch_size=B, device=device)
 
+        # Pre-glimpse capture (initial scene/canvas panels), branch 0 only.
+        if viz is not None and branch_idx == 0:
+            viz_init = getattr(_viz_owner, "viz_init", None)
+            if viz_init is not None:
+                viz.initial = viz_init(model=model, images=images, state=state_init)
+
         # t0 forward
         with amp_ctx:
             vp0_named = sel.select(vp_type=t0_type, ctx=ctx, t=0, batch_size=B, device=device, state=state_init)
@@ -204,6 +242,7 @@ def run_rollout(
                 model=model, images=images, state=state_init, viewpoint=vp0, backbone_no_grad=backbone_no_grad,
             )
             L = task.step_loss(gout.readout)
+        _viz_capture(branch_idx, gout, vp0_named, vp0, L)
         if is_policy:  # seed the reward denominator with the FULL-anchor loss (no policy loss at t0)
             prev_pi_loss = task.per_image_loss(gout.readout).detach()
 
@@ -231,6 +270,7 @@ def run_rollout(
                 L = task.step_loss(gout.readout)
 
             chunk_loss = chunk_loss + _tw_loss(L)
+            _viz_capture(branch_idx, gout, vp_named, vp, L)
 
             if is_policy:
                 assert joint is not None and prev_pi_loss is not None
@@ -273,8 +313,8 @@ def run_rollout(
             mean_loss=total_detached / n_steps, n_steps=n_steps, final_readout=final_readout,
         )
 
-    for t0 in branches:
-        results.append(run_branch(t0))
+    for branch_idx, t0 in enumerate(branches):
+        results.append(run_branch(t0, branch_idx))
 
     total_loss = torch.stack([r.mean_loss for r in results]).mean()
 
@@ -288,7 +328,8 @@ def run_rollout(
         }
 
     return RolloutResult(
-        total_loss=total_loss, branches=results, n_glimpses=n_glimpses, policy_metrics=policy_metrics,
+        total_loss=total_loss, branches=results, n_glimpses=n_glimpses,
+        policy_metrics=policy_metrics, viz=viz,
     )
 
 
@@ -296,6 +337,7 @@ __all__ = [
     "BranchResult",
     "GlimpseOut",
     "RolloutResult",
+    "RolloutViz",
     "RolloutTask",
     "TaskLoss",
     "run_rollout",

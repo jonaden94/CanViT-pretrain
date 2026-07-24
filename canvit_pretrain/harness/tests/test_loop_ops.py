@@ -109,6 +109,119 @@ def test_signal_checkpoint_saves_midrun(tmp_path):
         L._checkpoint_requested = False
 
 
+def test_timing_metrics_surface_when_enabled():
+    seg, spec, opt, sched, sel = _setup()
+    seen: list[dict] = []
+    run_training_loop(
+        task=_StubTask(), model=seg, head=seg.head, optimizer=opt, scheduler=sched, selector=sel,
+        spec=spec, branches=[ViewpointType.RANDOM], canvas_grid=_G, device=torch.device("cpu"),
+        train_batches=_batches(), n_steps=2, log_every=1, log_timing=True,
+        on_log=lambda step, m: seen.append(m),
+    )
+    m = seen[-1]
+    assert "data_pct" in m and "gpu_pct" in m
+    assert abs(m["data_pct"] + m["gpu_pct"] - 100.0) < 1e-6
+
+
+def test_seed_mode_loads_weights_only_and_starts_at_zero(tmp_path):
+    """SEED: weights come from the checkpoint but opt/sched are fresh and step is 0
+    (vs RESUME which continues the step count). Uses restore_into directly — the same
+    call run() makes — so this pins the semantics without building a full run."""
+    from canvit_pretrain.harness.checkpoint import load_checkpoint, restore_into, save_checkpoint
+
+    seg, spec, opt, sched, sel = _setup()
+    # train a couple of steps so the weights differ from a fresh init, then save
+    run_training_loop(
+        task=_StubTask(), model=seg, head=seg.head, optimizer=opt, scheduler=sched, selector=sel,
+        spec=spec, branches=[ViewpointType.RANDOM], canvas_grid=_G, device=torch.device("cpu"),
+        train_batches=_batches(), n_steps=2, log_every=99, ckpt_dir=tmp_path,
+    )
+    ckpt = tmp_path / "step-2.pt"
+    assert ckpt.exists()
+    trained_head = next(seg.head.parameters()).detach().clone()
+
+    # fresh model + fresh opt/sched; seed = weights only
+    seg2, spec2, opt2, sched2, _ = _setup()
+    assert not torch.allclose(next(seg2.head.parameters()), trained_head)
+    payload = load_checkpoint(ckpt, "cpu")
+    restore_into(payload, model=seg2)          # NO optimizer/scheduler => seed semantics
+    assert torch.allclose(next(seg2.head.parameters()), trained_head)   # weights arrived
+    assert sched2.last_epoch == 0                                       # schedule is fresh
+    assert not opt2.state                                               # optimizer is fresh
+
+
+def test_checkpoint_metadata_history_accumulates_and_carries_view_scale():
+    """run() accumulates training_config_history/provenance_history across resumes
+    (to_hf reads them to recover pretrain_view_scale). Here we pin the distill task's
+    view-scale stamping + the accumulation rule run() applies."""
+    from canvit_pretrain.train.config import FoveatedScaleConfig
+
+    from types import SimpleNamespace
+
+    cfg = Config(webdataset_dir="/nonexistent")
+    cfg.model.patcher_name = "foveated"
+    cfg.foveated_scale = FoveatedScaleConfig(mode="fixed", fixed_scale=2.0)
+
+    # is_foveated() only reads model.cfg.patcher_name
+    meta = DistillRunTask(cfg).checkpoint_metadata(SimpleNamespace(cfg=cfg.model))
+    assert meta["pretrain_view_scale"] == 2.0, meta
+    assert meta["patcher_name"] == "foveated"
+
+    # uniform / sampled scale => no fixed view scale to record
+    cfg2 = Config(webdataset_dir="/nonexistent")
+    cfg2.model.patcher_name = "uniform"
+    meta2 = DistillRunTask(cfg2).checkpoint_metadata(SimpleNamespace(cfg=cfg2.model))
+    assert meta2["pretrain_view_scale"] is None
+
+    # accumulation rule: prior history is carried forward, not replaced
+    prior = {"metadata": {"training_config_history": {"t0": {"a": 1}},
+                          "provenance_history": {"t0": {"git": "x"}}}}
+    carried = dict(prior["metadata"]["training_config_history"])
+    carried["t1"] = {"a": 2}
+    assert set(carried) == {"t0", "t1"}
+
+
+def test_collect_viz_is_off_by_default_and_opt_in_collects_frames():
+    """The engine's viz seam: default off (parity path untouched => result.viz is None);
+    when enabled it calls the task's viz_init/viz_frame hooks on branch 0 only."""
+    from types import SimpleNamespace
+
+    from canvit_pretrain.harness.rollout import run_rollout
+
+    class _VizTask(_StubTask):
+        def __init__(self, seg):
+            self.seg, self.inits, self.n_frames = seg, 0, 0
+
+        def viz_init(self, *, model, images, state):
+            self.inits += 1
+            return {"ok": True}
+
+        def viz_frame(self, *, model, images, gout, viewpoint, loss):
+            self.n_frames += 1
+            return SimpleNamespace(vp=viewpoint)
+
+    seg, spec, *_ = _setup()
+    sel = RandomSelector(is_foveated=False, foveated_scale=FoveatedScaleConfig(), min_viewpoint_scale=0.05)
+    imgs, masks = next(_batches())
+    vt = _VizTask(seg)
+    bound = vt.bind((imgs, masks), torch.device("cpu"), model=seg, head=seg.head)
+    common = dict(model=seg, images=imgs, task=bound, selector=sel,
+                  bptt=BpttSpec(mode="none", horizon=3),
+                  branches=[ViewpointType.RANDOM, ViewpointType.RANDOM],
+                  canvas_grid_size=_G, amp_ctx=torch.enable_grad())
+
+    r_off = run_rollout(**common)
+    assert r_off.viz is None  # default: no viz, no hook calls
+
+    # Hooks live on the RUN-level task (which also owns render_viz), NOT on the bound
+    # per-batch task the engine otherwise talks to — so they arrive via viz_task.
+    r_on = run_rollout(**{**common, "collect_viz": True, "viz_task": vt})
+    assert r_on.viz is not None
+    assert vt.inits == 1, "viz_init must fire once, on branch 0 only"
+    assert len(r_on.viz.frames) == 3, "one frame per glimpse of branch 0 only"
+    assert len(r_on.viz.viewpoints) == 3
+
+
 def test_resume_start_step_hook_returns_scheduler_epoch():
     class _Sched:
         last_epoch = 7

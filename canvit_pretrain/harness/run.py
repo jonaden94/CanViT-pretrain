@@ -70,6 +70,22 @@ class RunSettings:
     ema_alpha: float = 0.1       # EMA-smoothed total_loss in the logs (0 => off)
     log_grad_norms: bool = True  # per-module grad L2 norms on log steps
     grad_norm_deep_prefixes: tuple[str, ...] = ()
+    seed_ckpt: Path | None = None
+    """SEED mode: load WEIGHTS ONLY from this local checkpoint and start a fresh run at
+    step 0 (fresh optimizer/scheduler) — how production runs start from a pretrained
+    model. Distinct from ``resume`` (full state, continues the step count), which takes
+    priority: resume > seed_ckpt > fresh. Task-level HF seeding (distill's
+    ``cfg.hf_seed_ckpt``, ade20k/in1k's ``cfg.model_repo``) happens in ``build_model``."""
+    compile: bool = False        # torch.compile the model after build (perf)
+    run_dir: Path | None = None
+    """Root for this run's artifacts (`{run_dir}/checkpoints`, `{run_dir}/visualization`),
+    the `logs_dir/run_group/run_name` convention. When set and ``ckpt_dir`` is not,
+    checkpoints go to ``run_dir/checkpoints``."""
+    log_timing: bool = True      # log cumulative data% vs gpu% (bottleneck analysis)
+    viz_every: int = 0
+    """Render the task's training-batch visualization every N steps (0 = off). Figures
+    are written LOCALLY under ``run_dir/visualization/`` — never uploaded (D-G). Only
+    tasks that implement ``render_viz`` (currently distill's multistep PCA) produce any."""
     # experiment tracker (off by default so run() is import-safe / offline)
     tracker: Literal["wandb", "none"] = "none"
     wandb_project: str | None = None
@@ -145,9 +161,14 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
     if settings.signal_checkpoint:
         install_sigusr1_handler()
 
+    # Run-dir convention (logs_dir/run_group/run_name): checkpoints + visualizations
+    # live under it. An explicit ckpt_dir still wins.
+    run_dir = settings.run_dir
+    ckpt_dir = settings.ckpt_dir or ((run_dir / "checkpoints") if run_dir else None)
+
     # SLURM crash-loop guard (opt-in): a FAILED file left by a prior crash stops the
     # array from re-crashing forever (see the failed-token-blocks-resume incident).
-    failed_marker = (settings.ckpt_dir / "FAILED") if settings.ckpt_dir else None
+    failed_marker = ((run_dir or ckpt_dir) / "FAILED") if (run_dir or ckpt_dir) else None
     if settings.use_failed_marker and failed_marker is not None and failed_marker.exists():
         log.error("FAILED marker exists (%s) — a previous job crashed; delete it to retry.", failed_marker)
         if settings.rank == 0:
@@ -158,6 +179,14 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
     model, head = task.build_model(device)
     canvas_grid = task.canvas_grid(model)
     is_foveated = task.is_foveated(model)
+
+    if settings.compile:
+        log.info("Compiling model (torch.compile)")
+        compiled = getattr(model, "compile", None)
+        if callable(compiled):
+            compiled()          # CanViT wrappers expose their own .compile()
+        else:
+            model = torch.compile(model)  # type: ignore[assignment]
 
     joint = None
     if spec.train_policy or spec.policy_loss_active:
@@ -171,18 +200,28 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
     param_groups = task.trainable_param_groups(model=model, head=head, joint=joint, spec=spec)
     optimizer, scheduler = build_optimizer_and_scheduler(spec, param_groups)
 
-    # --- resume (task-neutral): restore full state BEFORE loaders, so distill's
+    # --- RESUME / SEED / FRESH (task-neutral), BEFORE loaders so distill's
     # model-owned normalizer arrives already-initialized from the checkpoint --------
+    # Priority mirrors train/loop.py: resume (full state, continues the step count)
+    # > seed_ckpt (WEIGHTS ONLY, fresh opt/sched at step 0) > fresh.
     start_step = settings.start_step
-    if settings.resume and settings.ckpt_dir is not None:
-        latest = find_latest(settings.ckpt_dir)
-        if latest is not None:
-            log.info("Resuming from %s", latest)
-            payload = load_checkpoint(latest, device)
-            restore_into(payload, model=model, optimizer=optimizer, scheduler=scheduler,
-                         joint=joint, path=latest, device=device)
-            start_step = task.resume_start_step(payload, scheduler)
-            log.info("Resumed at start_step=%d", start_step)
+    prior_ckpt: dict | None = None
+    latest = find_latest(ckpt_dir) if (settings.resume and ckpt_dir is not None) else None
+    if latest is not None:
+        log.info("RESUME mode: continuing from %s", latest)
+        prior_ckpt = load_checkpoint(latest, device)
+        restore_into(prior_ckpt, model=model, optimizer=optimizer, scheduler=scheduler,
+                     joint=joint, path=latest, device=device)
+        start_step = task.resume_start_step(prior_ckpt, scheduler)
+        log.info("RESUME: start_step=%d", start_step)
+    elif settings.seed_ckpt is not None:
+        log.info("SEED mode: loading weights from %s (fresh opt/sched, step 0)", settings.seed_ckpt)
+        seed_payload = load_checkpoint(settings.seed_ckpt, device)
+        # weights only: no optimizer/scheduler => the run starts a fresh schedule.
+        restore_into(seed_payload, model=model, joint=joint, path=settings.seed_ckpt, device=device)
+        start_step = 0
+    else:
+        log.info("FRESH mode: no checkpoint, starting from scratch")
 
     # --- data + selector ---------------------------------------------------
     train_loader, val_loader = task.build_loaders(world_size=settings.world_size, rank=settings.rank)
@@ -222,8 +261,26 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
             tracker.log_metrics({f"eval/{k}": v for k, v in metrics.items()}, step=step)
         return metrics
 
+    # Checkpoint metadata: ACCUMULATE config + provenance history across resumes
+    # (train/loop.py semantics — `to_hf` reads training_config_history to recover
+    # `pretrain_view_scale`, the foveated footgun; a single snapshot would lose the
+    # earlier legs of a multi-job run).
+    from datetime import UTC, datetime
+
     from canvit_pretrain.checkpoint import current_provenance
-    metadata = {**task.checkpoint_metadata(model), "provenance": current_provenance()}
+
+    task_meta = task.checkpoint_metadata(model)
+    prior_meta = (prior_ckpt or {}).get("metadata", {}) if prior_ckpt else {}
+    cfg_history = dict(prior_meta.get("training_config_history") or {})
+    prov_history = dict(prior_meta.get("provenance_history") or {})
+    _now = datetime.now(UTC).isoformat()
+    cfg_history[_now] = {**task_meta, "train_spec": str(spec)}
+    prov_history[_now] = current_provenance()
+    metadata = {
+        **task_meta,
+        "training_config_history": cfg_history,
+        "provenance_history": prov_history,
+    }
 
     try:
         last = run_training_loop(
@@ -233,8 +290,10 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
             joint=joint, amp_ctx=amp_ctx, grad_clip=settings.grad_clip, is_dist=is_dist,
             task_name=task.name, model_config=task.model_config(model),
             metadata=metadata, log_every=settings.log_every,
-            ckpt_dir=settings.ckpt_dir, ckpt_every=settings.ckpt_every, eval_every=settings.eval_every,
+            ckpt_dir=ckpt_dir, ckpt_every=settings.ckpt_every, eval_every=settings.eval_every,
             ema_alpha=settings.ema_alpha, log_grad_norms=settings.log_grad_norms,
+            log_timing=settings.log_timing,
+            viz_every=settings.viz_every, run_dir=run_dir,
             grad_norm_deep_prefixes=settings.grad_norm_deep_prefixes,
             signal_checkpoint=settings.signal_checkpoint,
             on_log=on_log, on_eval=(on_eval if settings.eval_every else None),

@@ -77,17 +77,37 @@ Validation: **run()-level resume PASSES on real data** (`harness_run_resume.py`:
 not restarted) + **6 new CPU ops tests** (`harness/tests/test_loop_ops.py`) + integration matrix re-run.
 Built DDP-aware (rank-0-guarded); DDP itself still deferred (needs a multi-GPU node).
 
-**STILL MISSING before the old loop can be deleted (beyond DDP)** — production-fidelity items NOT yet
-ported (land at the cutover / as follow-ups):
-- **seed-mode start**: weights-only load from `seed_ckpt`/`hf_seed_ckpt` at step 0 (distinct from resume;
-  distill starts production runs this way). The harness only does full-state resume today.
-- **full WebDataset shard-aligned multi-job resume**: `job_index` from `SLURM_ARRAY_TASK_ID` + the
-  world_size/batch/steps_per_job/samples_per_shard invariant checks. Only the `resume_start_step` hook
-  seam exists; the real derivation is deferred to the launcher cutover.
-- **`pretrain_view_scale` footgun metadata + config/provenance history** in distill checkpoints (the
-  `to_hf` exporter reads these; harness checkpoints stamp only a single provenance snapshot so far).
-- **`torch.compile`** of the model (perf); **run_dir layout** (`logs_dir/run_group/run_name/{checkpoints,log}`);
-  the **full wandb metric set** + distill validation viz/PCA/IN1k-probe (readout richness).
+### Pass 3 (2026-07-24) — the rest of the single-GPU fidelity gap
+Root cause of the pass-2 gap, recorded so it isn't repeated: pass 2 planned from a targeted `grep`
+over `train/loop.py` instead of reading `training_loop` end to end, so features the grep didn't surface
+were never in the plan (and I then overclaimed "feature-complete"). Pass 3 read it top-to-bottom.
+Ported since:
+- **seed-mode start** — `RunSettings.seed_ckpt` (weights-only, fresh opt/sched at step 0). Priority
+  resume > seed > fresh, mirroring train/loop.py. Distill also honors `cfg.hf_seed_ckpt` in
+  `build_model` (HF config wins over CLI defaults, else arch/weights mismatch).
+- **`torch.compile`** (`RunSettings.compile`, uses the wrapper's own `.compile()` when present).
+- **config + provenance HISTORY accumulated across resumes** (not a single snapshot) + distill stamps
+  **`pretrain_view_scale`** / patcher / teacher info — what `to_hf` reads (the foveated footgun).
+- **run_dir layout** (`RunSettings.run_dir` → `{run_dir}/checkpoints`, `{run_dir}/visualization`).
+- **data% vs gpu% timing metrics** (`log_timing`).
+- **distill PCA viz PORTED** (owner: distill only; no ade20k/in1k viz). New engine seam
+  `run_rollout(collect_viz=, viz_task=)` + `task.viz_init`/`viz_frame`/`render_viz`, branch-0 only and
+  **off by default so the parity path is untouched**. Reuses the existing `extract_sample0_viz` +
+  `plot_multistep_pca` + `save_figure`, so content is identical and figures are saved **LOCALLY** to
+  `{run_dir}/visualization/pca_train/step-N.png` (never uploaded — the old wandb path is not used).
+  GPU-verified: real figures render correctly (init row + per-t rows, viewpoint boxes, hidden-PCA
+  evolution, CosDis 0.9367→0.9613→0.9741).
+  NOTE: a bug was caught here — the hooks live on the RUN-level task but the engine only sees the
+  per-batch BOUND task, so they'd never fire; fixed via the explicit `viz_task` argument.
+
+**STILL MISSING before the old loop can be deleted:**
+- **DDP** (needs a multi-GPU node): manual grad-sync/broadcast, all-reduce of logged metrics, the §9
+  support matrix. Not connected to any of the above.
+- **The `SLURM_ARRAY_TASK_ID` sliver of WebDataset multi-job resume**: `job_index` derivation +
+  world_size/batch/steps_per_job/samples_per_shard invariant checks (the `resume_start_step` hook seam
+  exists; the derivation belongs with the launcher rewrite).
+- **Full wandb metric richness** (per-branch distill EMA metrics, flattened-config params) and distill
+  **validation-time** viz/curves/IN1k-probe (training-batch PCA viz IS ported).
 
 ## NEXT STEPS (in order)
 1. (optional) Port ADE20K's `WarmupOneCycleLR` into `harness/optim.py` (currently onecycle raises;
