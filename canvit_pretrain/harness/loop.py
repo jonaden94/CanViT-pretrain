@@ -162,7 +162,11 @@ def run_training_loop(
     ``RolloutTask`` the engine runs."""
     global _checkpoint_requested
     amp_ctx = amp_ctx or nullcontext()
-    trainable = [p for g in optimizer.param_groups for p in g["params"]]
+    # Model and policy gradients are clipped SEPARATELY, each to grad_clip (train/loop.py
+    # 874-878): one joint norm over the union would couple their magnitudes, so a large
+    # scorer gradient would shrink the model's update (and vice versa).
+    _scorer_ids = {id(p) for p in joint.scorer.parameters()} if joint is not None else set()
+    trainable = [p for g in optimizer.param_groups for p in g["params"] if id(p) not in _scorer_ids]
     core = getattr(model, "module", model)
     ema = EMATracker(ema_alpha) if ema_alpha > 0 else None
     last: dict = {}
@@ -197,8 +201,10 @@ def run_training_loop(
         )
         if trainable:
             torch.nn.utils.clip_grad_norm_(trainable, grad_clip)
-        if joint is not None and is_dist:  # scorer is not DDP-wrapped (design §9)
-            joint.allreduce_grads()
+        if joint is not None:
+            if is_dist:  # scorer is not DDP-wrapped (design §9) — average its grads by hand
+                joint.allreduce_grads()
+            torch.nn.utils.clip_grad_norm_(joint.scorer.parameters(), grad_clip)
 
         is_log = on_log is not None and step % log_every == 0
         # Read grad norms AFTER clip and BEFORE optimizer.step() (grads persist until

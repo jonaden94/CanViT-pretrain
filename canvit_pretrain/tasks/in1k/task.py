@@ -99,7 +99,9 @@ class In1kRunTask:
                                       optim={"backbone": head_go, "head": head_go})
         return TrainSpec.probe(bptt=BpttSpec(mode="none", horizon=T), optim={"head": head_go})
 
-    def build_model(self, device):
+    def build_model(self, device, prior_model_config=None):
+        # prior_model_config is unused: the backbone arch comes from the HF repo the head
+        # was built on, so a resume rebuilds the same model from cfg.model_repo already.
         from canvit_pretrain.in1k.config import NUM_CLASSES
         clf = CanViTForImageClassification.from_pretrained_with_new_head(
             pretrained_repo=self.cfg.model_repo, n_classes=NUM_CLASSES,
@@ -154,6 +156,9 @@ class In1kRunTask:
 
     def resume_start_step(self, payload, scheduler):
         return scheduler.last_epoch  # with_epoch wds: steps == scheduler.step() calls
+
+    def resume_state(self):
+        return {}  # with_epoch reshuffles every epoch: no cross-job shard cursor
 
     def batch_images(self, batch, device):
         return batch[0].to(device, non_blocking=True)

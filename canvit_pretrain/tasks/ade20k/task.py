@@ -115,7 +115,9 @@ class Ade20kRunTask:
         )
 
     # --- construction ------------------------------------------------------
-    def build_model(self, device):
+    def build_model(self, device, prior_model_config=None):
+        # prior_model_config is unused: the backbone arch comes from the HF repo the probe
+        # was built on, so a resume rebuilds the same model from cfg.model_repo already.
         seg = CanViTForSemanticSegmentation.from_pretrained_with_new_probe(
             pretrained_repo=self.cfg.model_repo, num_classes=self._num_classes(),
             dropout=self.cfg.dropout, use_ln=True,
@@ -172,6 +174,9 @@ class Ade20kRunTask:
 
     def resume_start_step(self, payload, scheduler):
         return scheduler.last_epoch  # map dataset: steps == scheduler.step() calls
+
+    def resume_state(self):
+        return {}  # re-iterable map dataset: nothing to carry across jobs
 
     # --- per-batch (engine-facing) ----------------------------------------
     def batch_images(self, batch, device):

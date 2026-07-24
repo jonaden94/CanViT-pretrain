@@ -16,6 +16,7 @@ Run (offline):
 
 import logging
 import os
+import shutil
 from pathlib import Path
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -123,6 +124,10 @@ CONFIGS = [
 def main() -> None:
     assert torch.cuda.is_available(), "need a GPU"
     print(f"torch={torch.__version__}  device={torch.cuda.get_device_name(0)}")
+    # Every config here is a FRESH run (resume has its own scripts). Wipe stale
+    # checkpoints so `ckpt_file.exists()` stays meaningful and run()'s resume path
+    # doesn't pick up a previous invocation's N-step checkpoint.
+    shutil.rmtree(CKPT_BASE, ignore_errors=True)
     results = []
     for label, task_factory, spec_factory in CONFIGS:
         ckpt = CKPT_BASE / label

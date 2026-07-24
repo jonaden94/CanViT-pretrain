@@ -1,4 +1,49 @@
-# RESUME STATE — unified-harness build (updated 2026-07-24, overnight GPU session)
+# RESUME STATE — unified-harness build (updated 2026-07-24)
+
+## READ THIS FIRST AFTER A COMPACTION
+
+**Commit stack on `main` (all additive; live trainers untouched; owner pushes):**
+```
+119059f  pass 3 — rest of single-GPU fidelity (seed-mode, compile, ckpt history, run_dir, distill PCA viz)
+134bc51  pass 2 — core operational features (resume, SIGUSR1 ckpt, crash-guard, EMA/grad-norms)
+88957e6  pass 1 — the unified harness itself (run() + three peer *RunTask wrappers)
+480fd2a  <- pre-harness baseline (old distill loop intact here)
+```
+Everything is committed; the working tree's remaining changes are the OWNER's (exp22 `*.sh`)
+plus generated `unification_docs/parity/record_*.json` — never stage those.
+
+**Coding guidelines:** `~/.claude/CLAUDE.md` + this repo-session's `CLAUDE.md` now require invoking
+the `andrej-karpathy-skills:karpathy-guidelines` skill at session start. Key corollary, learned here:
+never claim "complete"/"drop-in" without stating the criterion AND checking it; when porting/replacing
+code, read the target end to end — do NOT plan from a `grep` (that is exactly how pass 2 shipped incomplete).
+
+**The WebDataset `job_index` multi-job resume is DONE** (pass 4, see its section below).
+
+Pass 4's end-to-end re-read of `train/loop.py` then found FOUR more fidelity gaps (raw shards,
+`reset_normalizer`, ckpt `model_config` on resume, scorer clipping) — **all four CLOSED in pass 5**,
+see its section below.
+
+**IMMEDIATE NEXT TASK — full wandb metric richness + distill VALIDATION-time viz/curves/IN1k-probe.**
+Observability, not correctness. Port from `train/loop.py`: per-branch distill EMA metrics
+(`full/…` + `random/…` loss/cos), flattened-config `log_parameters`, and the validation-phase
+PCA/curves + IN1k linear-probe readout (the TRAINING-batch PCA viz is already ported). Owner
+constraint still in force: **distill viz only — no ade20k/in1k viz.**
+SUCCESS CRITERIA: a debug sbatch run logging to wandb project `canvit-pretrain` shows the same metric
+set as an existing `jon_exp22` run for the same step range.
+Cosmetic/observability, not correctness. Port from `train/loop.py`: per-branch distill EMA metrics,
+flattened-config `log_parameters`, and the validation-phase PCA/curves + IN1k linear-probe readout
+(the TRAINING-batch PCA viz is already ported). Owner constraint still in force: **distill viz only —
+no ade20k/in1k viz.**
+SUCCESS CRITERIA: a debug sbatch run logging to wandb project `canvit-pretrain` shows the same metric
+set as an existing `jon_exp22` run for the same step range.
+
+**Then, in order:** (a) **DDP — BLOCKED, needs a multi-GPU node** (verify: 2-rank, weights identical
+across ranks, loss matches 1-GPU); (b) **big-bang cutover — needs DDP done + owner GREEN LIGHT**
+(verify: REAL parity probe prints `9a0100a1a3de3acd`, full suite, and a GPU distill run matching an
+existing one, BEFORE deleting anything).
+
+---
+
 
 Self-contained pickup point. Full design + running status: `07-unified-harness-design.md`
 (read its "LOCKED DECISIONS" + "IMPLEMENTATION STATUS" first). Session memory (auto-loaded):
@@ -66,7 +111,7 @@ Ported the CORE task-neutral operational features (single-GPU resume / preemptio
 missing" items below. All task-neutral, in the harness:
 - **Resume**: `run()` does `find_latest` → `restore_into` (model/opt/sched/joint) BEFORE `build_loaders`
   (so distill's model-owned normalizer arrives initialized) → `start_step` via a `task.resume_start_step`
-  hook (default `scheduler.last_epoch`; distill's SLURM-array `job_index` override deferred to the launcher cutover).
+  hook (default `scheduler.last_epoch`; distill's SLURM-array `job_index` override landed in pass 4 below).
 - **SIGUSR1 checkpoint-on-signal** (`install_sigusr1_handler` in run(); the loop polls a flag → saves at a
   safe boundary; `request_checkpoint()` is the non-signal test hook).
 - **FAILED-marker + `cancel_slurm_array`** crash-loop guard (opt-in `use_failed_marker`).
@@ -100,12 +145,65 @@ Ported since:
   NOTE: a bug was caught here — the hooks live on the RUN-level task but the engine only sees the
   per-batch BOUND task, so they'd never fire; fixed via the explicit `viz_task` argument.
 
+### Pass 4 (2026-07-24) — WebDataset `job_index` multi-job resume (the last CORRECTNESS gap) DONE
+Production distill = a SLURM array where each task trains exactly `steps_per_job` steps over its own
+shard slice and the next task must read the NEXT slice. The harness derived `start_step` from the
+scheduler and passed a **hardcoded `job_index=0`** to `create_loaders`, so a real multi-job resume
+would have silently re-read job 0's shards. Ported from `train/loop.py` (~354-417, ~499-512):
+- distill `resume_start_step`: on the WebDataset path `start_step = (saved job_index + 1) *
+  steps_per_job` (scheduler only on the sharded path); **raises** when the checkpoint has no
+  `job_index`, and when `scheduler.last_epoch != start_step` (a mid-job/SIGUSR1 save, or a leg that
+  ran a step count other than `steps_per_job`).
+- `build_loaders`: passes the real `job_index`, then re-checks the schedule invariants
+  (`world_size`/`batch_size_per_gpu`/`steps_per_job`/`samples_per_shard`) against the checkpoint and
+  raises rather than silently shifting the slice offset.
+- new task seam **`resume_state() -> dict`** (parallel to `resume_start_step`), written to checkpoint
+  `metadata["resume_state"]` by `run()`; `{}` for ade20k/in1k.
+Note: no separate `n_steps == steps_per_job` guard is needed — the mid-job assertion already catches a
+short leg, and the loader's `total_samples == steps_per_job * batch` assert catches a long one.
+`SLURM_ARRAY_TASK_ID` stays with the launcher rewrite: the index comes from the checkpoint, not the
+environment, so array tasks chain without it.
+Verified: **11 new CPU tests** (`tasks/tests/test_wds_resume.py`, incl. a parametrized case per schedule
+input) + a **real 2-leg GPU run on the IN21k webdataset** (`unification_docs/harness_run_wds_resume.py`,
+`ALL PASS`): leg 1 ran steps 0-127 on `shard-001751.tar` and saved `job_index=0`; leg 2 resumed at step
+128, advanced to `job_index=1`, ended at 255, and read **`shard-002991.tar` — a disjoint slice**. All
+four refusal cases raised (mid-job save; changed schedule inputs caught by both the job-boundary and the
+invariant guard; missing `job_index`). Note a batch-size change ALONE isn't constructible on real data
+(`steps_per_job * batch` must stay a multiple of `samples_per_shard`), so per-input isolation lives in the
+CPU test. Parity digest still `9a0100a1a3de3acd`; 72 harness+tasks tests green; full suite 165.
+
+### Pass 5 (2026-07-24) — the four gaps pass 4's end-to-end read surfaced. ALL FOUR CLOSED.
+None of these were on any earlier list; they came out of reading `train/loop.py` top-to-bottom (the
+discipline pass 2 skipped). Owner chose "close (a)-(d) first" and confirmed raw shards are still needed.
+- **(a) Raw / no-feature WebDataset shards** (`train/loop.py` 566-575, 639-643) — the exp21
+  on-the-fly-features path (memory `exp21-onthefly-stall-fix`). Those shards carry only jpg+json, so
+  the frozen teacher makes the targets live. The harness called `init_normalizer_stats_from_tar`
+  unconditionally and `bind()` did `raw_patches.to(...)` on a `None` → **it CRASHED**; every smoke
+  passed only because exp22 uses with-features shards. FIXED: `build_loaders` dispatches on
+  `train.has_features` (`init_normalizer_stats_from_tar_raw` for raw), and `bind()` computes targets
+  via a new `_teacher_targets` helper when the batch carries none.
+  Verified on the REAL no-feature IN1k webdataset (`unification_docs/harness_run_raw_shards.py`,
+  `ALL PASS`): stats "computed live" from 256 samples, loss 2.033→2.014, checkpoint round-trips.
+- **(b) `cfg.reset_normalizer` was ignored** (`train/loop.py` 546-548) → now
+  `if cfg.reset_normalizer or not scene_norm.initialized`.
+- **(c) On RESUME the checkpoint's `model_config` didn't override `cfg.model`** (`train/loop.py`
+  254-261). FIXED: `run()` resolves + loads the resume checkpoint **before** `build_model` and passes
+  `prior_model_config=`; distill rebuilds its arch from it (`dacite.from_dict`) and RESUME now
+  correctly beats `hf_seed_ckpt`. Distill's `model_config` gained a `"canvit"` entry holding the full
+  `asdict(cfg.model)` so the round-trip is lossless (nothing read `model_config` before, so this is
+  additive). ade20k/in1k accept and ignore the kwarg — their arch comes from `cfg.model_repo`.
+- **(d) Joint runs clipped the scorer TOGETHER with the model** (`train/loop.py` 874-878 clips
+  `trainable` and `joint.scorer.parameters()` **separately**, each to `grad_clip`; one joint norm
+  couples their magnitudes). FIXED in `harness/loop.py`: `trainable` now excludes the scorer's params
+  by id, and the scorer gets its own clip **after** `allreduce_grads()` (the old order).
+Verified: **8 new CPU tests** (`tasks/tests/test_distill_data.py` 7 + `harness/tests/test_loop_ops.py`
+clip-split; full suite 165 → **173 passed**) + the real raw-shard GPU run + **8/8 integration configs
+still PASS** (both joint configs with `reward_frac` populated) + parity digest `9a0100a1a3de3acd` + a
+re-run of the 2-leg wds resume (`ALL PASS`) after the `run()` reordering.
+
 **STILL MISSING before the old loop can be deleted:**
 - **DDP** (needs a multi-GPU node): manual grad-sync/broadcast, all-reduce of logged metrics, the §9
   support matrix. Not connected to any of the above.
-- **The `SLURM_ARRAY_TASK_ID` sliver of WebDataset multi-job resume**: `job_index` derivation +
-  world_size/batch/steps_per_job/samples_per_shard invariant checks (the `resume_start_step` hook seam
-  exists; the derivation belongs with the launcher rewrite).
 - **Full wandb metric richness** (per-branch distill EMA metrics, flattened-config params) and distill
   **validation-time** viz/curves/IN1k-probe (training-batch PCA viz IS ported).
 

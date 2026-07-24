@@ -76,6 +76,12 @@ class DistillRunTask:
         self.scene_norm = None
         self.cls_norm = None
         self._teacher = None
+        # WebDataset shard schedule (see resume_start_step): index of the job this
+        # process runs, and the saved schedule inputs it must still agree with.
+        self._start_job_index = 0
+        self._resume_saved: dict | None = None
+        self._train_loader = None
+        self._world_size = 1
 
     def caps(self):
         from canvit_pretrain.harness.spec import TaskCaps
@@ -98,7 +104,7 @@ class DistillRunTask:
                                           schedule=sched)},
         )
 
-    def build_model(self, device):
+    def build_model(self, device, prior_model_config=None):
         from canvit_pretrain.train.model import create_model, load_student_backbone
         assert not (self.cfg.seed_ckpt and self.cfg.hf_seed_ckpt), (
             "seed_ckpt and hf_seed_ckpt are mutually exclusive"
@@ -106,7 +112,21 @@ class DistillRunTask:
         # HF SEED: the checkpoint's model config MUST win over CLI defaults, or the
         # arch won't match the weights (missing/unexpected keys on load).
         hf_seed_state = None
-        if self.cfg.hf_seed_ckpt:
+        if prior_model_config and prior_model_config.get("canvit"):
+            # RESUME beats every seed mode (train/loop.py 219): rebuild the arch the
+            # checkpoint was written with, so its weights load. Without this a CLI
+            # default (e.g. canvas_update_mode) would silently override the saved arch
+            # and the strict load would fail on missing/unexpected keys.
+            import dacite
+
+            from canvit_pretrain import CanViTForPretrainingConfig
+            log = __import__("logging").getLogger(__name__)
+            ckpt_cfg = dacite.from_dict(CanViTForPretrainingConfig, prior_model_config["canvit"])
+            if ckpt_cfg != self.cfg.model:
+                log.warning("Overriding cfg.model from the checkpoint (was %s, now %s)",
+                            self.cfg.model.canvas_update_mode, ckpt_cfg.canvas_update_mode)
+            self.cfg.model = ckpt_cfg
+        elif self.cfg.hf_seed_ckpt:
             from canvit_pytorch.model.pretraining.hub import CanViTForPretrainingHFHub
             log = __import__("logging").getLogger(__name__)
             log.info("HF SEED mode: loading %s", self.cfg.hf_seed_ckpt)
@@ -146,20 +166,51 @@ class DistillRunTask:
     def build_loaders(self, *, world_size, rank):
         from canvit_pretrain.train.data import create_loaders
         from canvit_pretrain.train.data.webdataset import (
-            WebDatasetTrainLoader, init_normalizer_stats_from_tar,
+            WebDatasetTrainLoader, init_normalizer_stats_from_tar, init_normalizer_stats_from_tar_raw,
         )
-        loaders = create_loaders(self.cfg, self.cfg.start_step if hasattr(self.cfg, "start_step") else 0,
-                                 job_index=0, world_size=world_size, rank=rank)
+        loaders = create_loaders(self.cfg, self._start_job_index * self.cfg.steps_per_job,
+                                 job_index=self._start_job_index, world_size=world_size, rank=rank)
         train, val = loaders.train, loaders.val
         assert isinstance(train, WebDatasetTrainLoader), (
             "DistillRunTask currently supports the webdataset path only (set cfg.webdataset_dir)"
         )
-        if not self.scene_norm.initialized:
-            init_normalizer_stats_from_tar(
-                train.first_shard_path(), self.scene_norm, self.cls_norm, self._device,
-                self.cfg.normalizer_max_samples or 512,
-            )
+        self._train_loader, self._world_size = train, world_size
+        self._check_schedule_invariants(train, world_size=world_size)  # fail before any work
+        # `reset_normalizer` forces a re-init even when the checkpoint carried stats.
+        if self.cfg.reset_normalizer or not self.scene_norm.initialized:
+            if train.has_features:
+                init_normalizer_stats_from_tar(
+                    train.first_shard_path(), self.scene_norm, self.cls_norm, self._device,
+                    self.cfg.normalizer_max_samples or 512,
+                )
+            else:
+                # Raw (jpg+json) shards carry no teacher features — seed the stats from
+                # teacher forwards on the fly, like train/loop.py's raw branch.
+                sz = self._scene_size_px()
+                init_normalizer_stats_from_tar_raw(
+                    train.first_shard_path(), self.scene_norm, self.cls_norm,
+                    image_size=sz, compute_features=lambda imgs: self._teacher_targets(imgs, sz),
+                    device=self._device, max_samples=self.cfg.normalizer_max_samples,
+                )
         return train, val
+
+    def _scene_size_px(self):
+        from canvit_pretrain.train.data import scene_size_px
+        return scene_size_px(self.cfg.canvas_patch_grid_size, self._model.backbone.patch_size_px)
+
+    def _teacher_targets(self, images, sz):
+        """Frozen-teacher features for RAW shards (the on-the-fly path). Resizes to the
+        scene resolution first, exactly like train/loop.py's ``compute_raw_targets``."""
+        from canvit_pytorch.backbone.vit import NormFeatures
+        teacher = self._load_teacher(self._device)
+        amp = (torch.autocast("cuda", dtype=torch.bfloat16)
+               if self._device.type == "cuda" else nullcontext())
+        with torch.no_grad(), amp:
+            if images.shape[-1] != sz:
+                images = torch.nn.functional.interpolate(images, size=(sz, sz), mode="bilinear",
+                                                         align_corners=False)
+            feats = teacher.forward_norm_features(images)
+            return NormFeatures(patches=feats.patches.float(), cls=feats.cls.float())
 
     def build_selector(self, *, device, canvas_grid, is_foveated):
         from canvit_pretrain.train.selector import RandomSelector
@@ -247,21 +298,94 @@ class DistillRunTask:
         )
         save_figure(fig, run_dir, "pca_train", step)
 
+    # --- WebDataset multi-job (SLURM-array) resume, ported from train/loop.py -------
     def resume_start_step(self, payload, scheduler):
-        # Continuous single-run resume derives start_step from the scheduler, like the
-        # other tasks. The production SLURM-array path (start_step = job_index *
-        # steps_per_job with shard-aligned WebDataset resume) is wired at the launcher
-        # cutover, where job_index comes from SLURM_ARRAY_TASK_ID + the saved index;
-        # it would override this hook then.
-        return scheduler.last_epoch
+        """Where this job starts training.
+
+        Sharded/feature path: the scheduler's step count, like the other two tasks.
+
+        WebDataset path (the production one): the step is derived from the SHARD
+        SCHEDULE, not the scheduler. Each job consumes exactly ``steps_per_job`` clean,
+        shard-aligned steps, so the next job starts at ``(saved job_index + 1) *
+        steps_per_job`` and reads the shard slice after the saved one. Resuming at any
+        other offset silently re-processes or skips training shards, so both failure
+        modes are hard errors instead: a checkpoint without a ``job_index``, and a
+        checkpoint whose scheduler disagrees with the derived step (a mid-job save —
+        SIGUSR1 preemption — or a job that ran a step count other than ``steps_per_job``).
+        """
+        if self.cfg.webdataset_dir is None:
+            return scheduler.last_epoch
+        saved = (payload.get("metadata") or {}).get("resume_state") or {}
+        if saved.get("job_index") is None:
+            raise RuntimeError(
+                "WebDataset resume requires a checkpoint carrying `job_index` "
+                "(metadata.resume_state) — this one has none, so the next shard slice "
+                "is unknown. Seed from it instead (RunSettings.seed_ckpt) to start a "
+                "fresh shard schedule from these weights."
+            )
+        self._resume_saved = saved
+        self._start_job_index = int(saved["job_index"]) + 1
+        start_step = self._start_job_index * self.cfg.steps_per_job
+        if scheduler.last_epoch != start_step:
+            raise RuntimeError(
+                f"WebDataset resume: scheduler.last_epoch={scheduler.last_epoch} != "
+                f"start_step={start_step} (= (saved job_index {saved['job_index']} + 1) "
+                f"* steps_per_job {self.cfg.steps_per_job}). The checkpoint was not "
+                "written at an end-of-job boundary — a mid-job / signal-triggered save, "
+                "or the job ran a different number of steps than steps_per_job. Resume "
+                "from an end-of-job checkpoint, or seed to start a fresh schedule."
+            )
+        return start_step
+
+    def _check_schedule_invariants(self, train_loader, *, world_size) -> None:
+        """Refuse to resume when the shard-schedule inputs changed. The slice offset
+        (``job_index * shards_per_gpu * world_size``) is only meaningful under the
+        (world_size, batch, steps_per_job, samples_per_shard) it was computed with;
+        changing any of them silently re-processes or skips shards."""
+        if self._resume_saved is None:
+            return
+        current = {
+            "ddp_world_size": world_size,
+            "batch_size_per_gpu": self.cfg.batch_size_per_gpu,
+            "steps_per_job": self.cfg.steps_per_job,
+            "samples_per_shard": train_loader.samples_per_shard,
+        }
+        saved = {k: self._resume_saved.get(k) for k in current}
+        if saved != current:
+            raise RuntimeError(
+                "WebDataset resume config mismatch — refusing to resume because the "
+                "shard-schedule offset would be wrong (silent shard re-processing or "
+                f"skipping). Saved: {saved}. Current: {current}. To start a new training "
+                "schedule with different values, seed from this checkpoint instead."
+            )
+
+    def resume_state(self):
+        """Shard-schedule state stored in the checkpoint so the NEXT job resumes
+        shard-aligned (consumed by ``resume_start_step`` / ``_check_schedule_invariants``).
+        Empty off the WebDataset path or before the loaders exist."""
+        if self.cfg.webdataset_dir is None or self._train_loader is None:
+            return {}
+        return {
+            "job_index": self._start_job_index,
+            "ddp_world_size": self._world_size,
+            "batch_size_per_gpu": self.cfg.batch_size_per_gpu,
+            "steps_per_job": self.cfg.steps_per_job,
+            "samples_per_shard": self._train_loader.samples_per_shard,
+        }
 
     def batch_images(self, batch, device):
         return batch[0].to(device, non_blocking=True)
 
     def bind(self, batch, device, *, model, head):
-        _, raw_patches, raw_cls, _ = batch
-        raw_patches = raw_patches.to(device, dtype=torch.float32)
-        raw_cls = raw_cls.to(device, dtype=torch.float32)
+        images, raw_patches, raw_cls, _ = batch
+        if raw_patches is None:
+            # RAW (no-feature) shards: the loader supplies images only, so the frozen
+            # teacher produces this batch's targets here (train/loop.py load_train_batch).
+            feats = self._teacher_targets(images.to(device, non_blocking=True), self._scene_size_px())
+            raw_patches, raw_cls = feats.patches, feats.cls
+        else:
+            raw_patches = raw_patches.to(device, dtype=torch.float32)
+            raw_cls = raw_cls.to(device, dtype=torch.float32)
         return BoundDistillTask(DistillTask(
             scene_target=self.scene_norm(raw_patches),
             cls_target=self.cls_norm(raw_cls.unsqueeze(1)).squeeze(1),
@@ -316,8 +440,12 @@ class DistillRunTask:
             return {}
 
     def model_config(self, model):
+        from dataclasses import asdict
         return {"task": "distill", "teacher_dim": self.cfg.model.teacher_dim,
-                "canvas_grid": self.cfg.canvas_patch_grid_size, "backbone_name": self.cfg.backbone_name}
+                "canvas_grid": self.cfg.canvas_patch_grid_size, "backbone_name": self.cfg.backbone_name,
+                # The FULL arch, so a resume can rebuild exactly this model before loading
+                # the weights (see build_model's prior_model_config branch).
+                "canvit": asdict(self.cfg.model)}
 
     def checkpoint_metadata(self, model):
         # pretrain_view_scale is the P6 FOOTGUN: the foveated/square view scale is NOT

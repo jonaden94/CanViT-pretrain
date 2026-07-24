@@ -141,10 +141,41 @@ viz** (owner: distill only). Viz uses a new engine seam `run_rollout(collect_viz
 reusing `extract_sample0_viz`/`plot_multistep_pca`/`save_figure` so figures are identical and land
 **LOCALLY** under `{run_dir}/visualization/pca_train/` (never uploaded). GPU-verified rendering.
 
-**NOT yet a full drop-in** — remaining before the old loop can be deleted: **DDP** (multi-GPU node);
-the `SLURM_ARRAY_TASK_ID` sliver of WebDataset multi-job resume (`job_index` derivation + shard
-invariants — the hook seam exists, the derivation belongs with the launcher rewrite); full wandb metric
-richness + distill **validation-time** viz/curves/IN1k-probe (training-batch PCA viz IS ported).
+**Pass 4 (2026-07-24) — WebDataset multi-job resume, the last CORRECTNESS gap. DONE + verified.**
+Production distill runs are SLURM arrays where each task trains exactly `steps_per_job` steps over its
+own shard slice; the next task must read the NEXT slice. The harness previously derived `start_step`
+from the scheduler and passed a **hardcoded `job_index=0`** to `create_loaders`, so a multi-job resume
+would have silently re-read job 0's shards. Now:
+- distill `resume_start_step` derives `start_step = (saved job_index + 1) * steps_per_job` on the
+  WebDataset path (scheduler only on the sharded path), and **raises** on a checkpoint with no
+  `job_index` or one whose `scheduler.last_epoch` disagrees with the job boundary (a mid-job / SIGUSR1
+  save, or a leg that ran a step count other than `steps_per_job`).
+- `build_loaders` passes the real `job_index` and re-checks the schedule invariants
+  (`world_size`/`batch_size_per_gpu`/`steps_per_job`/`samples_per_shard`) against the checkpoint,
+  raising rather than silently shifting the slice offset.
+- new task seam **`resume_state() -> dict`** (parallel to `resume_start_step`), stored at checkpoint
+  `metadata["resume_state"]`; `{}` for ade20k/in1k (map dataset / `with_epoch` reshuffle — no cursor).
+`SLURM_ARRAY_TASK_ID` itself stays with the launcher rewrite: the index comes from the checkpoint, not
+the environment, so array tasks chain correctly without it.
+Verified on the real IN21k webdataset (`unification_docs/harness_run_wds_resume.py`, `ALL PASS`): leg 1
+ran steps 0-127 on `shard-001751.tar` saving `job_index=0`; leg 2 resumed at 128, advanced to
+`job_index=1`, and read the **disjoint** `shard-002991.tar`; all refusal cases raised. Plus 11 CPU tests
+(`tasks/tests/test_wds_resume.py`).
+
+**Pass 5 (2026-07-24) — the four gaps pass 4's end-to-end read surfaced, ALL CLOSED.** None were on an
+earlier list: **(a) raw/no-feature WebDataset shards (on-the-fly teacher targets) were unsupported and
+CRASHED** — the exp21 path; `build_loaders` now dispatches on `train.has_features` and `bind()` makes
+targets via `_teacher_targets` when the batch has none (verified on the real no-feature IN1k
+webdataset). **(b)** `cfg.reset_normalizer` now forces a re-init. **(c)** `run()` resolves the resume
+checkpoint BEFORE `build_model` and passes `prior_model_config=`, so the checkpoint's arch wins over
+CLI defaults (distill rebuilds via `dacite`; its `model_config` gained a lossless `"canvit"` entry;
+RESUME now correctly beats `hf_seed_ckpt`). **(d)** the scorer is clipped **separately** from the model
+(after `allreduce_grads()`), matching `train/loop.py` 874-878 — one joint norm had been coupling their
+magnitudes on every RL run.
+
+**NOT yet a full drop-in** — remaining: **DDP** (multi-GPU node) and full wandb metric richness +
+distill validation-time viz/curves/IN1k-probe (training-batch PCA viz IS ported). Neither is a
+correctness gap.
 
 **REMAINING:**
 - `harness/ddp.py` — manual grad-sync for in-rollout modules (backbone/scorer) per the §9 matrix

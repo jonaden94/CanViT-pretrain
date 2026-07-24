@@ -104,7 +104,10 @@ class RunTask(Protocol):
 
     def caps(self) -> TaskCaps: ...
     def default_spec(self) -> TrainSpec: ...
-    def build_model(self, device: torch.device) -> tuple[Any, Any]: ...  # (model, head|None)
+    # prior_model_config: the resume checkpoint's model_config, which must win over
+    # this run's config defaults (None when not resuming).
+    def build_model(self, device: torch.device,
+                    prior_model_config: dict | None = None) -> tuple[Any, Any]: ...  # (model, head|None)
     def canvas_grid(self, model: Any) -> int: ...
     def is_foveated(self, model: Any) -> bool: ...
     def branches(self) -> list[ViewpointType]: ...
@@ -115,6 +118,7 @@ class RunTask(Protocol):
     def trainable_param_groups(self, *, model: Any, head: Any, joint: Any,
                                spec: TrainSpec) -> dict[str, list]: ...
     def resume_start_step(self, payload: dict, scheduler: Any) -> int: ...  # default: scheduler.last_epoch
+    def resume_state(self) -> dict: ...  # extra state this task needs to resume its data schedule
     def batch_images(self, batch: Any, device: torch.device) -> torch.Tensor: ...
     def bind(self, batch: Any, device: torch.device, *, model: Any, head: Any) -> Any: ...
     def evaluate(self, *, model: Any, head: Any, val_loader: Any, device: torch.device,
@@ -175,8 +179,16 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
             cancel_slurm_array()
         raise RuntimeError(f"Refusing to start: {failed_marker} exists")
 
+    # --- resume checkpoint is resolved BEFORE the model is built, because its
+    # model_config must WIN over CLI defaults: building from the defaults and then
+    # strict-loading saved weights of a different arch fails on missing/unexpected keys
+    # (train/loop.py 254-261). ---------------------------------------------
+    latest = find_latest(ckpt_dir) if (settings.resume and ckpt_dir is not None) else None
+    prior_ckpt: dict | None = load_checkpoint(latest, device) if latest is not None else None
+
     # --- model + (optional) joint policy -----------------------------------
-    model, head = task.build_model(device)
+    model, head = task.build_model(
+        device, prior_model_config=(prior_ckpt or {}).get("model_config") or None)
     canvas_grid = task.canvas_grid(model)
     is_foveated = task.is_foveated(model)
 
@@ -205,11 +217,8 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
     # Priority mirrors train/loop.py: resume (full state, continues the step count)
     # > seed_ckpt (WEIGHTS ONLY, fresh opt/sched at step 0) > fresh.
     start_step = settings.start_step
-    prior_ckpt: dict | None = None
-    latest = find_latest(ckpt_dir) if (settings.resume and ckpt_dir is not None) else None
-    if latest is not None:
+    if prior_ckpt is not None:
         log.info("RESUME mode: continuing from %s", latest)
-        prior_ckpt = load_checkpoint(latest, device)
         restore_into(prior_ckpt, model=model, optimizer=optimizer, scheduler=scheduler,
                      joint=joint, path=latest, device=device)
         start_step = task.resume_start_step(prior_ckpt, scheduler)
@@ -278,6 +287,10 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
     prov_history[_now] = current_provenance()
     metadata = {
         **task_meta,
+        # What the NEXT job needs to resume this task's DATA schedule (distill's
+        # WebDataset job_index + the invariants it is only valid under; {} for the
+        # map-style tasks). Built after build_loaders, which is where it becomes known.
+        "resume_state": task.resume_state(),
         "training_config_history": cfg_history,
         "provenance_history": prov_history,
     }

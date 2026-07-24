@@ -222,14 +222,67 @@ def test_collect_viz_is_off_by_default_and_opt_in_collects_frames():
     assert len(r_on.viz.viewpoints) == 3
 
 
+def test_joint_clips_model_and_scorer_separately(monkeypatch):
+    """train/loop.py clips `trainable` and `joint.scorer.parameters()` in TWO independent
+    calls, each to grad_clip. One joint norm over the union would couple their magnitudes
+    (a big scorer gradient would shrink the model's update), so the split is load-bearing."""
+    from canvit_pretrain.harness.policy import build_policy
+    from canvit_pretrain.tasks.ade20k.task import POLICY_FEATURE_GROUPS as ADE_GROUPS
+    from canvit_pretrain.train.config import JointPolicyConfig
+
+    seg, _, _, _, sel = _setup()
+    gen = torch.Generator(device="cpu").manual_seed(0)
+    joint = build_policy(
+        canvit=seg.canvit, rl=JointPolicyConfig(use_rl=True, objective="qreg"),
+        feature_groups=ADE_GROUPS, device=torch.device("cpu"), canvas_grid=_G,
+        min_viewpoint_scale=0.05, foveated_scale=FoveatedScaleConfig(), generator=gen,
+        encode_model=seg,
+    )
+    # joint spec: frozen backbone, train head + policy — so the scorer really is an
+    # optimizer group and the split has something to prove.
+    _s = ScheduleSpec(kind="warmup_constant", warmup_steps=1)
+    spec = TrainSpec(
+        train_backbone=False, train_head=True, train_policy=True,
+        task_grad_to_backbone=False, policy_grad_to_backbone=False,
+        bptt=BpttSpec(mode="none", horizon=2),
+        optim={"head": GroupOptim(lr=1e-2, schedule=_s), "policy": GroupOptim(lr=1e-3, schedule=_s)},
+    )
+    apply_requires_grad(model=seg, head=seg.head, joint=joint, spec=spec)
+    opt, sched = build_optimizer_and_scheduler(
+        spec, {"head": list(seg.head.parameters()), "policy": list(joint.scorer.parameters())})
+    scorer_ids = {id(p) for p in joint.scorer.parameters()}
+
+    calls: list[set[int]] = []
+    real_clip = torch.nn.utils.clip_grad_norm_
+
+    def spy(params, max_norm, *a, **k):
+        ps = list(params)
+        calls.append({id(p) for p in ps})
+        return real_clip(ps, max_norm, *a, **k)
+
+    monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", spy)
+    run_training_loop(
+        task=_StubTask(), model=seg, head=seg.head, optimizer=opt, scheduler=sched, selector=sel,
+        spec=spec, branches=[ViewpointType.RANDOM], canvas_grid=_G, device=torch.device("cpu"),
+        train_batches=_batches(), n_steps=1, log_every=99, joint=joint,
+    )
+    assert len(calls) == 2, f"expected one model clip + one scorer clip, got {len(calls)}"
+    model_call, scorer_call = calls
+    assert scorer_call == scorer_ids, "second clip must cover exactly the scorer's params"
+    assert not (model_call & scorer_ids), "the model clip must NOT include scorer params"
+    assert model_call, "the model clip must still cover the task's trainable params"
+
+
 def test_resume_start_step_hook_returns_scheduler_epoch():
+    """Default hook: the step count is the scheduler's. Distill's WebDataset path is the
+    one exception (start_step comes from the shard schedule) — see tasks/tests/test_wds_resume.py."""
     class _Sched:
         last_epoch = 7
 
     tasks = [
         Ade20kRunTask(Ade20kConfig(tracker="none")),
         In1kRunTask(In1kConfig(tracker="none")),
-        DistillRunTask(Config(webdataset_dir="/nonexistent")),
+        DistillRunTask(Config()),  # no webdataset_dir => sharded/feature path
     ]
     for t in tasks:
         assert t.resume_start_step({}, _Sched()) == 7, t.name
