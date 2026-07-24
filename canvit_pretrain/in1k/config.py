@@ -1,5 +1,7 @@
 """ImageNet-1k classification config (unification P5). Fresh CUDA task (D2),
-mirroring ade20k/config.py; epoch-based (DDP epochs) rather than step-based."""
+mirroring ade20k/config.py, and step-based like it (max_steps / warmup_steps /
+val_every) — the train stream is an infinite resampled WebDataset, so epochs were
+only ever a derived batch count."""
 
 import os
 from dataclasses import dataclass, field
@@ -76,14 +78,18 @@ class In1kConfig:
     # EVAL viewpoint policy: coarse-to-fine quadtree (the canvit_eval deploy default)
     eval_policy: Literal["coarse_to_fine", "random", "full"] = "coarse_to_fine"
 
-    # Training (epoch-based)
-    epochs: int = 10
+    # Training (step-based, like Ade20kConfig — the train stream is an infinite
+    # `resampled=True` WebDataset, so "epoch" was only ever a derived batch count)
+    max_steps: int = 200_000
+    """Total optimizer steps. The old epoch-based default was 10 epochs, which at
+    batch_size=64 over IN1k's 1,281,167 images is 10 * 20018 ~= 200k steps."""
     batch_size: int = 64
     eval_batch_size: int = 64
     num_workers: int = 8
     peak_lr: float = 3e-4
     weight_decay: float = 1e-3
-    warmup_epochs: float = 0.5
+    warmup_steps: int = 10_000
+    """LR warmup length in steps (was 0.5 epoch ~= 10k steps at batch_size=64)."""
     warmup_lr_ratio: float = 1e-6
     grad_clip: float = float("inf")
     label_smoothing: float = 0.0
@@ -95,13 +101,13 @@ class In1kConfig:
     """Val resize (aspect-preserving center_crop matches canvit_eval's canonical
     IN1k preprocessing; foveated/square models MUST stay aspect-preserving)."""
 
-    # Debug / smoke: cap batches per epoch and per eval (None = full)
-    limit_train_batches: int | None = None
+    # Debug / smoke: cap batches per eval (None = full). Train length is `max_steps`.
     limit_val_batches: int | None = None
 
     # Logging / checkpoints
     log_every: int = 50
-    eval_every_epochs: int = 1
+    val_every: int = 20_000
+    """Validate every N steps (was eval_every_epochs=1, i.e. ~20k steps at batch_size=64)."""
     device: str = "cuda"
     amp: bool = True
     seed: int = 0

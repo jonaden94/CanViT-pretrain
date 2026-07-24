@@ -50,12 +50,10 @@ class HarnessOpts:
 
     n_steps: int | None = None
     """Steps this job runs. None => the task's natural job length (distill:
-    ``cfg.steps_per_job``, ade20k: ``cfg.max_steps``). in1k's config is epoch-based,
-    so it has no natural step count and this is REQUIRED there. Set it explicitly for
+    ``cfg.steps_per_job``, ade20k/in1k: ``cfg.max_steps``). Set it explicitly for
     short smoke runs."""
     eval_every: int | None = None
-    """Validate every N steps. None => the task's own cadence (``cfg.val_every``;
-    0 for in1k, whose config counts eval in epochs)."""
+    """Validate every N steps. None => the task's own cadence (``cfg.val_every``)."""
     seed: int | None = None
     """RNG seed (``torch.manual_seed(seed + rank)``). None => the task config's own seed
     (distill/in1k ``cfg.seed``; ade20k has no seed field so None => 0). Set it to compare
@@ -67,7 +65,12 @@ class HarnessOpts:
     """Render the task's training-batch visualization every N steps (distill only)."""
     ckpt_dir: Path | None = None
     """Explicit checkpoint dir. Overrides the ``logs_dir/run_group/run_name`` convention."""
-    resume: bool = True
+    resume: bool | None = None
+    """Resume from ``find_latest(ckpt_dir)`` if a checkpoint exists. None => the task
+    default: True for distill (array jobs must continue across tasks), False for the
+    ade20k/in1k probes (single-job launchers mirroring the no-resume standalone, so
+    re-running into a populated dir starts fresh instead of silently continuing the
+    old run). Pass ``--opts.resume True`` to opt a probe into array-style resume."""
     signal_checkpoint: bool = True
     use_failed_marker: bool = False
     """SLURM crash-loop guard: write a FAILED marker and scancel the array on crash."""
@@ -98,7 +101,7 @@ def _common(opts: HarnessOpts) -> dict[str, Any]:
     """HarnessOpts fields that map straight onto RunSettings."""
     return {
         "start_step": opts.start_step, "ckpt_every": opts.ckpt_every,
-        "viz_every": opts.viz_every, "ckpt_dir": opts.ckpt_dir, "resume": opts.resume,
+        "viz_every": opts.viz_every, "ckpt_dir": opts.ckpt_dir,
         "signal_checkpoint": opts.signal_checkpoint,
         "use_failed_marker": opts.use_failed_marker, "amp_dtype": opts.amp_dtype,
         "log_grad_norms": opts.log_grad_norms, "log_timing": opts.log_timing,
@@ -130,7 +133,9 @@ class DistillCmd:
             ema_alpha=self.cfg.ema_alpha, seed_ckpt=self.cfg.seed_ckpt,
             tracker=_tracker(self.cfg.tracker), wandb_project=self.cfg.wandb_project,
             wandb_entity=self.cfg.wandb_entity, wandb_dir=self.cfg.wandb_dir,
-            run_name=run_name, run_dir=run_dir, **_common(self.opts),
+            run_name=run_name, run_dir=run_dir,
+            resume=self.opts.resume if self.opts.resume is not None else True,
+            **_common(self.opts),
         )
         return DistillRunTask(self.cfg), settings
 
@@ -159,6 +164,7 @@ class Ade20kCmd:
             device=self.cfg.device, tracker=_tracker(self.cfg.tracker),
             wandb_project=self.cfg.wandb_project, wandb_entity=self.cfg.wandb_entity,
             wandb_dir=self.cfg.wandb_dir, run_name="ade20k",
+            resume=self.opts.resume if self.opts.resume is not None else False,
             **{**_common(self.opts),
                "ckpt_dir": self.opts.ckpt_dir or self.cfg.probe_ckpt_dir},
         )
@@ -180,24 +186,20 @@ class In1kCmd:
     def build(self) -> tuple[Any, RunSettings]:
         from canvit_pretrain.tasks.in1k.task import In1kRunTask
 
-        if self.opts.n_steps is None:
-            raise ValueError(
-                "in1k needs --opts.n-steps: In1kConfig schedules in EPOCHS "
-                "(epochs/eval_every_epochs) while the harness loop counts steps, so "
-                "there is no faithful automatic conversion. Pass the step budget "
-                "explicitly (epochs * ceil(n_images / batch_size)).")
+        n_steps = self.opts.n_steps if self.opts.n_steps is not None else self.cfg.max_steps
         settings = RunSettings(
-            n_steps=self.opts.n_steps,
-            eval_every=self.opts.eval_every if self.opts.eval_every is not None else 0,
+            n_steps=n_steps,
+            eval_every=self.opts.eval_every if self.opts.eval_every is not None else self.cfg.val_every,
             log_every=self.cfg.log_every, grad_clip=self.cfg.grad_clip, amp=self.cfg.amp,
             seed=self.opts.seed if self.opts.seed is not None else self.cfg.seed,
             device=self.cfg.device, tracker=_tracker(self.cfg.tracker),
             wandb_project=self.cfg.wandb_project, wandb_entity=self.cfg.wandb_entity,
             wandb_dir=self.cfg.wandb_dir, run_name=self.cfg.run_name,
+            resume=self.opts.resume if self.opts.resume is not None else False,
             **{**_common(self.opts),
                "ckpt_dir": self.opts.ckpt_dir or self.cfg.clf_ckpt_dir},
         )
-        return In1kRunTask(self.cfg, rl=self.rl, total_steps=self.opts.n_steps), settings
+        return In1kRunTask(self.cfg, rl=self.rl, total_steps=n_steps), settings
 
     def lr_wd(self) -> tuple[float, float]:
         return self.cfg.peak_lr, self.cfg.weight_decay

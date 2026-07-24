@@ -100,17 +100,16 @@ class In1kRunTask:
         'finetune' => train backbone + head end to end (full-graph).
 
         The LR schedule reproduces ``in1k/train.py``'s AdamW + ``warmup_cosine_scheduler``:
-        warmup from ``peak_lr * warmup_lr_ratio`` then cosine to 0. That file derives its
-        step counts from the loader (``warmup_epochs * batches_per_epoch``, total
-        ``epochs * batches_per_epoch``); here the same ratio is taken against
-        ``self.total_steps``, which is algebraically the same number.
+        warmup from ``peak_lr * warmup_lr_ratio`` over ``cfg.warmup_steps`` then cosine to 0
+        over ``total_steps`` (the run length; = ``cfg.max_steps`` for a full run) — the same
+        step-based recipe the standalone now uses.
         """
         from canvit_pretrain.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TrainSpec
         T = self.cfg.n_timesteps
         if self.total_steps is None:
             sched = ScheduleSpec(kind="warmup_constant", warmup_steps=0)
         else:
-            warmup = max(1, int(self.cfg.warmup_epochs * self.total_steps / self.cfg.epochs))
+            warmup = max(1, self.cfg.warmup_steps)
             sched = ScheduleSpec(kind="warmup_cosine", warmup_steps=warmup,
                                  total_steps=self.total_steps,
                                  start_lr=self.cfg.peak_lr * self.cfg.warmup_lr_ratio)

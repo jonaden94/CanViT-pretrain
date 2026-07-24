@@ -92,7 +92,7 @@ def train(cfg: In1kConfig) -> None:
     if ddp.is_main():
         log.info("=" * 60)
         log.info(f"IN1k classification ({cfg.mode}) — {cfg.model_repo}")
-        log.info(f"epochs={cfg.epochs} scene={cfg.scene_size} T={cfg.n_timesteps} "
+        log.info(f"max_steps={cfg.max_steps} scene={cfg.scene_size} T={cfg.n_timesteps} "
                  f"eval_policy={cfg.eval_policy} world_size={ddp.world_size()}")
 
     # Pretrained backbone + fresh head (probe training path).
@@ -116,17 +116,15 @@ def train(cfg: In1kConfig) -> None:
         log.info(f"  patcher={'foveated/square (full-image)' if is_foveated else 'uniform (pre-crop)'}, "
                  f"canvas={canvas_grid}x{canvas_grid}, trainable={n_train:,} ({cfg.mode})")
 
-    train_loader, batches_per_epoch = make_train_loader(cfg, world_size=ddp.world_size(), rank=ddp.rank())
-    if cfg.limit_train_batches is not None:
-        batches_per_epoch = min(batches_per_epoch, cfg.limit_train_batches)
+    train_loader, _ = make_train_loader(cfg, world_size=ddp.world_size(), rank=ddp.rank())
     have_val = cfg.val_dir.is_dir()
     val_loader = make_val_loader(cfg, world_size=ddp.world_size(), rank=ddp.rank()) if have_val else None
     if not have_val and ddp.is_main():
         log.warning(f"No val dir at {cfg.val_dir} (set IN1K_VAL_DIR) — training WITHOUT eval; "
                     f"the P5 acceptance gate needs it.")
 
-    total_steps = cfg.epochs * batches_per_epoch
-    warmup_steps = max(1, int(cfg.warmup_epochs * batches_per_epoch))
+    total_steps = cfg.max_steps
+    warmup_steps = max(1, cfg.warmup_steps)
     opt = torch.optim.AdamW(params, lr=cfg.peak_lr, weight_decay=cfg.weight_decay)
     scheduler = warmup_cosine_scheduler(opt, warmup_steps, total_steps, cfg.peak_lr,
                                         start_lr=cfg.peak_lr * cfg.warmup_lr_ratio)
@@ -153,67 +151,84 @@ def train(cfg: In1kConfig) -> None:
     freeze = cfg.mode == "frozen"
     step = 0
     best_top1 = 0.0
-    pbar = tqdm(total=total_steps, desc=f"in1k-{cfg.mode}", disable=not ddp.is_main())
-    for epoch in range(cfg.epochs):
-        # Reset train mode each epoch: evaluate() flips the whole model to eval(),
-        # so finetune must re-enable the backbone (else BN/dropout stay frozen);
-        # frozen keeps the backbone in eval and trains only LN+head.
+
+    def _set_train_mode() -> None:
+        """evaluate() flips the WHOLE model to eval(), so train mode must be restored
+        after every validation: finetune re-enables the backbone (else BN/dropout stay
+        frozen); frozen keeps the backbone in eval and trains only LN+head."""
         if freeze:
             clf.canvit.eval()
             clf.head.train()
             clf.norm.train()
         else:
             clf.train()
-        for batch_i, (images, labels) in enumerate(train_loader):
-            if batch_i >= batches_per_epoch:  # honor limit_train_batches (loader may yield more)
-                break
-            images = images.to(device, non_blocking=True)
-            labels = torch.as_tensor(labels, dtype=torch.long, device=device)
 
-            with amp_ctx:
-                cls_tokens = rollout_cls_tokens(
-                    clf=clf, images=images,
-                    viewpoints=make_random_viewpoints(
-                        images.shape[0], device, cfg.n_timesteps,
-                        min_scale=cfg.min_vp_scale, max_scale=cfg.max_vp_scale,
-                        start_with_full_scene=cfg.train_start_full,
-                        is_foveated=is_foveated, foveated_scale=cfg.foveated_scale,
-                    ),
-                    canvas_grid=canvas_grid, glimpse_px=cfg.glimpse_px, freeze_backbone=freeze,
-                )
-                logits = [clf.head(clf.norm(c)) for c in cls_tokens]
-                loss = torch.stack([ce_loss(lg, labels, label_smoothing=cfg.label_smoothing) for lg in logits]).mean()
+    def _validate(at_step: int) -> None:
+        nonlocal best_top1
+        accs = evaluate(clf, cfg, val_loader, device=device, canvas_grid=canvas_grid,
+                        amp_ctx=amp_ctx, is_foveated=is_foveated)
+        if ddp.is_main():
+            log.info(f"Step {at_step}: top1={accs[1]:.4f} top5={accs[5]:.4f}")
+            if exp is not None:
+                exp.log_metrics({f"val_top{k}": v for k, v in accs.items()}, step=at_step)
+            if accs[1] > best_top1 and run_dir is not None:
+                best_top1 = accs[1]
+                clf.save_pretrained(run_dir / "best-hf")
+                torch.save({"step": at_step, "top1": accs[1], "head": clf.head.state_dict(),
+                            "norm": clf.norm.state_dict()}, run_dir / "best.pt")
+        _set_train_mode()
 
-            opt.zero_grad()
-            loss.backward()
-            if ddp.is_dist():
-                _allreduce_grads(params)
-            grad_norm = nn.utils.clip_grad_norm_(params, cfg.grad_clip)
-            opt.step()
-            scheduler.step()
+    def _batches():
+        """The train stream is an infinite `resampled=True` WebDataset; re-iterate
+        defensively so a finite loader would work too."""
+        while True:
+            yield from train_loader
 
-            step += 1
-            pbar.update(1)
-            if ddp.is_main() and step % cfg.log_every == 0 and exp is not None:
-                exp.log_metrics(
-                    {"loss": loss.item(), "grad_norm": float(grad_norm), "lr": scheduler.get_last_lr()[0],
-                     "epoch": epoch}, step=step,
-                )
+    _set_train_mode()
+    pbar = tqdm(total=total_steps, desc=f"in1k-{cfg.mode}", disable=not ddp.is_main())
+    for images, labels in _batches():
+        if step >= total_steps:
+            break
+        images = images.to(device, non_blocking=True)
+        labels = torch.as_tensor(labels, dtype=torch.long, device=device)
 
-        if val_loader is not None and (epoch + 1) % cfg.eval_every_epochs == 0:
-            accs = evaluate(clf, cfg, val_loader, device=device, canvas_grid=canvas_grid,
-                            amp_ctx=amp_ctx, is_foveated=is_foveated)
-            if ddp.is_main():
-                log.info(f"Epoch {epoch}: top1={accs[1]:.4f} top5={accs[5]:.4f}")
-                if exp is not None:
-                    exp.log_metrics({f"val_top{k}": v for k, v in accs.items()}, step=step)
-                if accs[1] > best_top1 and run_dir is not None:
-                    best_top1 = accs[1]
-                    clf.save_pretrained(run_dir / "best-hf")
-                    torch.save({"epoch": epoch, "top1": accs[1], "head": clf.head.state_dict(),
-                                "norm": clf.norm.state_dict()}, run_dir / "best.pt")
+        with amp_ctx:
+            cls_tokens = rollout_cls_tokens(
+                clf=clf, images=images,
+                viewpoints=make_random_viewpoints(
+                    images.shape[0], device, cfg.n_timesteps,
+                    min_scale=cfg.min_vp_scale, max_scale=cfg.max_vp_scale,
+                    start_with_full_scene=cfg.train_start_full,
+                    is_foveated=is_foveated, foveated_scale=cfg.foveated_scale,
+                ),
+                canvas_grid=canvas_grid, glimpse_px=cfg.glimpse_px, freeze_backbone=freeze,
+            )
+            logits = [clf.head(clf.norm(c)) for c in cls_tokens]
+            loss = torch.stack([ce_loss(lg, labels, label_smoothing=cfg.label_smoothing) for lg in logits]).mean()
+
+        opt.zero_grad()
+        loss.backward()
+        if ddp.is_dist():
+            _allreduce_grads(params)
+        grad_norm = nn.utils.clip_grad_norm_(params, cfg.grad_clip)
+        opt.step()
+        scheduler.step()
+
+        step += 1
+        pbar.update(1)
+        if ddp.is_main() and step % cfg.log_every == 0 and exp is not None:
+            exp.log_metrics(
+                {"loss": loss.item(), "grad_norm": float(grad_norm),
+                 "lr": scheduler.get_last_lr()[0]}, step=step,
+            )
+
+        if val_loader is not None and step % cfg.val_every == 0:
+            _validate(step)
 
     pbar.close()
+    # Final validation when the last step did not land on the val_every cadence.
+    if val_loader is not None and total_steps % cfg.val_every != 0:
+        _validate(total_steps)
     if ddp.is_main():
         log.info(f"Done. best val top-1 = {best_top1:.4f}")
         if exp is not None:

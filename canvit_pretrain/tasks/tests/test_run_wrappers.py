@@ -182,10 +182,15 @@ def test_cli_task_config_drives_settings():
         (False, False, 0.5, 7, 13, 5, 64)
 
 
-def test_in1k_requires_explicit_n_steps():
-    """In1kConfig schedules in epochs; the harness loop counts steps. Refuse to guess."""
-    with pytest.raises(ValueError, match="n-steps"):
-        In1kCmd().build()
+def test_in1k_derives_n_steps_from_max_steps():
+    """in1k is now step-based like ade20k: n_steps/eval_every come from cfg.max_steps/
+    val_every when --opts are unset, and --opts.n-steps overrides."""
+    cfg = In1kConfig(tracker="none", max_steps=1234, val_every=321)
+    task, s = In1kCmd(cfg=cfg).build()
+    assert s.n_steps == 1234 and s.eval_every == 321
+    assert task.total_steps == 1234  # schedule horizon follows the run length
+    s2 = In1kCmd(cfg=cfg, opts=HarnessOpts(n_steps=10)).build()[1]
+    assert s2.n_steps == 10
 
 
 def test_comet_tracker_rejected_loudly():
@@ -244,12 +249,12 @@ def test_in1k_default_spec_reproduces_standalone_lr_schedule():
 
     from canvit_pretrain.train.scheduler import warmup_cosine_scheduler
 
-    cfg = In1kConfig(tracker="none", epochs=10, warmup_epochs=0.5)
-    total = 300  # = epochs * batches_per_epoch, as the runner computes it
+    cfg = In1kConfig(tracker="none", max_steps=300, warmup_steps=15)
+    total = cfg.max_steps
     got = _lrs_from_spec(In1kRunTask(cfg, total_steps=total).default_spec(), "head", total)
 
-    # in1k/train.py: warmup_steps = max(1, int(warmup_epochs * batches_per_epoch))
-    warmup = max(1, int(cfg.warmup_epochs * (total // cfg.epochs)))
+    # in1k/train.py: warmup_steps = max(1, cfg.warmup_steps), cosine to 0 over max_steps
+    warmup = max(1, cfg.warmup_steps)
     ref_opt = torch.optim.AdamW([nn.Parameter(torch.zeros(2))], lr=cfg.peak_lr)
     ref_sched = warmup_cosine_scheduler(ref_opt, warmup, total, cfg.peak_lr,
                                         start_lr=cfg.peak_lr * cfg.warmup_lr_ratio)
@@ -271,6 +276,21 @@ def test_opts_seed_overrides_task_seed():
     d = Config(webdataset_dir=Path("/x"), seed=3)
     assert DistillCmd(cfg=d).build()[1].seed == 3
     assert DistillCmd(cfg=d, opts=HarnessOpts(seed=7)).build()[1].seed == 7
+
+
+def test_resume_default_is_per_task():
+    """resume defaults per task: distill True (array jobs must continue across tasks),
+    ade20k/in1k False (single-job probes mirror the no-resume standalone, so a re-run
+    into a populated dir starts fresh instead of silently continuing). --opts.resume
+    overrides either way."""
+    d = Config(webdataset_dir=Path("/x"))
+    assert DistillCmd(cfg=d).build()[1].resume is True
+    assert Ade20kCmd(cfg=Ade20kConfig(tracker="none")).build()[1].resume is False
+    assert In1kCmd(opts=HarnessOpts(n_steps=10)).build()[1].resume is False
+    # explicit --opts.resume wins in both directions
+    assert Ade20kCmd(cfg=Ade20kConfig(tracker="none"),
+                     opts=HarnessOpts(resume=True)).build()[1].resume is True
+    assert DistillCmd(cfg=d, opts=HarnessOpts(resume=False)).build()[1].resume is False
 
 
 def test_ade20k_build_model_warns_on_foveated_view_scale(monkeypatch, caplog):

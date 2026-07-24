@@ -28,8 +28,8 @@
 # Single-GPU SMOKE example (validates GPU rollout / amp / data / eval cheaply):
 #   export MODEL_REPO=/user/henrich1/u25995/jonathan/repos/CanViT-pretrain/logs/jon_exp22_full_runs/exp22-uniform16/checkpoints/step-1515520-hf
 #   sbatch --export=ALL slurm_nhr/in1k/train_in1k.sbatch \
-#       --mode frozen --epochs 1 --n-timesteps 3 --batch-size 16 \
-#       --limit-train-batches 20 --limit-val-batches 10 --tracker none
+#       --mode frozen --max-steps 20 --val-every 20 --n-timesteps 3 --batch-size 16 \
+#       --limit-val-batches 10 --tracker none
 
 cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
 source /user/henrich1/u25995/.bashrc

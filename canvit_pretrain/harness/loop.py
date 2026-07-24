@@ -4,8 +4,9 @@ ONE loop for all three tasks. It owns the task-agnostic mechanics — per-step
 rollout → grad-clip → optimizer/scheduler step, plus logging / checkpoint / eval
 cadence — and delegates everything task-specific to the ``Task`` seam (data via the
 caller's iterator, per-batch targets via ``task.bind``, metrics via ``on_eval``).
-There is only a step loop (owner decision: step-based only; IN1k epochs are derived
-from its ``with_epoch`` shard count upstream).
+There is only a step loop (owner decision: step-based only). All three tasks —
+including in1k, whose config is now step-based (``max_steps``) like the others — feed
+this same driver.
 
 This is deliberately thin: the heavy, task-specific machinery (distill's teacher /
 normalizer / webdataset-resume, ade20k's mIoU eval, in1k's top-k) lives in each
