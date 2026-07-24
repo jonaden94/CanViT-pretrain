@@ -153,6 +153,15 @@ def test_schedule_requires_total_steps():
     assert any("requires total_steps" in x for x in go_bad.errors(group="head"))
 
 
+def test_schedule_warmup_must_be_below_total():
+    """warmup >= total pins the LR in warmup for the whole run (no anneal). Rejected for
+    the decaying kinds, matching the standalone warmup_cosine_scheduler's assert."""
+    bad = ScheduleSpec(kind="warmup_cosine", warmup_steps=10_000, total_steps=800)
+    assert any("must be < total_steps" in x for x in bad.errors(group="head"))
+    ok = ScheduleSpec(kind="warmup_cosine", warmup_steps=50, total_steps=1000)
+    assert not ok.errors(group="head")
+
+
 # --------------------------------------------------------------------------- #
 # Warnings (run anyway).
 # --------------------------------------------------------------------------- #

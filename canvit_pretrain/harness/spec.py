@@ -53,6 +53,14 @@ class ScheduleSpec:
             errs.append(f"optim[{group}].schedule.kind={self.kind!r} requires total_steps")
         if self.total_steps is not None and self.total_steps <= 0:
             errs.append(f"optim[{group}].schedule.total_steps must be > 0")
+        # Reject warmup >= total for the decaying schedules: it silently pins the LR in
+        # warmup for the whole run (LR never anneals → ~no learning). The standalone
+        # warmup_cosine_scheduler asserts the same; without this the harness would run
+        # the degenerate schedule quietly (found via the in1k gate, doc 11 §4).
+        if (self.kind in ("warmup_cosine", "warmup_onecycle") and self.total_steps is not None
+                and self.warmup_steps >= self.total_steps):
+            errs.append(f"optim[{group}].schedule.warmup_steps ({self.warmup_steps}) must be "
+                        f"< total_steps ({self.total_steps}) for kind={self.kind!r}")
         return errs
 
 
