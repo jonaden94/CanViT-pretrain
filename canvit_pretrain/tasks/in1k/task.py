@@ -133,10 +133,10 @@ class In1kRunTask:
     def build_model(self, device, prior_model_config=None):
         # prior_model_config is unused: the backbone arch comes from the HF repo the head
         # was built on, so a resume rebuilds the same model from cfg.model_repo already.
-        from canvit_pretrain.in1k.config import NUM_CLASSES
-        clf = CanViTForImageClassification.from_pretrained_with_new_head(
-            pretrained_repo=self.cfg.model_repo, n_classes=NUM_CLASSES,
-        ).to(device)
+        # mode-dependent head (fresh probe vs fused DINOv3 probe for finetune) — shared
+        # with the standalone via in1k.train.build_classifier so they can't diverge.
+        from canvit_pretrain.in1k.train import build_classifier
+        clf = build_classifier(self.cfg, device)
         return clf, clf.head
 
     def canvas_grid(self, model):

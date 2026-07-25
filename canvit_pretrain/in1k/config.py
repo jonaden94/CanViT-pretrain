@@ -57,6 +57,13 @@ class In1kConfig:
     linear-clf-probe baseline. ``finetune``: train the whole classifier end to end
     (the ``...-finetune-...-in1k`` flagship)."""
 
+    probe_repo: str | None = None
+    """FINETUNE only: the DINOv3 in1k linear probe fused into the classifier head,
+    reproducing the TPU flagship (``gcp_in1k_clf_ft/shared.py::load_classifier``). A
+    finetune from a RANDOM head starts at chance and — at the tiny finetune LR — trains
+    far too slowly. ``None`` => derive from the checkpoint's backbone via
+    ``dinov3_in1k_probes.repos.probe_repo``. Ignored in ``frozen`` mode (fresh head)."""
+
     # Rollout (how the CLS token that feeds the head is produced)
     n_timesteps: int = 10
     glimpse_px: int | None = None
