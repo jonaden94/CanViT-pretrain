@@ -129,9 +129,21 @@ re-seed means stochastic ops aren't a continuous stream (not bit-identical to mo
   seeded slice). Residual early wobble = cross-worker batch interleaving (`num_workers=8`),
   not a port bug. `unification_docs/in1k_resume_val.sbatch`, `in1k_numeric_gate.sbatch`.
 
-## §6 Still open (owner-gated)
+## §6 Pre-cutover fidelity A/B — launchers ready (owner runs when queue is clear)
 
-- **Production in1k array launcher:** the capability is proven; a production array maps onto
-  `harness_train.sbatch` (TASK=in1k) with an `--array`, `CFG_STEPS_PER_JOB`, `OPT_RESUME=True`
-  — not yet wired into a `runs/` script (single-job `train_in1k.sbatch` still covers probes).
+The one remaining hole before deleting `train/loop.py` is **production-scale** fidelity
+(everything so far is component / short / probe scale). Ready-to-fire launchers now live in
+`slurm_nhr/runs/harness_repro/` (see its README): they re-run existing old-loop configs
+THROUGH THE HARNESS so the curves overlay on results you already have —
+`distill-uniform16`, `distill-fovi`, `distill-fovi-teacherinit` (~100k steps each), and an
+`ade20k-finetune` template. Pinned `PRETRAIN=bc63eee`. NOT submitted (owner's call;
+sequence around the live exp22 arrays). Passing these clears claim 4 at scale and justifies
+archiving the old repos.
+
+## §7 Still open (owner-gated)
+
+- **The production-scale A/B runs themselves** (launchers above are ready; not yet run).
+- **Production in1k array launcher:** capability proven; a real array maps onto
+  `harness_train.sbatch` (TASK=in1k, `--array`, `CFG_STEPS_PER_JOB`, `OPT_RESUME=True`) —
+  not yet wired into a `runs/` script (single-job `train_in1k.sbatch` still covers probes).
 - The big-bang cutover (deleting the old loop, repointing production launchers).
