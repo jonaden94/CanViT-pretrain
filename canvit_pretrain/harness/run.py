@@ -20,8 +20,33 @@ publishing stays the manual ``python -m canvit_pretrain.checkpoint.to_hf`` step.
 
 from __future__ import annotations
 
-import logging
+# DDP-safety: a per-rank/per-job MPLCONFIGDIR + the Agg backend, set BEFORE matplotlib is
+# imported (some of this module's imports pull it transitively, and the distill viz path
+# uses it). matplotlib's default ~/.cache/matplotlib on shared NFS races on the font cache
+# across DDP ranks / concurrent jobs and hangs; this mirrors the old train/__main__.py.
+# run.py IS the harness entry point (`python -m canvit_pretrain.harness.run`), so guarding
+# at module import is the earliest hook. os.environ.setdefault => an explicit MPLCONFIGDIR
+# is respected; the /tmp dir is per-rank/job so ranks never share a cache.
 import os
+
+os.environ.setdefault(
+    "MPLCONFIGDIR",
+    f"/tmp/mpl_config_rank{os.environ.get('SLURM_PROCID', '0')}_job{os.environ.get('SLURM_JOB_ID', 'nojob')}",
+)
+os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
+import matplotlib
+
+matplotlib.use("Agg")
+
+# Gradient correctness under torch.compile (compile defaults ON for distill). backward()
+# runs OUTSIDE autocast; torch.compile's default "same_as_forward" then silently corrupts
+# gradients. train/loop.py sets this at its module top — mirror it here (unconditional; a
+# no-op when compile is off) so compiled harness runs match the old loop's gradients.
+import torch._functorch.config
+
+torch._functorch.config.backward_pass_autocast = "off"  # type: ignore[attr-defined]
+
+import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path

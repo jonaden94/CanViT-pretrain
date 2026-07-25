@@ -103,6 +103,8 @@ select = ["E", "F", "I", "UP"]
 [tool.ruff.lint.per-file-ignores]
 # Sets torch._functorch.config before imports (required).
 "canvit_pretrain/train/loop.py" = ["E402"]
+# Harness entry point: sets MPLCONFIGDIR + Agg before matplotlib is imported (DDP-safety).
+"canvit_pretrain/harness/run.py" = ["E402"]
 
 [tool.basedpyright]
 typeCheckingMode = "standard"
