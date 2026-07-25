@@ -86,14 +86,52 @@ exceed warmup_steps (10000)` (my config error: capped `max_steps` but left the f
 `warmup_steps`). The revealing part: the **standalone** `warmup_cosine_scheduler`
 *asserts* `total_steps > warmup_steps` and fails loudly, while the **harness**
 `warmup_cosine` (optim.py) *silently* runs the degenerate schedule (LR stuck in warmup →
-top-1 ~0, no error). Same misconfig → crash vs silent-garbage. Only bites on
-misconfiguration, so left as-is; a 1-line guard in the harness `warmup_cosine` would close
-it if desired.
+top-1 ~0, no error). Same misconfig → crash vs silent-garbage. **FIXED (`dbf2eed`):**
+`ScheduleSpec.errors()` now rejects `warmup_steps >= total_steps` for the decaying kinds,
+so the harness fails loudly like the standalone. Test `test_schedule_warmup_must_be_below_total`.
 
-## §5 Still open (unchanged / owner-gated)
+## §5 in1k made resumable via the distill shard schedule (owner request, 2026-07-25)
 
-- **in1k array-resume is unsolved** (see memory `in1k-array-resume-gap`): the loader is
-  `resampled=True` (infinite, no shard position), so distill's shard-aligned array-resume
-  does not apply. A full in1k probe as a job array would need new design (deterministic
-  shard-schedule window + `resume_state`, or approximate resume). Not built.
+Replaces the earlier `resampled=True` in1k train loader (infinite, no shard position → no
+array resume) with the SAME resumable, shard-aligned schedule distill uses. Owner design
+decisions: (1) **replace** (not coexist) — one loader path; (2) **keep a seeded
+within-stream shuffle buffer** for in1k (distill has none).
+
+- `in1k/data.py` reuses the pure `train.data.schedule` (`compute_shards_per_gpu` +
+  `compute_schedule_slice`): a seeded global shard permutation, job `job_index` consuming a
+  contiguous block, per-rank + per-worker (`split_by_worker`) split. A seeded
+  `.shuffle(cfg.shuffle_buffer, seed=cfg.seed + job_index)` streaming buffer adds
+  within-AND-across-shard mixing (bounded by the buffer window and the worker/job — it
+  never crosses the job boundary, so resume stays shard-exact).
+- `In1kConfig`: `steps_per_job` (shard window; None => single job of `max_steps`, enforced
+  shard-aligned by `compute_shards_per_gpu`) + `shuffle_buffer`. `max_steps` is the LR-cosine
+  horizon across ALL array jobs.
+- `tasks/in1k/task.py` mirrors `DistillRunTask`'s resume wiring: `resume_start_step`
+  (job_index → shard-aligned `start_step`), `_check_schedule_invariants` (refuse resume on
+  changed world_size/batch/steps_per_job/samples_per_shard), `resume_state` (stores
+  job_index). `In1kCmd`: per-job n_steps = `steps_per_job`, LR horizon = `max_steps`.
+- Standalone `in1k/train.py` stays single-job (`job_index=0`, slice = whole run); the
+  resumable array path is the harness.
+
+Semantics (owner's mental model, confirmed): batch × steps_per_job is a whole multiple of
+samples_per_shard, so a job ends shard-aligned; the next job auto-reads the next block via
+the stored job_index; data order/coverage across resumed jobs = one monolithic job (distill
+is order-identical; in1k is *sample*-identical per epoch but its per-job shuffle buffer
+reorders finer, so not byte-identical). Last *partial* shard excluded. Per-job torch
+re-seed means stochastic ops aren't a continuous stream (not bit-identical to monolithic).
+
+**Validated on the cluster (2026-07-25):**
+- **Resume (job 15048737):** job0 FRESH `job_index=0` steps 0–63 → job1 RESUME
+  `start_step=64` `job_index=1` (next shard slice) steps 64–127. Auto-advance works.
+- **Top-1 gate re-run (job 15048738), shard-aligned max_steps=1024:** harness/standalone
+  bands overlap at every step, mean gap → 0.000 at the plateau (~0.80 top-1); same-seed
+  pairs now coincide to ≤0.008 (tighter than the pre-schedule gate — both draw the identical
+  seeded slice). Residual early wobble = cross-worker batch interleaving (`num_workers=8`),
+  not a port bug. `unification_docs/in1k_resume_val.sbatch`, `in1k_numeric_gate.sbatch`.
+
+## §6 Still open (owner-gated)
+
+- **Production in1k array launcher:** the capability is proven; a production array maps onto
+  `harness_train.sbatch` (TASK=in1k) with an `--array`, `CFG_STEPS_PER_JOB`, `OPT_RESUME=True`
+  — not yet wired into a `runs/` script (single-job `train_in1k.sbatch` still covers probes).
 - The big-bang cutover (deleting the old loop, repointing production launchers).

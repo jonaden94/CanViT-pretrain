@@ -19,7 +19,6 @@ import pytest
 
 from canvit_pretrain.tasks.ade20k.task import Ade20kRunTask
 from canvit_pretrain.tasks.distill.task import DistillRunTask
-from canvit_pretrain.tasks.in1k.task import In1kRunTask
 from canvit_pretrain.train.config import Config
 from canvit_pretrain.train.data.webdataset import WebDatasetTrainLoader
 
@@ -135,11 +134,12 @@ def test_matching_schedule_inputs_pass(monkeypatch):
     assert seen["job_index"] == 1
 
 
-# --- the other two tasks are unaffected -----------------------------------
-def test_map_style_tasks_carry_no_schedule_state():
+# --- ade20k is the map-style exception (no shard schedule) ----------------
+# in1k now uses THIS shard schedule too (its resume round-trip + invariant guards are
+# covered in tasks/tests/test_run_wrappers.py::test_in1k_shard_schedule_*).
+def test_ade20k_carries_no_schedule_state():
     from canvit_pretrain.ade20k.config import Ade20kConfig
-    from canvit_pretrain.in1k.config import In1kConfig
 
-    for t in (Ade20kRunTask(Ade20kConfig(tracker="none")), In1kRunTask(In1kConfig(tracker="none"))):
-        assert t.resume_state() == {}, t.name
-        assert t.resume_start_step({}, _sched(7)) == 7, t.name
+    t = Ade20kRunTask(Ade20kConfig(tracker="none"))
+    assert t.resume_state() == {}
+    assert t.resume_start_step({}, _sched(7)) == 7

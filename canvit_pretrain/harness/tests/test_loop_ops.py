@@ -19,10 +19,8 @@ from canvit_pretrain.harness.loop import (
 )
 from canvit_pretrain.harness.optim import build_optimizer_and_scheduler
 from canvit_pretrain.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TrainSpec
-from canvit_pretrain.in1k.config import In1kConfig
 from canvit_pretrain.tasks.ade20k.task import Ade20kRunTask, BoundAde20kTask
 from canvit_pretrain.tasks.distill.task import DistillRunTask
-from canvit_pretrain.tasks.in1k.task import In1kRunTask
 from canvit_pretrain.train.config import Config, FoveatedScaleConfig
 from canvit_pretrain.train.selector import RandomSelector
 from canvit_pretrain.train.viewpoint import ViewpointType
@@ -316,15 +314,15 @@ def test_joint_clips_model_and_scorer_separately(monkeypatch):
 
 
 def test_resume_start_step_hook_returns_scheduler_epoch():
-    """Default hook: the step count is the scheduler's. Distill's WebDataset path is the
-    one exception (start_step comes from the shard schedule) — see tasks/tests/test_wds_resume.py."""
+    """Default hook: the step count is the scheduler's. The WebDataset shard-schedule tasks
+    are the exception (start_step comes from the schedule): distill's wds path AND in1k —
+    see tasks/tests/test_wds_resume.py and test_run_wrappers.py."""
     class _Sched:
         last_epoch = 7
 
     tasks = [
-        Ade20kRunTask(Ade20kConfig(tracker="none")),
-        In1kRunTask(In1kConfig(tracker="none")),
-        DistillRunTask(Config()),  # no webdataset_dir => sharded/feature path
+        Ade20kRunTask(Ade20kConfig(tracker="none")),  # map-style probe: no shard schedule
+        DistillRunTask(Config()),  # no webdataset_dir => sharded/feature path (scheduler epoch)
     ]
     for t in tasks:
         assert t.resume_start_step({}, _Sched()) == 7, t.name

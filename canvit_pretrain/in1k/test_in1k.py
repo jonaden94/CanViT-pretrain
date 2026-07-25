@@ -91,7 +91,9 @@ def test_train_pipeline_decodes_real_shards() -> None:
 
     size = 128  # small crop for a quick CPU decode; real runs use scene_size=512
     tfm = make_train_transform(size, min_scale=0.35, flip_prob=0.5)
-    ds = build_train_pipeline(_IN1K_SHARDS, transform=tfm, batch_size=4, batches_per_epoch=2, seed=0)
+    shard_files = sorted(_IN1K_SHARDS.glob("shard-*.tar"))[:2]
+    ds = build_train_pipeline(shard_files, transform=tfm, batch_size=4,
+                              num_workers=0, shuffle_buffer=0, shuffle_seed=0)
     images, labels = next(iter(ds))
     assert images.shape == (4, 3, size, size), images.shape
     labels_t = torch.as_tensor(labels)

@@ -22,7 +22,7 @@
 # top-1 is read from stdout ("Step N: top1=..." / "step N  eval: {'top1': ...}").
 #
 # Capped protocol (a full ~200k-step probe is ~60 GPU-h; this is a code-path gate, not an
-# accuracy run): max_steps=1000, warmup_steps=50, val_every=250, T=10, batch=64, 25 val
+# accuracy run): max_steps=1024, warmup_steps=50, val_every=256, T=10, batch=64, 25 val
 # batches. warmup_steps MUST be « max_steps here (the config default 10k is for full runs).
 # Commit-pin for a frozen snapshot (edit-safe while it runs): export PRETRAIN_COMMIT /
 # PYTORCH_COMMIT / FOVI_COMMIT before sbatch.
@@ -73,7 +73,7 @@ case "$SLURM_ARRAY_TASK_ID" in
     echo "=== ARM $SLURM_ARRAY_TASK_ID: STANDALONE (python -m canvit_pretrain.in1k) seed=$SEED ==="
     "${RUN[@]}" -m canvit_pretrain.in1k \
         --model-repo "$CKPT" --mode frozen \
-        --max-steps 1000 --warmup-steps 50 --val-every 250 --n-timesteps 10 --batch-size 64 \
+        --max-steps 1024 --warmup-steps 50 --val-every 256 --n-timesteps 10 --batch-size 64 \
         --limit-val-batches 25 --num-workers 8 --tracker none \
         --seed "$SEED" --clf-ckpt-dir "$OUT"
     ;;
@@ -82,7 +82,7 @@ case "$SLURM_ARRAY_TASK_ID" in
     echo "=== ARM $SLURM_ARRAY_TASK_ID: HARNESS (python -m canvit_pretrain.harness.run in1k) seed=$SEED ==="
     "${RUN[@]}" -m canvit_pretrain.harness.run in1k \
         --cfg.model-repo "$CKPT" --cfg.mode frozen \
-        --cfg.max-steps 1000 --cfg.warmup-steps 50 --cfg.val-every 250 --cfg.n-timesteps 10 --cfg.batch-size 64 \
+        --cfg.max-steps 1024 --cfg.warmup-steps 50 --cfg.val-every 256 --cfg.n-timesteps 10 --cfg.batch-size 64 \
         --cfg.limit-val-batches 25 --cfg.num-workers 8 --cfg.tracker none \
         --opts.seed "$SEED" --opts.ckpt-dir "$OUT"
     ;;

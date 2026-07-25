@@ -116,7 +116,11 @@ def train(cfg: In1kConfig) -> None:
         log.info(f"  patcher={'foveated/square (full-image)' if is_foveated else 'uniform (pre-crop)'}, "
                  f"canvas={canvas_grid}x{canvas_grid}, trainable={n_train:,} ({cfg.mode})")
 
-    train_loader, _ = make_train_loader(cfg, world_size=ddp.world_size(), rank=ddp.rank())
+    # Standalone is single-job (its launcher is non-array; the resumable multi-job array
+    # path lives in the harness, tasks/in1k). So job_index=0 and the shard slice spans the
+    # whole run — steps_per_job = max_steps, NOT cfg.steps_per_job (which is a harness knob).
+    train_loader, _ = make_train_loader(cfg, world_size=ddp.world_size(), rank=ddp.rank(),
+                                        job_index=0, steps_per_job=cfg.max_steps)
     have_val = cfg.val_dir.is_dir()
     val_loader = make_val_loader(cfg, world_size=ddp.world_size(), rank=ddp.rank()) if have_val else None
     if not have_val and ddp.is_main():

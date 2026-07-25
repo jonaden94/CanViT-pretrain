@@ -2,11 +2,12 @@
 
 TRAIN: WebDataset shards of ``jpg`` + ``json`` (``{"label": int}``) — the
 CanViT-pretrain repo's IN1k-no-features set (images pre-resized to scene_size).
-Decoded with train augmentation (RandomResizedCrop + flip). Epochs are made
-DDP-safe with ``resampled=True`` + ``.with_epoch(N)``: every rank independently
-samples shards and yields the SAME fixed batch count, so no rank stalls at an
-uneven shard boundary (the classic webdataset+DDP hang). This trades exact
-once-per-image for statistical coverage — standard for large-scale wds training.
+Decoded with train augmentation (RandomResizedCrop + flip). Uses the SAME resumable,
+shard-aligned schedule as distill pretraining (``canvit_pretrain.train.data.schedule``):
+a seeded global shard permutation, each SLURM-array job consuming a contiguous block so
+the next job resumes at the next shard slice. A seeded within-stream shuffle buffer adds
+cross-shard mixing (the shards are already globally pre-shuffled at creation). This
+replaced the earlier ``resampled=True`` stream, which could not resume across array jobs.
 
 VAL: the IN1k validation ImageFolder with canvit_eval's canonical preprocessing
 (Resize short side + CenterCrop, aspect-preserving), since the no-features set
@@ -27,6 +28,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from torchvision import transforms as T
 from torchvision.datasets import ImageFolder
 
+from ..train.data.schedule import compute_schedule_slice, compute_shards_per_gpu
 from .config import In1kConfig
 
 log = logging.getLogger(__name__)
@@ -63,40 +65,70 @@ def _read_info(shard_dir: Path) -> dict:
 
 
 def build_train_pipeline(
-    shard_dir: Path, *, transform: T.Compose, batch_size: int, batches_per_epoch: int, seed: int,
+    shard_files: list[Path], *, transform: T.Compose, batch_size: int,
+    num_workers: int, shuffle_buffer: int, shuffle_seed: int,
 ) -> wds.WebDataset:
-    """Resampled, fixed-length-epoch WebDataset yielding (images [B,3,H,W], labels[list])."""
-    shards = sorted(str(p) for p in shard_dir.glob("shard-*.tar"))
-    assert shards, f"no shard-*.tar in {shard_dir}"
-    ds = (
-        # resampled => shards sampled with replacement per rank (shardshuffle unused)
-        wds.WebDataset(shards, resampled=True, shardshuffle=False, empty_check=False, seed=seed)
-        .shuffle(2000)
-        .to_tuple("jpg", "json")
+    """Deterministic WebDataset over ONE job's per-rank shard slice, yielding
+    (images [B,3,H,W], labels[list]). Shards are pre-sliced per rank by the schedule;
+    ``split_by_worker`` then hands each DataLoader worker a disjoint subset so no shard is
+    read twice. A seeded shuffle buffer adds within-stream mixing (0 = off)."""
+    urls = [str(p) for p in shard_files]
+    assert urls, "empty shard slice"
+    ds = wds.WebDataset(
+        urls, shardshuffle=False, empty_check=False, nodesplitter=None,
+        workersplitter=wds.split_by_worker if num_workers > 0 else None,
+    )
+    if shuffle_buffer > 0:
+        ds = ds.shuffle(shuffle_buffer, seed=shuffle_seed)
+    return (
+        ds.to_tuple("jpg", "json")
         .map_tuple(lambda d: _decode_jpg(d, transform), _decode_label)
         .batched(batch_size, partial=False)
     )
-    return ds.with_epoch(batches_per_epoch)
 
 
-def make_train_loader(cfg: In1kConfig, *, world_size: int, rank: int) -> tuple[DataLoader, int]:
-    """(loader, batches_per_epoch). Each rank samples independently (resampled) and
-    yields batches_per_epoch = n_images // (world_size * batch_size) batches."""
-    n_images = int(_read_info(cfg.train_dir)["n_images"])
-    batches_per_epoch = n_images // (world_size * cfg.batch_size)
-    assert batches_per_epoch > 0, f"n_images={n_images} too small for world_size×batch_size"
+def _resolve_num_workers(requested: int, shards_per_gpu: int) -> int:
+    """Cap at shards_per_gpu (extra workers would get zero shards), then round down to a
+    divisor so every worker streams the same whole number of shards (mirrors distill)."""
+    nw = min(max(requested, 0), shards_per_gpu)
+    while nw > 1 and shards_per_gpu % nw != 0:
+        nw -= 1
+    return nw
+
+
+def make_train_loader(
+    cfg: In1kConfig, *, world_size: int, rank: int, job_index: int, steps_per_job: int,
+) -> tuple[DataLoader, int]:
+    """(loader, steps_per_job). Resumable shard schedule: job ``job_index`` consumes a
+    contiguous block of the seeded global shard permutation, so the next job continues at
+    the next slice. ``steps_per_job * batch_size`` must be a multiple of images_per_shard
+    (enforced by ``compute_shards_per_gpu``) so a job ends shard-aligned. The returned
+    loader carries ``samples_per_shard`` for the task's resume_state / invariant checks."""
+    info = _read_info(cfg.train_dir)
+    samples_per_shard = int(info["images_per_shard"])
+    assert samples_per_shard % cfg.batch_size == 0, (
+        f"images_per_shard ({samples_per_shard}) must be divisible by batch_size "
+        f"({cfg.batch_size}) so batched(partial=False) drops nothing")
+    shards_per_gpu = compute_shards_per_gpu(steps_per_job, cfg.batch_size, samples_per_shard)
+    shard_files = compute_schedule_slice(
+        seed=cfg.seed, train_dir=cfg.train_dir, job_index=job_index,
+        shards_per_gpu=shards_per_gpu, world_size=world_size, rank=rank,
+    )
+    nw = _resolve_num_workers(cfg.num_workers, shards_per_gpu)
     transform = make_train_transform(cfg.scene_size, min_scale=cfg.aug_min_scale, flip_prob=cfg.aug_flip_prob)
     ds = build_train_pipeline(
-        cfg.train_dir, transform=transform, batch_size=cfg.batch_size,
-        batches_per_epoch=batches_per_epoch, seed=cfg.seed + rank,
+        shard_files, transform=transform, batch_size=cfg.batch_size, num_workers=nw,
+        shuffle_buffer=cfg.shuffle_buffer, shuffle_seed=cfg.seed + job_index,
     )
     loader = DataLoader(
-        ds, batch_size=None, num_workers=cfg.num_workers, pin_memory=True,
-        prefetch_factor=2 if cfg.num_workers > 0 else None,
+        ds, batch_size=None, num_workers=nw, pin_memory=True,
+        prefetch_factor=2 if nw > 0 else None,
     )
-    log.info(f"IN1k train: {n_images} imgs, {batches_per_epoch} batches/epoch/rank "
-             f"(world_size={world_size}, batch={cfg.batch_size})")
-    return loader, batches_per_epoch
+    loader.samples_per_shard = samples_per_shard  # for In1kRunTask.resume_state / invariants
+    log.info(f"IN1k train: shard schedule job_index={job_index}, rank={rank}/{world_size}, "
+             f"shards_per_gpu={shards_per_gpu}, num_workers={nw}, "
+             f"samples_per_shard={samples_per_shard}, batch={cfg.batch_size}, steps_per_job={steps_per_job}")
+    return loader, steps_per_job
 
 
 def make_val_loader(cfg: In1kConfig, *, world_size: int, rank: int) -> DataLoader:

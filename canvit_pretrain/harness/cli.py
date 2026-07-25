@@ -186,7 +186,12 @@ class In1kCmd:
     def build(self) -> tuple[Any, RunSettings]:
         from canvit_pretrain.tasks.in1k.task import In1kRunTask
 
-        n_steps = self.opts.n_steps if self.opts.n_steps is not None else self.cfg.max_steps
+        # Per-job step budget = the shard-schedule window (cfg.steps_per_job; None => one
+        # job of max_steps). The LR-cosine horizon is always the FULL run (cfg.max_steps),
+        # so a multi-job array anneals across jobs. --opts.n-steps overrides the budget for
+        # smoke runs only (it decouples from the shard window — don't resume such a run).
+        eff_steps_per_job = self.cfg.steps_per_job if self.cfg.steps_per_job is not None else self.cfg.max_steps
+        n_steps = self.opts.n_steps if self.opts.n_steps is not None else eff_steps_per_job
         settings = RunSettings(
             n_steps=n_steps,
             eval_every=self.opts.eval_every if self.opts.eval_every is not None else self.cfg.val_every,
@@ -199,7 +204,7 @@ class In1kCmd:
             **{**_common(self.opts),
                "ckpt_dir": self.opts.ckpt_dir or self.cfg.clf_ckpt_dir},
         )
-        return In1kRunTask(self.cfg, rl=self.rl, total_steps=n_steps), settings
+        return In1kRunTask(self.cfg, rl=self.rl, total_steps=self.cfg.max_steps), settings
 
     def lr_wd(self) -> tuple[float, float]:
         return self.cfg.peak_lr, self.cfg.weight_decay

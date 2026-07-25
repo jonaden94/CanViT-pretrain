@@ -188,9 +188,45 @@ def test_in1k_derives_n_steps_from_max_steps():
     cfg = In1kConfig(tracker="none", max_steps=1234, val_every=321)
     task, s = In1kCmd(cfg=cfg).build()
     assert s.n_steps == 1234 and s.eval_every == 321
-    assert task.total_steps == 1234  # schedule horizon follows the run length
+    assert task.total_steps == 1234  # single job: horizon == run length
     s2 = In1kCmd(cfg=cfg, opts=HarnessOpts(n_steps=10)).build()[1]
     assert s2.n_steps == 10
+    # array mode: n_steps = per-job window (steps_per_job); LR horizon = full run (max_steps)
+    at, asettings = In1kCmd(cfg=In1kConfig(tracker="none", max_steps=192_000, steps_per_job=6_400)).build()
+    assert asettings.n_steps == 6_400 and at.total_steps == 192_000 and at._steps_per_job == 6_400
+
+
+def test_in1k_shard_schedule_resume_roundtrip():
+    """in1k carries distill's shard-schedule resume state: job_index advances by one, the
+    derived start_step is the shard window × the new job index, and a checkpoint missing
+    job_index or written mid-job is refused."""
+    cfg = In1kConfig(tracker="none", max_steps=192_000, steps_per_job=6_400, batch_size=64)
+    task = In1kRunTask(cfg)
+    assert task.resume_state() == {}  # loaders not built yet
+    task._train_loader = type("L", (), {"samples_per_shard": 4096})()
+    task._world_size = 1
+    rs = task.resume_state()
+    assert rs["job_index"] == 0 and rs["steps_per_job"] == 6_400 and rs["samples_per_shard"] == 4096
+
+    sched = type("S", (), {"last_epoch": 6_400})()  # ckpt written at end of job 0
+    assert In1kRunTask(cfg).resume_start_step({"metadata": {"resume_state": rs}}, sched) == 6_400
+    with pytest.raises(RuntimeError, match="job_index"):  # no schedule state in ckpt
+        In1kRunTask(cfg).resume_start_step({"metadata": {"resume_state": {}}}, sched)
+    bad = type("S", (), {"last_epoch": 999})()  # mid-job / wrong step count
+    with pytest.raises(RuntimeError, match="end-of-job"):
+        In1kRunTask(cfg).resume_start_step({"metadata": {"resume_state": rs}}, bad)
+
+
+def test_in1k_shard_schedule_invariant_mismatch_refused():
+    """Refuse resume when a shard-schedule input (here world_size) changed — the slice
+    offset would silently re-process or skip shards."""
+    cfg = In1kConfig(tracker="none", max_steps=192_000, steps_per_job=6_400, batch_size=64)
+    task = In1kRunTask(cfg)
+    task._resume_saved = {"ddp_world_size": 2, "batch_size": 64, "steps_per_job": 6_400,
+                          "samples_per_shard": 4096}
+    loader = type("L", (), {"samples_per_shard": 4096})()
+    with pytest.raises(RuntimeError, match="mismatch"):
+        task._check_schedule_invariants(loader, world_size=1)
 
 
 def test_comet_tracker_rejected_loudly():

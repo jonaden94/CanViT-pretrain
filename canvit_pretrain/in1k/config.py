@@ -78,11 +78,17 @@ class In1kConfig:
     # EVAL viewpoint policy: coarse-to-fine quadtree (the canvit_eval deploy default)
     eval_policy: Literal["coarse_to_fine", "random", "full"] = "coarse_to_fine"
 
-    # Training (step-based, like Ade20kConfig — the train stream is an infinite
-    # `resampled=True` WebDataset, so "epoch" was only ever a derived batch count)
+    # Training (step-based, like Ade20kConfig). Train uses the SAME resumable, shard-
+    # aligned schedule as distill pretraining (canvit_pretrain.train.data.schedule): a
+    # seeded global shard permutation, each SLURM-array job consuming a contiguous block.
     max_steps: int = 200_000
-    """Total optimizer steps. The old epoch-based default was 10 epochs, which at
-    batch_size=64 over IN1k's 1,281,167 images is 10 * 20018 ~= 200k steps."""
+    """Total optimizer steps = the LR-schedule (cosine) horizon across ALL array jobs.
+    The old epoch-based default was 10 epochs ~= 200k steps @ batch 64 over 1,281,167 imgs."""
+    steps_per_job: int | None = None
+    """Steps ONE SLURM-array job runs before exiting (the shard-schedule window; the next
+    job resumes at the next shard block). None => single job of `max_steps`. MUST be
+    shard-aligned: steps_per_job * batch_size a multiple of images_per_shard (enforced by
+    compute_shards_per_gpu), else clean cross-job resume is impossible."""
     batch_size: int = 64
     eval_batch_size: int = 64
     num_workers: int = 8
@@ -93,6 +99,11 @@ class In1kConfig:
     warmup_lr_ratio: float = 1e-6
     grad_clip: float = float("inf")
     label_smoothing: float = 0.0
+    shuffle_buffer: int = 2000
+    """Seeded within-stream shuffle buffer over the job's shard slice (0 = off). The
+    shards are already globally pre-shuffled at creation, so this only adds cross-shard
+    mixing / per-epoch reorder; seeded by `seed + job_index` so a re-run reproduces order
+    (resume-safe: it permutes WITHIN the job's shards, never across the job boundary)."""
 
     # Data augmentation (train): RandomResizedCrop + flip (canonical IN1k probe recipe)
     aug_min_scale: float = 0.35

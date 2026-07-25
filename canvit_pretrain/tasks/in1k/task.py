@@ -86,10 +86,20 @@ class In1kRunTask:
     def __init__(self, cfg, *, rl=None, total_steps=None):
         self.cfg = cfg
         self.rl = rl
-        # In1kConfig schedules in EPOCHS, but warmup_cosine needs a step budget. The
-        # runner knows it (it is the job's n_steps, and in1k runs the whole schedule in
-        # one job) and passes it down; None => no decay, warmup only.
+        # LR-schedule (cosine) horizon = total training steps across ALL array jobs
+        # (cfg.max_steps); passed down by the runner. None => warmup-only (no decay).
         self.total_steps = total_steps
+        # Resumable shard schedule (mirrors DistillRunTask): the job this task starts at,
+        # the saved schedule-state to validate against, and the loader/world_size once built.
+        self._start_job_index = 0
+        self._resume_saved: dict | None = None
+        self._world_size: int | None = None
+        self._train_loader = None
+
+    @property
+    def _steps_per_job(self) -> int:
+        """Per-job step budget = the shard-schedule window. None => single job of max_steps."""
+        return self.cfg.steps_per_job if self.cfg.steps_per_job is not None else self.cfg.max_steps
 
     def caps(self):
         from canvit_pretrain.harness.spec import TaskCaps
@@ -142,7 +152,12 @@ class In1kRunTask:
 
     def build_loaders(self, *, world_size, rank):
         from canvit_pretrain.in1k.data import make_train_loader, make_val_loader
-        loader, _ = make_train_loader(self.cfg, world_size=world_size, rank=rank)
+        loader, _ = make_train_loader(
+            self.cfg, world_size=world_size, rank=rank,
+            job_index=self._start_job_index, steps_per_job=self._steps_per_job,
+        )
+        self._train_loader, self._world_size = loader, world_size
+        self._check_schedule_invariants(loader, world_size=world_size)  # fail before any work
         val = make_val_loader(self.cfg, world_size=world_size, rank=rank) if self.cfg.val_dir.is_dir() else None
         return loader, val
 
@@ -176,10 +191,63 @@ class In1kRunTask:
         return groups
 
     def resume_start_step(self, payload, scheduler):
-        return scheduler.last_epoch  # with_epoch wds: steps == scheduler.step() calls
+        """Where this job starts. The SHARD SCHEDULE (not the scheduler) is authoritative:
+        each job runs exactly steps_per_job shard-aligned steps, so the next job starts at
+        ``(saved job_index + 1) * steps_per_job`` and reads the next shard slice. A
+        checkpoint without a job_index, or a scheduler that disagrees with the derived step
+        (a mid-job save, or a job that ran a different step count), is a hard error —
+        resuming at any other offset silently re-processes or skips shards. Mirrors
+        DistillRunTask; only reached on resume (fresh runs keep job_index=0)."""
+        saved = (payload.get("metadata") or {}).get("resume_state") or {}
+        if saved.get("job_index") is None:
+            raise RuntimeError(
+                "in1k shard-schedule resume requires a checkpoint carrying `job_index` "
+                "(metadata.resume_state) — this one has none, so the next shard slice is "
+                "unknown. Seed from it instead (RunSettings.seed_ckpt) to start fresh.")
+        self._resume_saved = saved
+        self._start_job_index = int(saved["job_index"]) + 1
+        start_step = self._start_job_index * self._steps_per_job
+        if scheduler.last_epoch != start_step:
+            raise RuntimeError(
+                f"in1k shard-schedule resume: scheduler.last_epoch={scheduler.last_epoch} "
+                f"!= start_step={start_step} (= (saved job_index {saved['job_index']} + 1) "
+                f"* steps_per_job {self._steps_per_job}). Checkpoint not written at an "
+                "end-of-job boundary — resume from one, or seed to start a fresh schedule.")
+        return start_step
+
+    def _check_schedule_invariants(self, train_loader, *, world_size) -> None:
+        """Refuse to resume when the shard-schedule inputs changed — the slice offset is
+        only meaningful under the (world_size, batch, steps_per_job, samples_per_shard) it
+        was computed with; changing any silently re-processes or skips shards. Mirrors
+        DistillRunTask. No-op on a fresh run (``_resume_saved is None``)."""
+        if self._resume_saved is None:
+            return
+        current = {
+            "ddp_world_size": world_size,
+            "batch_size": self.cfg.batch_size,
+            "steps_per_job": self._steps_per_job,
+            "samples_per_shard": train_loader.samples_per_shard,
+        }
+        saved = {k: self._resume_saved.get(k) for k in current}
+        if saved != current:
+            raise RuntimeError(
+                "in1k shard-schedule resume config mismatch — refusing to resume (the "
+                f"schedule offset would be wrong). Saved: {saved}. Current: {current}. To "
+                "train with different values, seed from this checkpoint instead.")
 
     def resume_state(self):
-        return {}  # with_epoch reshuffles every epoch: no cross-job shard cursor
+        """Shard-schedule state stored in the checkpoint so the NEXT array job resumes
+        shard-aligned (consumed by resume_start_step / _check_schedule_invariants). Empty
+        before the loaders exist."""
+        if self._train_loader is None:
+            return {}
+        return {
+            "job_index": self._start_job_index,
+            "ddp_world_size": self._world_size,
+            "batch_size": self.cfg.batch_size,
+            "steps_per_job": self._steps_per_job,
+            "samples_per_shard": self._train_loader.samples_per_shard,
+        }
 
     def batch_images(self, batch, device):
         return batch[0].to(device, non_blocking=True)
