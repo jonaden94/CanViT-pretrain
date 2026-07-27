@@ -34,7 +34,7 @@ import tyro
 
 from canvit_pretrain.ade20k.config import Ade20kConfig
 from canvit_pretrain.harness.run import RunSettings, run
-from canvit_pretrain.harness.spec import BpttSpec, GroupOptim, TrainSpec
+from canvit_pretrain.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TrainSpec
 from canvit_pretrain.in1k.config import In1kConfig
 from canvit_pretrain.train.config import Config, JointPolicyConfig
 
@@ -285,12 +285,27 @@ def resolve_spec(task: Any, preset: str, lr: float, wd: float) -> TrainSpec:
     # ade20k/in1k carry the policy config on the task (passed in); distill keeps it
     # inside its own config as `cfg.rl`.
     pol = getattr(task, "rl", None) or getattr(task.cfg, "rl", None) or JointPolicyConfig()
+    # Inherit the task's OWN optimizer groups / LR schedule. Without this a non-default
+    # preset silently fell back to a bare GroupOptim, i.e. ScheduleSpec()'s default
+    # `warmup_constant, warmup_steps=0` — so `ade20k --preset finetune` threw away the
+    # warmup_onecycle recipe and `in1k --preset finetune` its warmup_cosine, running a
+    # flat LR with no warmup and no anneal. The preset is meant to say WHAT TRAINS, not
+    # to reset how it is scheduled.
+    base_optim = task.default_spec().optim
+    task_sched = next((o.schedule for g, o in sorted(base_optim.items()) if g != "policy"), None)
     optim = dict(spec.optim)
     for m in spec.trainable_modules():
         if m in optim:
             continue
-        optim[m] = (GroupOptim(lr=pol.policy_lr, weight_decay=pol.policy_weight_decay)
-                    if m == "policy" else GroupOptim(lr=lr, weight_decay=wd))
+        if m == "policy":
+            optim[m] = GroupOptim(lr=pol.policy_lr, weight_decay=pol.policy_weight_decay)
+        elif (base := base_optim.get(m)) is not None:
+            optim[m] = base  # the task already tuned this group (lr, wd and schedule)
+        else:
+            # A group the task's default spec never defines (e.g. `backbone` for a
+            # probe-default task): task lr/wd, but keep the task's schedule shape.
+            optim[m] = GroupOptim(lr=lr, weight_decay=wd,
+                                  schedule=task_sched if task_sched is not None else ScheduleSpec())
     return replace(spec, optim=optim)
 
 

@@ -48,6 +48,23 @@ class Ade20kConfig:
     ade20k_root: Path = field(default_factory=_default_ade20k_root)
     scene_size: int = 512
 
+    mode: Literal["frozen", "finetune"] = "frozen"
+    """``frozen`` (default, the historical probe regime): freeze the CanViT backbone and
+    train only the segmentation head. ``finetune``: train the whole model end to end.
+    Mirrors ``In1kConfig.mode`` so both downstream tasks name the same thing the same way
+    — before this, ade20k finetune was reachable ONLY via the generic ``--preset
+    finetune``, which is a different entry point with different LR-schedule behaviour.
+    Honored by the harness (``tasks/ade20k/task.py::default_spec``); the standalone
+    entry point trains the probe only and ignores it."""
+
+    probe_repo: str | None = None
+    """FINETUNE only: a published segmentation probe to initialise the head from
+    (core ``from_pretrained_with_probe``) instead of a fresh random one — the ADE20K
+    analogue of ``In1kConfig.probe_repo`` and of specialize's ``init_probe_repo``.
+    Starting a finetune from a RANDOM head at the small finetune LR trains far too
+    slowly; that exact bug cost the unified in1k finetune a whole run (fixed in
+    8f780ba). ``None`` => fresh head. Ignored in ``frozen`` mode."""
+
     # Rollout
     n_timesteps: int = 10
     glimpse_px: int | None = None

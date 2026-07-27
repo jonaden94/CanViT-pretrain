@@ -421,3 +421,47 @@ def test_in1k_without_total_steps_has_no_decay():
     rather than invent a decay horizon."""
     sched = In1kRunTask(In1kConfig(tracker="none")).default_spec().optim["head"].schedule
     assert sched.kind == "warmup_constant" and sched.total_steps is None
+
+
+def test_presets_inherit_the_tasks_lr_schedule():
+    """A `--preset` says WHAT trains; it must not silently reset HOW it is scheduled.
+
+    Before this, resolve_spec filled new groups with a bare GroupOptim, i.e.
+    ScheduleSpec()'s default `warmup_constant, warmup_steps=0` — so
+    `ade20k --preset finetune` threw away warmup_onecycle and `in1k --preset finetune`
+    its warmup_cosine, running a flat LR with no warmup and no anneal.
+    """
+    from canvit_pretrain.harness.cli import resolve_spec
+
+    cfg = Ade20kConfig(tracker="none")
+    task = Ade20kRunTask(cfg)
+    want = task.default_spec().optim["head"].schedule
+    assert want.kind == "warmup_onecycle"
+    for preset in ("probe", "finetune", "joint"):
+        spec = resolve_spec(task, preset, cfg.peak_lr, cfg.weight_decay)
+        for group in ("backbone", "head"):
+            if group in spec.optim:
+                got = spec.optim[group].schedule
+                assert got.kind == want.kind, f"{preset}/{group} lost the schedule: {got.kind}"
+                assert got.total_steps == want.total_steps
+
+    in1k_cfg = In1kConfig(tracker="none")
+    in1k_task = In1kRunTask(in1k_cfg, total_steps=in1k_cfg.max_steps)
+    in1k_want = in1k_task.default_spec().optim["head"].schedule
+    assert in1k_want.kind == "warmup_cosine"
+    ft = resolve_spec(in1k_task, "finetune", in1k_cfg.peak_lr, in1k_cfg.weight_decay)
+    assert ft.optim["backbone"].schedule.kind == "warmup_cosine"
+
+
+def test_ade20k_mode_selects_probe_or_finetune_like_in1k():
+    """ade20k must express frozen/finetune through `cfg.mode`, the same first-class
+    knob in1k uses — not only through the generic `--preset`."""
+    frozen = Ade20kRunTask(Ade20kConfig(tracker="none", mode="frozen")).default_spec()
+    assert not frozen.train_backbone and frozen.train_head
+    assert frozen.bptt.mode == "none" and not frozen.task_grad_to_backbone
+
+    ft = Ade20kRunTask(Ade20kConfig(tracker="none", mode="finetune")).default_spec()
+    assert ft.train_backbone and ft.train_head and ft.task_grad_to_backbone
+    assert ft.bptt.mode == "full"          # loss must reach the trunk
+    assert set(ft.optim) == {"backbone", "head"}
+    assert ft.optim["backbone"].schedule.kind == "warmup_onecycle"

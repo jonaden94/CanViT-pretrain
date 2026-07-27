@@ -110,28 +110,53 @@ class Ade20kRunTask:
         return TaskCaps(has_head=True, supports_policy=True, supports_ddp=False)
 
     def default_spec(self):
-        """Frozen-backbone probe (the historical ade20k regime), fixed horizon = n_timesteps.
+        """``frozen`` (default) = the historical frozen-backbone probe; ``finetune`` =
+        the whole model end to end. Fixed horizon = n_timesteps either way.
+
         The LR schedule is ``warmup_onecycle``, which reproduces the standalone probe's
         AdamW + ``WarmupOneCycleLR`` step for step (``ade20k/data.make_optimizer_and_scheduler``
-        with the same max_steps / warmup_steps / warmup_lr_ratio)."""
+        with the same max_steps / warmup_steps / warmup_lr_ratio). Structured like
+        ``tasks/in1k/task.py::default_spec`` so both downstream tasks map ``cfg.mode``
+        onto a spec identically."""
         from canvit_pretrain.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TrainSpec
+        go = GroupOptim(
+            lr=self.cfg.peak_lr, weight_decay=self.cfg.weight_decay,
+            schedule=ScheduleSpec(kind="warmup_onecycle", warmup_steps=self.cfg.warmup_steps,
+                                  total_steps=self.cfg.max_steps,
+                                  warmup_lr_ratio=self.cfg.warmup_lr_ratio))
+        if self.cfg.mode == "finetune":
+            # bptt=full: the task loss must reach the trunk, so the rollout keeps one
+            # graph over all glimpses (probe mode runs the backbone under no_grad).
+            return TrainSpec.finetune(bptt=BpttSpec(mode="full", horizon=self.cfg.n_timesteps),
+                                      optim={"backbone": go, "head": go})
         return TrainSpec.probe(
-            bptt=BpttSpec(mode="none", horizon=self.cfg.n_timesteps),
-            optim={"head": GroupOptim(
-                lr=self.cfg.peak_lr, weight_decay=self.cfg.weight_decay,
-                schedule=ScheduleSpec(kind="warmup_onecycle", warmup_steps=self.cfg.warmup_steps,
-                                      total_steps=self.cfg.max_steps,
-                                      warmup_lr_ratio=self.cfg.warmup_lr_ratio))},
+            bptt=BpttSpec(mode="none", horizon=self.cfg.n_timesteps), optim={"head": go},
         )
 
     # --- construction ------------------------------------------------------
     def build_model(self, device, prior_model_config=None):
         # prior_model_config is unused: the backbone arch comes from the HF repo the probe
         # was built on, so a resume rebuilds the same model from cfg.model_repo already.
-        seg = CanViTForSemanticSegmentation.from_pretrained_with_new_probe(
-            pretrained_repo=self.cfg.model_repo, num_classes=self._num_classes(),
-            dropout=self.cfg.dropout, use_ln=True,
-        ).to(device)
+        if self.cfg.mode == "finetune" and self.cfg.probe_repo:
+            # Finetune from a PUBLISHED probe (specialize's `init_probe_repo`). A
+            # finetune from a random head at the finetune LR crawls — the in1k twin of
+            # this was a real, costly bug (8f780ba).
+            log.info("FINETUNE: initialising head from published probe %s", self.cfg.probe_repo)
+            seg = CanViTForSemanticSegmentation.from_pretrained_with_probe(
+                pretrained_repo=self.cfg.model_repo, probe_repo=self.cfg.probe_repo,
+            ).to(device)
+        else:
+            if self.cfg.mode == "finetune":
+                log.warning(
+                    "FINETUNE mode with a FRESH RANDOM head (no --cfg.probe-repo). The head "
+                    "starts at chance and the backbone is already being updated at the "
+                    "finetune LR, so early steps drag a trained trunk toward a random "
+                    "readout. Pass --cfg.probe-repo to fuse a published probe instead."
+                )
+            seg = CanViTForSemanticSegmentation.from_pretrained_with_new_probe(
+                pretrained_repo=self.cfg.model_repo, num_classes=self._num_classes(),
+                dropout=self.cfg.dropout, use_ln=True,
+            ).to(device)
         # The OOD footgun that silently ruined run 15025338 (ade20k/train.py:97): a
         # foveated backbone derives its fixation window as `fix_size = scale * H`, so a
         # probe rollout at a scale the backbone never saw makes EVERY glimpse
