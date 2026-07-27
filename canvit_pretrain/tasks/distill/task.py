@@ -14,6 +14,7 @@ normalizer machinery, unchanged.
 
 from __future__ import annotations
 
+import logging
 from contextlib import nullcontext
 from typing import Any
 
@@ -26,6 +27,8 @@ from canvit_pytorch.policy.features import INTRINSIC_GROUPS
 from canvit_pretrain.harness.rollout import GlimpseOut
 from canvit_pretrain.train.task import DistillTask
 from canvit_pretrain.train.viewpoint import ViewpointType
+
+log = logging.getLogger(__name__)
 
 # distill scorer uses the probe-free INTRINSIC feature groups (no task head to read).
 POLICY_FEATURE_GROUPS: tuple[str, ...] = INTRINSIC_GROUPS
@@ -173,7 +176,21 @@ class DistillRunTask:
         if self.cfg.init_backbone_from_teacher:
             teacher = self._load_teacher(device)
         backbone = load_student_backbone(self.cfg, teacher=teacher)
-        bundle = create_model(backbone, self.cfg.model.teacher_dim, self.cfg)
+        # `cfg.model.teacher_dim` is a documented PLACEHOLDER (train/config.py:113 —
+        # "overridden by create_model based on actual teacher"): train/loop.py:294 passes
+        # the REAL width as `create_model(backbone, teacher.embed_dim, cfg)`, and
+        # create_model:63 assigns it back onto the config. Passing cfg.model.teacher_dim
+        # here made that a self-assignment no-op, hardwiring the harness to the 768
+        # default — correct for dinov3-vitb16 only. A vitl16 teacher is 1024 (5 exp21
+        # launchers use it, all still on the old loop), which would have silently built
+        # 768-wide distill heads on the first harness run.
+        # A resume / HF-seed config is authoritative — its heads already have a width —
+        # so only derive from the teacher on a fresh run.
+        from_ckpt = bool(prior_model_config and prior_model_config.get("canvit")) or bool(
+            self.cfg.hf_seed_ckpt)
+        teacher_dim = (self.cfg.model.teacher_dim if from_ckpt
+                       else self._teacher_embed_dim(device))
+        bundle = create_model(backbone, teacher_dim, self.cfg)
         self._model, self._device = bundle.model, device
         self._glimpse_size_px = bundle.glimpse_size_px
         self.cls_norm, self.scene_norm = bundle.model.standardizers(self.cfg.canvas_patch_grid_size)
@@ -182,10 +199,37 @@ class DistillRunTask:
             load_state_dict_flexible(bundle.model, hf_seed_state)
         return bundle.model, None
 
+    def _teacher_embed_dim(self, device) -> int:
+        """The teacher's REAL feature width. Read from the HF config when possible so a
+        with-features run does not pay a full teacher load just to size the distill heads
+        (the teacher is still loaded lazily later, for validation)."""
+        if self._teacher is not None:
+            return self._teacher.embed_dim
+        try:
+            from transformers import AutoConfig
+            dim = getattr(AutoConfig.from_pretrained(self.cfg.teacher_repo_id),
+                          "hidden_size", None)
+            if isinstance(dim, int) and dim > 0:
+                log.info("Teacher width from HF config (%s): %d", self.cfg.teacher_repo_id, dim)
+                return dim
+        except Exception as e:  # offline/unknown arch — fall back to the real thing
+            log.warning("Could not read teacher width from the HF config (%s); "
+                        "loading the teacher to size the distill heads", e)
+        return self._load_teacher(device).embed_dim
+
     def _load_teacher(self, device):
         if self._teacher is None:
-            from canvit_pretrain.train.model import load_teacher
+            from canvit_pretrain.train.model import compile_teacher, load_teacher
             self._teacher = load_teacher(self.cfg)
+            # train/loop.py:303 compiles the teacher alongside the model under
+            # cfg.compile ("Compiling teacher and model"); the harness compiled only the
+            # student, so every harness run drove an EAGER teacher for validation targets
+            # and for raw-shard on-the-fly training targets. Measured impact on the
+            # targets is negligible (1-cos 1.2e-07, unification_docs/teacher_compile_delta.py)
+            # — this is for speed and for not leaving a gratuitous asymmetry behind.
+            if self.cfg.compile:
+                log.info("Compiling teacher (torch.compile), matching train/loop.py")
+                compile_teacher(self._teacher)
         return self._teacher
 
     def canvas_grid(self, model):
@@ -234,8 +278,22 @@ class DistillRunTask:
         return train, val
 
     def _scene_size_px(self):
+        """Scene resolution for the RAW-shard teacher forwards.
+
+        train/loop.py:307-308 sizes this from the TEACHER's patch size
+        (`teacher.model.config.patch_size`), not the student's: the scene must tokenize
+        into exactly G x G *teacher* patches, since those are the distillation targets.
+        The harness used `model.backbone.patch_size_px` (the STUDENT's) — identical while
+        both are /16, as in every config to date, but silently wrong for a mixed pair.
+        The teacher is already loaded on this path (it computes the targets), so reading
+        it is free."""
         from canvit_pretrain.train.data import scene_size_px
-        return scene_size_px(self.cfg.canvas_patch_grid_size, self._model.backbone.patch_size_px)
+        teacher_patch = getattr(self._load_teacher(self._device).model.config,
+                                "patch_size", None)
+        if teacher_patch is None:  # unknown teacher arch — student's is the best guess
+            log.warning("Teacher exposes no patch_size; falling back to the student's")
+            teacher_patch = self._model.backbone.patch_size_px
+        return scene_size_px(self.cfg.canvas_patch_grid_size, teacher_patch)
 
     def _teacher_targets(self, images, sz):
         """Frozen-teacher features for RAW shards (the on-the-fly path). Resizes to the
@@ -483,8 +541,11 @@ class DistillRunTask:
                     scene_normalizer=self.scene_norm, cls_normalizer=self.cls_norm,
                     val_batches=val_loader.batches(), device=device,
                     canvas_grid_size=self.cfg.canvas_patch_grid_size,
-                    scene_size_px=scene_size_px(self.cfg.canvas_patch_grid_size,
-                                                model.backbone.patch_size_px),
+                    # Teacher-derived, like train/loop.py:308-309 (`scene_size`): the val
+                    # scene must tokenize into G x G TEACHER patches, since the teacher
+                    # produces the val targets. Was the student's patch size — identical
+                    # while both are /16, wrong for a mixed pair.
+                    scene_size_px=self._scene_size_px(),
                     glimpse_size_px=self._glimpse_size_px,
                     run_dir=run_dir or Path(tempfile.mkdtemp(prefix="distill_eval_")),
                     n_eval_viewpoints=self.cfg.n_eval_viewpoints,

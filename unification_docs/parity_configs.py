@@ -64,22 +64,38 @@ _FOV = FoveatedPatcherConfig(resolution=16, cart_patch_size=4)
 _SQR = SquarePatcherConfig(resolution=16, cart_patch_size=4)
 
 
-def configs() -> dict[str, tuple[str, CanViTForPretrainingConfig]]:
-    """name -> (backbone_name, model config). ``*_modulate`` backbones carry the
-    adaLN-style TokenModulation params, a separate code path from the plain ViT."""
+def configs() -> dict[str, tuple[str, CanViTForPretrainingConfig, FoveatedScaleConfig]]:
+    """name -> (backbone_name, model config, view-scale law).
+
+    Two independent axes, both previously uncovered:
+      * PATCHER x MODULATION — ``*_modulate`` backbones carry adaLN-style TokenModulation
+        params, a separate code path from the plain ViT.
+      * FOVEATED VIEW-SCALE MODE — ``fixed`` / ``per_rollout`` / ``per_glimpse`` take
+        DIFFERENT branches inside ``RandomSelector`` (selector.py:197 samples once per
+        rollout, :259 pins the fixed scale). Only ``fixed`` was ever exercised, and the
+        scale law is exactly what the exp23 foveated bug was about.
+    """
     mod = ViTModulationConfig(enabled=True)
     film = PatchConditioningConfig(mode="film")
+    fixed = FoveatedScaleConfig()  # mode="fixed"
+    per_rollout = FoveatedScaleConfig(mode="per_rollout", min_scale=0.5, max_scale=2.0)
+    per_glimpse = FoveatedScaleConfig(mode="per_glimpse", min_scale=0.5, max_scale=2.0)
+    fov = _cfg(patcher_name="foveated", foveated_patcher=_FOV)
     return {
-        "uniform": ("vits16", _cfg(patcher_name="uniform")),
-        "uniform+modulated": ("vits16_modulate", _cfg(patcher_name="uniform", vit_modulation=mod)),
-        "foveated": ("vits16", _cfg(patcher_name="foveated", foveated_patcher=_FOV)),
+        "uniform": ("vits16", _cfg(patcher_name="uniform"), fixed),
+        "uniform+modulated": ("vits16_modulate", _cfg(patcher_name="uniform", vit_modulation=mod), fixed),
+        "foveated": ("vits16", fov, fixed),
         "foveated+film": ("vits16", _cfg(patcher_name="foveated",
-                                         foveated_patcher=replace(_FOV, conditioning=film))),
+                                         foveated_patcher=replace(_FOV, conditioning=film)), fixed),
         "foveated+modulated": ("vits16_modulate", _cfg(patcher_name="foveated",
-                                                      foveated_patcher=_FOV, vit_modulation=mod)),
-        "square": ("vits16", _cfg(patcher_name="square", square_patcher=_SQR)),
+                                                      foveated_patcher=_FOV, vit_modulation=mod), fixed),
+        "foveated+scale_per_rollout": ("vits16", fov, per_rollout),
+        "foveated+scale_per_glimpse": ("vits16", fov, per_glimpse),
+        "square": ("vits16", _cfg(patcher_name="square", square_patcher=_SQR), fixed),
         "square+modulated": ("vits16_modulate", _cfg(patcher_name="square",
-                                                    square_patcher=_SQR, vit_modulation=mod)),
+                                                    square_patcher=_SQR, vit_modulation=mod), fixed),
+        "square+scale_per_glimpse": ("vits16", _cfg(patcher_name="square",
+                                                    square_patcher=_SQR), per_glimpse),
     }
 
 
@@ -102,10 +118,9 @@ def _batch() -> dict[str, torch.Tensor]:
 
 
 def run_config(name: str, backbone_name: str, cfg: CanViTForPretrainingConfig,
-               n_steps: int) -> dict:
+               fov_scale: FoveatedScaleConfig, n_steps: int) -> dict:
     model = _build(backbone_name, cfg)
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    fov_scale = FoveatedScaleConfig()
 
     # Both stacks must classify the patcher the same way. `square` counting as uniform
     # was a real bug; assert the two derivations agree rather than trusting either.
@@ -179,9 +194,9 @@ def main() -> int:
         all_cfgs = {args.only: all_cfgs[args.only]}
 
     results, failures = {}, []
-    for name, (bb, cfg) in all_cfgs.items():
+    for name, (bb, cfg, fscale) in all_cfgs.items():
         try:
-            r = run_config(name, bb, cfg, args.steps)
+            r = run_config(name, bb, cfg, fscale, args.steps)
         except Exception as e:
             print(f"{name:22s} ERROR  {type(e).__name__}: {e}")
             failures.append(name)
@@ -189,7 +204,7 @@ def main() -> int:
             continue
         ok = r["max_reldiff"] < _TOL
         failures += [] if ok else [name]
-        print(f"{name:22s} fov={str(r['is_foveated']):5s} "
+        print(f"{name:26s} fov={str(r['is_foveated']):5s} "
               f"max_reldiff={r['max_reldiff']:.2e}  digest={r['digest']}  "
               f"{'PASS' if ok else 'FAIL'}")
         results[name] = r

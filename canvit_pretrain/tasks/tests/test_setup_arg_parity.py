@@ -23,9 +23,16 @@ def _mod():
 
 
 @pytest.mark.skipif(not _SCRIPT.exists(), reason="setup_arg_parity.py not present")
-def test_shared_setup_helpers_receive_identical_args():
-    problems = _mod().compare()
-    assert not problems, "setup-arg parity broken:\n" + "\n".join(problems)
+@pytest.mark.parametrize("pair", ["distill", "ade20k", "in1k"])
+def test_shared_setup_helpers_receive_identical_args(pair):
+    """Each standalone/harness pair must pass shared helpers the same arguments.
+
+    Applying this to the distill pair is what caught `teacher_dim`: the old loop passes
+    the REAL `teacher.embed_dim`, the harness was passing the config PLACEHOLDER back
+    into create_model (a self-assignment), hardwiring every harness run to 768.
+    """
+    problems = _mod().compare_all()[pair]
+    assert not problems, f"setup-arg parity broken for {pair}:\n" + "\n".join(problems)
 
 
 @pytest.mark.skipif(not _SCRIPT.exists(), reason="setup_arg_parity.py not present")

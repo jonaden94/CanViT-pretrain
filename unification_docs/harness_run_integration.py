@@ -60,7 +60,15 @@ def ade_cfg():
 
 
 def in1k_cfg(mode="frozen"):
-    return In1kConfig(train_dir=IN1K_TRAIN, val_dir=IN1K_VAL, scene_size=512, batch_size=8,
+    # steps_per_job is REQUIRED here for the same reason distill_cfg sets it: since
+    # `bc63eee` in1k draws from the resumable shard schedule, which asserts
+    # steps_per_job * batch is a multiple of samples_per_shard (4096). Without it the
+    # field defaults to None -> max_steps (200_000), and 200_000 * 8 is not a multiple
+    # of 4096, so all three in1k configs aborted before running a single step. This
+    # fixture simply was not updated when in1k gained the schedule.
+    bs = 8
+    return In1kConfig(train_dir=IN1K_TRAIN, val_dir=IN1K_VAL, scene_size=512, batch_size=bs,
+                      steps_per_job=4096 // bs,
                       num_workers=4, tracker="none", n_timesteps=T, mode=mode)
 
 

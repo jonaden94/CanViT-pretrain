@@ -465,3 +465,48 @@ def test_ade20k_mode_selects_probe_or_finetune_like_in1k():
     assert ft.bptt.mode == "full"          # loss must reach the trunk
     assert set(ft.optim) == {"backbone", "head"}
     assert ft.optim["backbone"].schedule.kind == "warmup_onecycle"
+
+
+def test_distill_derives_teacher_dim_from_the_real_teacher(monkeypatch):
+    """`cfg.model.teacher_dim` is a PLACEHOLDER (train/config.py:113) that
+    train/loop.py overrides with `teacher.embed_dim`. The harness passed the config
+    value straight back into create_model, where `cfg.model.teacher_dim = teacher_dim`
+    made it a self-assignment — hardwiring every harness run to the 768 default. A
+    dinov3-vitl16 teacher is 1024 and 5 exp21 launchers use it.
+    """
+    from canvit_pretrain.tasks.distill.task import DistillRunTask
+    from canvit_pretrain.train.config import Config
+
+    task = DistillRunTask(Config(teacher_repo_id="facebook/dinov3-vitl16-pretrain-lvd1689m"))
+
+    class _Cfg:
+        hidden_size = 1024
+
+    class _AutoConfig:
+        @staticmethod
+        def from_pretrained(repo):
+            assert "vitl16" in repo, f"asked for the wrong teacher: {repo}"
+            return _Cfg()
+
+    import transformers
+    monkeypatch.setattr(transformers, "AutoConfig", _AutoConfig, raising=True)
+    assert task._teacher_embed_dim("cpu") == 1024, "harness must follow the actual teacher"
+    # and the placeholder it would have used instead:
+    assert Config().model.teacher_dim == 768
+
+
+def test_distill_scene_size_uses_the_teacher_patch_size(monkeypatch):
+    """The scene must tokenize into G x G TEACHER patches (train/loop.py:307-308) —
+    the teacher produces the targets. The harness used the STUDENT's patch size:
+    identical while both are /16, wrong for a mixed pair."""
+    from types import SimpleNamespace
+
+    from canvit_pretrain.tasks.distill.task import DistillRunTask
+    from canvit_pretrain.train.config import Config
+
+    task = DistillRunTask(Config(canvas_patch_grid_size=32))
+    task._device = "cpu"
+    task._model = SimpleNamespace(backbone=SimpleNamespace(patch_size_px=8))  # student /8
+    task._teacher = SimpleNamespace(model=SimpleNamespace(config=SimpleNamespace(patch_size=16)))
+    # 32 * 16 (teacher), not 32 * 8 (student)
+    assert task._scene_size_px() == 512
