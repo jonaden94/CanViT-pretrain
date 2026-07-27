@@ -36,3 +36,4 @@ plan_dataloading/
 .claude
 slurm_nhr/canvit_train_state.venv-cu126/
 .venv-cu126/
+papers
