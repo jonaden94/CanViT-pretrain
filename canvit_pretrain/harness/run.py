@@ -47,6 +47,7 @@ import torch._functorch.config
 torch._functorch.config.backward_pass_autocast = "off"  # type: ignore[attr-defined]
 
 import logging
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -218,6 +219,13 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
     # live under it. An explicit ckpt_dir still wins.
     run_dir = settings.run_dir
     ckpt_dir = settings.ckpt_dir or ((run_dir / "checkpoints") if run_dir else None)
+    if ckpt_dir is None:
+        # train/loop.py asserted `run_group is not None` here, so this case could not
+        # happen; the harness derives everything and would instead train happily and throw
+        # the weights away. Warn rather than raise: the parity/smoke harnesses run without
+        # a run dir on purpose.
+        log.warning("no ckpt_dir and no run_dir — this run will NOT write checkpoints "
+                    "(pass --cfg.run-group/--cfg.run-name, or --opts.ckpt-dir)")
 
     # SLURM crash-loop guard (opt-in): a FAILED file left by a prior crash stops the
     # array from re-crashing forever (see the failed-token-blocks-resume incident).
@@ -242,10 +250,20 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
     is_foveated = task.is_foveated(model)
 
     if settings.compile:
+        # Refuse rather than pretend: this compiles the WRAPPER's forward, which only
+        # distill's task actually calls. A probe task steps `model.canvit(...)` /
+        # `model.head(...)` directly, so this would return happily and change nothing —
+        # you would pay the compile warmup and measure "no speedup" without a clue why.
+        if not caps.supports_compile:
+            raise ValueError(
+                f"compile=True but task '{task.name}' does not support wrapper-level "
+                "torch.compile: it bypasses the wrapper's forward (it steps .canvit / .head "
+                "directly), so compiling here is a silent no-op. Compiling this task means "
+                "compiling .canvit explicitly — a code change, not a flag.")
         log.info("Compiling model (torch.compile)")
         compiled = getattr(model, "compile", None)
         if callable(compiled):
-            compiled()          # CanViT wrappers expose their own .compile()
+            compiled()          # nn.Module.compile: patches this module's __call__
         else:
             model = torch.compile(model)  # type: ignore[assignment]
 
@@ -363,11 +381,18 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
         if is_dist and rank != 0:
             ddp.barrier()
             return {}
+        t_val = time.perf_counter()
         metrics = task.evaluate(model=model, head=head, val_loader=val_loader, device=device,
                                 step=step, tracker=tracker, run_dir=run_dir)
-        log.info("step %d  eval: %s", step, metrics)
+        val_seconds = time.perf_counter() - t_val
+        log.info("step %d  eval (%.1fs): %s", step, val_seconds, metrics)
         if tracker is not None:
-            tracker.log_metrics({f"eval/{k}": v for k, v in metrics.items()}, step=step)
+            payload = {f"eval/{k}": v for k, v in metrics.items()}
+            # How long validation costs, under the key ade20k/train.py logged it as. For a
+            # probe this is the dominant non-training cost (63 val batches every 500
+            # steps), so losing the series made it invisible.
+            payload["timing/val_seconds"] = val_seconds
+            tracker.log_metrics(payload, step=step)
         if is_dist:
             ddp.barrier()
         return metrics

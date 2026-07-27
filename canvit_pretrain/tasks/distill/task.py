@@ -118,7 +118,9 @@ class DistillRunTask:
 
     def caps(self):
         from canvit_pretrain.harness.spec import TaskCaps
-        return TaskCaps(has_head=False, supports_policy=True)  # heads live in the forward
+        # heads live in the forward; supports_compile=True because this task DOES call the
+        # wrapper's forward (`model(image=…)`), which is what run() compiles.
+        return TaskCaps(has_head=False, supports_policy=True, supports_compile=True)
 
     def default_spec(self):
         """The historical distill regime: train backbone (+ in-forward heads), stochastic

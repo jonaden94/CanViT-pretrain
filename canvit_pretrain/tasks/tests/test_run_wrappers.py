@@ -182,6 +182,67 @@ def test_cli_task_config_drives_settings():
         (False, False, 0.5, 7, 13, 5, 64)
 
 
+def test_ade20k_refuses_ddp_and_probes_refuse_wrapper_compile():
+    """ade20k is single-GPU by construction: `make_ade20k_loaders` takes no world_size/rank,
+    so multi-GPU would draw overlapping samples instead of disjoint shards. Refused twice —
+    via caps (before the model is built) and at the loader itself.
+
+    Wrapper-level torch.compile is likewise refused for both probes: they step
+    .canvit/.head directly, so compiling the wrapper's forward changes nothing; only
+    distill calls `model(image=…)`."""
+    ade = Ade20kRunTask(Ade20kConfig(tracker="none"))
+    assert not ade.caps().supports_ddp
+    with pytest.raises(RuntimeError, match="does not support DDP"):
+        ade.build_loaders(world_size=2, rank=0)
+    assert In1kRunTask(In1kConfig(tracker="none")).caps().supports_ddp  # shards by rank
+
+    assert not ade.caps().supports_compile
+    assert not In1kRunTask(In1kConfig(tracker="none")).caps().supports_compile
+    assert DistillRunTask(_distill_cfg()).caps().supports_compile
+
+
+def test_run_identity_is_uniform_across_tasks():
+    """Every task resolves its run identity the same way: the wandb name IS cfg.run_name
+    and the artifact root IS cfg.logs_dir/run_group/run_name. ade20k used to hardcode the
+    name "ade20k" (so exp24's three probes were indistinguishable in the UI) and its
+    checkpoints always went to the one flat cfg.probe_ckpt_dir, where a second run would
+    overwrite the first's best.pt."""
+    logs = Path("/logs")
+    cmds = {
+        "ade20k": Ade20kCmd(cfg=Ade20kConfig(tracker="none", run_group="exp24",
+                                             run_name="probe-a", logs_dir=logs)),
+        "in1k": In1kCmd(cfg=In1kConfig(tracker="none", run_group="exp25",
+                                       run_name="clf-a", logs_dir=logs)),
+        "distill": DistillCmd(cfg=Config(webdataset_dir=Path("/x"), tracker="none",
+                                         run_group="exp26", run_name="d-a", logs_dir=logs)),
+    }
+    for name, cmd in cmds.items():
+        _, s = cmd.build()
+        assert s.run_name == cmd.cfg.run_name, name
+        assert s.run_dir == logs / cmd.cfg.run_group / cmd.cfg.run_name, name
+        # ckpt_dir unset => run() derives run_dir/checkpoints (per-run, never shared)
+        assert s.ckpt_dir is None, name
+        assert s.tracker == "none" and s.wandb_project == cmd.cfg.wandb_project, name
+
+    # No run_group => no run dir, and the probes fall back to their flat legacy dir
+    # (unchanged behavior), with a task-prefixed auto name instead of a shared constant.
+    _, s = Ade20kCmd(cfg=Ade20kConfig(tracker="none")).build()
+    assert s.run_dir is None and s.ckpt_dir == Ade20kConfig().probe_ckpt_dir
+    assert s.run_name.startswith("ade20k_")
+    _, s = In1kCmd(cfg=In1kConfig(tracker="none")).build()
+    assert s.run_dir is None and s.ckpt_dir == In1kConfig().clf_ckpt_dir
+    assert s.run_name.startswith("in1k_")
+
+    # --opts overrides still win, for every task.
+    opts = HarnessOpts(run_dir=Path("/elsewhere"), ckpt_dir=Path("/ckpts"), ema_alpha=0.0)
+    for cmd_cls, cfg in ((Ade20kCmd, Ade20kConfig(tracker="none", run_group="g")),
+                         (In1kCmd, In1kConfig(tracker="none", run_group="g")),
+                         (DistillCmd, Config(webdataset_dir=Path("/x"), tracker="none",
+                                             run_group="g"))):
+        _, s = cmd_cls(cfg=cfg, opts=opts).build()
+        assert (s.run_dir, s.ckpt_dir, s.ema_alpha) == (Path("/elsewhere"), Path("/ckpts"), 0.0)
+
+
 def test_in1k_derives_n_steps_from_max_steps():
     """in1k is now step-based like ade20k: n_steps/eval_every come from cfg.max_steps/
     val_every when --opts are unset, and --opts.n-steps overrides."""

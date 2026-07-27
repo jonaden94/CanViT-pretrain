@@ -130,6 +130,18 @@ class TaskCaps:
 
     has_head: bool
     supports_policy: bool
+    supports_ddp: bool = True
+    """False => this task refuses to run with world_size > 1 (checked by
+    :func:`check_spec`, i.e. before the model is built). ade20k sets it: its loader is a
+    plain map-style ``DataLoader(shuffle=True)`` with no ``DistributedSampler``, so ranks
+    would draw OVERLAPPING samples instead of disjoint shards — no error, just a run whose
+    effective batch is not what the config says."""
+    supports_compile: bool = False
+    """Whether ``RunSettings.compile`` actually compiles anything. ``run()`` compiles the
+    model the harness holds, i.e. the wrapper's ``forward``; only distill's task calls that
+    (``model(image=…)``). ade20k/in1k step ``model.canvit(...)`` / ``model.head(...)``
+    directly, so wrapper-level compilation would be a SILENT no-op — compiling those means
+    compiling ``.canvit`` explicitly. Default False so a new task has to opt in knowingly."""
 
 
 @dataclass
@@ -276,7 +288,15 @@ def check_spec(spec: TrainSpec, caps: TaskCaps, *, is_dist: bool = False) -> Spe
     if spec.policy_grad_to_backbone and not spec.train_policy:
         e.append("policy_grad_to_backbone is True but train_policy is False (no policy loss to route)")
 
-    # DDP support matrix (design §9): the coupled cell is unsupported under DDP.
+    # DDP support matrix (design §9): the coupled cell is unsupported under DDP, and a
+    # task whose loader cannot shard by rank refuses multi-GPU outright.
+    if is_dist and not caps.supports_ddp:
+        e.append(
+            "this task does not support DDP (world_size > 1): its data loader ignores "
+            "world_size/rank, so every rank would draw overlapping samples from the whole "
+            "dataset instead of a disjoint shard. Run it on ONE GPU (NGPU=1, "
+            "--ntasks-per-node=1)."
+        )
     if is_dist and spec.policy_grad_to_backbone:
         e.append(
             "policy_grad_to_backbone=True under DDP is unsupported: the policy->backbone "

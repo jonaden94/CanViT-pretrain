@@ -88,16 +88,43 @@ class Ade20kConfig:
 
     # Validation resize
     resize_mode: ResizeMode = "center_crop"
-    """How val images/masks are fitted to ``scene_size``. ``center_crop``
-    (default): resize short side then crop the central square — aspect-ratio
-    PRESERVING, so it matches how the backbone was pretrained and how the probe
-    trained (both aspect-preserving); the cost is that long-side margins are
-    discarded, so mIoU is over the central crop. ``squish``: resize to
-    (size, size), distorting aspect ratio — required to reproduce the
-    CanViT-PyTorch-RL documented numbers (qband band / EG-C2F) and the
-    specialize reference, which were all measured under squish. Foveated/square
-    models MUST use an aspect-preserving mode (they model biological vision;
-    squish is off-distribution) — keep the default for them."""
+    """How val images/masks are fitted to the square ``scene_size``. Both modes are
+    supported for every patcher; neither is "the correct one" — each trades away something
+    different, so pick per experiment and say which one a number came from.
+
+    ``center_crop`` (default): resize the short side, crop the central square. Preserves
+    geometry (a circle stays a circle), matching how the backbone was pretrained and how
+    the probe trains; the cost is that long-side content is thrown away, so the mIoU is over
+    the central crop rather than the whole image.
+
+    ``squish``: resize to (size, size), distorting aspect ratio. Keeps the whole field of
+    view, and it is what the CanViT-PyTorch-RL numbers (qband band / EG-C2F) and the
+    specialize reference were measured under — so it is the mode to use for comparability
+    with those.
+
+    Which to prefer for a FOVEATED/square model: for comparison against **human** viewing,
+    aspect-preserving is the better match, since the cortical-magnification geometry is
+    defined on the undistorted scene — a human looking at the same picture does not see it
+    anisotropically stretched. For comparability with the **original CanViT** results,
+    squish is fine, and the distortion is a mild domain shift, not a broken input (unlike a
+    view-scale mismatch, which really does degrade the canvas — see ``foveated_scale``).
+    NB the truest "what a human sees" option would be padding/letterbox (preserve aspect
+    AND the full frame), which is not implemented: ``ResizeMode`` is center_crop | squish."""
+
+    # Debug / smoke: cap batches per eval (None = full), mirroring In1kConfig. Honored by
+    # both entry points (the standalone val loop and the harness task's `evaluate`).
+    limit_val_batches: int | None = None
+
+    # Run identity — the same trio Config/In1kConfig carry, so every task names its runs
+    # the same way. The harness derives BOTH the tracker run name and
+    # `logs_dir/run_group/run_name/` (checkpoints + visualization) from these. The
+    # standalone entry point honors `run_name` (tracker name + its checkpoint subdir) and
+    # ignores `run_group`/`logs_dir`: its artifact root is `probe_ckpt_dir`.
+    run_group: str | None = None
+    run_name: str | None = None
+    """None => auto: the descriptive `ade20k_{model}_{T}t_s{scene}_c{grid}_{ts}` name in
+    the standalone, `ade20k_{timestamp}` in the harness."""
+    logs_dir: Path = Path("logs")
 
     # Logging / checkpoints
     log_every: int = 20
@@ -106,12 +133,16 @@ class Ade20kConfig:
     """Render the segmentation overlay figure every N steps (0 = off), for the training
     batch and the first val batch. Specialize's default, restored — but the figures go to
     ``{run_dir}/visualization/seg_{train,val}/`` on disk instead of the wandb Media tab.
-    Under the harness this needs ``--opts.run-dir`` set (ade20k has no run_group of its
-    own to derive one from); without it there is nowhere to write and viz stays off."""
+    Harness only (the standalone renders no figures), and it needs a run dir: set
+    ``run_group`` (or ``--opts.run-dir``), else there is nowhere to write and viz is off."""
     viz_samples: int = 4
     """Images per figure (one row each)."""
     device: str = "cuda"
     amp: bool = True
+    seed: int = 0
+    """`torch.manual_seed(seed + rank)`. Historically the probe had NO seed at all (both
+    entry points), which made A/B gates against it impossible — same config, different
+    curve. Both honor it now; 0 keeps the value the harness was already passing."""
     probe_ckpt_dir: Path | None = field(default_factory=_default_probe_ckpt_dir)
     tracker: Literal["comet", "wandb", "none"] = "wandb"
     wandb_project: str | None = field(default_factory=_default_wandb_project)

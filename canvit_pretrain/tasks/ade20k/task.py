@@ -104,7 +104,10 @@ class Ade20kRunTask:
     # --- capabilities & defaults ------------------------------------------
     def caps(self):
         from canvit_pretrain.harness.spec import TaskCaps
-        return TaskCaps(has_head=True, supports_policy=True)
+        # supports_ddp=False: see build_loaders — ADE20K is a map-style dataset behind a
+        # plain shuffling DataLoader, with no rank sharding, so multi-GPU is refused rather
+        # than silently run on overlapping samples.
+        return TaskCaps(has_head=True, supports_policy=True, supports_ddp=False)
 
     def default_spec(self):
         """Frozen-backbone probe (the historical ade20k regime), fixed horizon = n_timesteps.
@@ -160,6 +163,16 @@ class Ade20kRunTask:
         return [ViewpointType.FULL if self.cfg.train_start_full else ViewpointType.RANDOM]
 
     def build_loaders(self, *, world_size, rank):
+        # SINGLE-GPU ONLY, asserted here as well as via caps().supports_ddp (which fires
+        # earlier, in check_spec): `make_ade20k_loaders` builds a map-style
+        # DataLoader(shuffle=True) and takes NO world_size/rank, so under DDP each rank
+        # would sample independently from the whole dataset — overlapping draws, not
+        # disjoint shards, with no error to show for it. A real multi-GPU ade20k needs a
+        # DistributedSampler plus set_epoch plumbing in run.py::_infinite.
+        if world_size > 1:
+            raise RuntimeError(
+                f"ade20k does not support DDP (world_size={world_size}): its loader cannot "
+                "shard by rank. Run it on one GPU (NGPU=1, --ntasks-per-node=1).")
         from canvit_pretrain.ade20k.data import make_ade20k_loaders
         return make_ade20k_loaders(self.cfg)
 
@@ -268,7 +281,9 @@ class Ade20kRunTask:
         amp = torch.autocast("cuda", dtype=torch.bfloat16) if device.type == "cuda" else nullcontext()
         do_viz = (run_dir is not None and self.cfg.viz_every
                   and step % self.cfg.viz_every == 0)
-        for vi, vm in val_loader:
+        for vb, (vi, vm) in enumerate(val_loader):
+            if self.cfg.limit_val_batches is not None and vb >= self.cfg.limit_val_batches:
+                break
             vi, vm = vi.to(device), vm.to(device)
             vps = make_random_viewpoints(vi.shape[0], device, T, min_scale=self.cfg.min_vp_scale,
                                          max_scale=self.cfg.max_vp_scale, start_with_full_scene=True,

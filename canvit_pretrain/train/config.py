@@ -1,5 +1,6 @@
 """Configuration for CanViT pretraining."""
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -215,10 +216,13 @@ class Config:
     # Experiment tracker
     tracker: Literal["comet", "wandb", "none"] = "wandb"
     """Backend for parameter/metric/figure logging."""
-    wandb_project: str | None = None
-    """W&B project name. Required when tracker='wandb'."""
-    wandb_entity: str | None = None
-    """W&B entity (team or user). Falls back to your default account when unset."""
+    wandb_project: str | None = field(default_factory=lambda: os.environ.get("WANDB_PROJECT"))
+    """W&B project name. Required when tracker='wandb'. Defaults to $WANDB_PROJECT
+    (.envrc.grete sets it) — the same default Ade20kConfig/In1kConfig already had, which
+    distill alone was ignoring. Every launcher passes it explicitly, so this only changes
+    what a hand-run job does: land in the default project instead of asserting."""
+    wandb_entity: str | None = field(default_factory=lambda: os.environ.get("WANDB_ENTITY") or None)
+    """W&B entity (team or user). Falls back to $WANDB_ENTITY, then your default account."""
     wandb_dir: Path | None = Path("/mnt/vast-nhr/projects/nib00021/jonathan")
     """Directory wandb writes its run files into. None = wandb's own default (./wandb)."""
     # Compilation and precision

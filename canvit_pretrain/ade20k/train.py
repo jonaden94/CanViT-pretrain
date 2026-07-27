@@ -66,6 +66,10 @@ def train(cfg: Ade20kConfig) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     torch.set_float32_matmul_precision("high")
     device = torch.device(cfg.device)
+    # This trainer had no seed at all, so two runs of the same config could not be
+    # compared (the probe head init and the train order both drifted). Single-process, so
+    # no rank offset — cfg.seed is what the harness passes as `seed + rank` for rank 0.
+    torch.manual_seed(cfg.seed)
 
     log.info("=" * 60)
     log.info("ADE20K Canvas Probe Training (unified repo)")
@@ -119,7 +123,8 @@ def train(cfg: Ade20kConfig) -> None:
 
     model_slug = cfg.model_repo.split("/")[-1]
     ts = time.strftime("%Y-%m-%d-%H%M%S-%Z")
-    exp_name = f"ade20k_{model_slug}_{cfg.n_timesteps}t_s{cfg.scene_size}_c{canvas_grid}_{ts}"
+    exp_name = cfg.run_name or (
+        f"ade20k_{model_slug}_{cfg.n_timesteps}t_s{cfg.scene_size}_c{canvas_grid}_{ts}")
     exp = make_tracker(
         tracker=cfg.tracker, is_main=True, is_seeding=False, run_name=exp_name,
         wandb_project=cfg.wandb_project, wandb_entity=cfg.wandb_entity, wandb_dir=cfg.wandb_dir,
@@ -130,7 +135,8 @@ def train(cfg: Ade20kConfig) -> None:
 
     job_id = os.environ.get("SLURM_JOB_ID", "local")
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    run_dir = cfg.probe_ckpt_dir / f"{model_slug}_{timestamp}_{job_id}" if cfg.probe_ckpt_dir else None
+    run_sub = cfg.run_name or f"{model_slug}_{timestamp}_{job_id}"
+    run_dir = cfg.probe_ckpt_dir / run_sub if cfg.probe_ckpt_dir else None
     if run_dir:
         run_dir.mkdir(parents=True, exist_ok=True)
         log.info(f"Checkpoints: {run_dir}")
@@ -157,7 +163,9 @@ def train(cfg: Ade20kConfig) -> None:
             for m in val_iou:
                 m.reset()
             with torch.no_grad():
-                for vi, vm in val_loader:
+                for vb, (vi, vm) in enumerate(val_loader):
+                    if cfg.limit_val_batches is not None and vb >= cfg.limit_val_batches:
+                        break
                     vi, vm = vi.to(device), vm.to(device)
                     vps = make_random_viewpoints(
                         vi.shape[0], device, cfg.n_timesteps,

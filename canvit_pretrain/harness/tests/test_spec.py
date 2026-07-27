@@ -120,6 +120,16 @@ def test_coupled_policy_backbone_under_ddp_errors():
     assert any("under DDP is unsupported" in x for x in check_spec(spec, HEAD_POLICY, is_dist=True).errors)
 
 
+def test_task_without_ddp_support_refuses_multi_gpu():
+    """A task whose loader cannot shard by rank (ade20k) must be REFUSED under DDP, not
+    silently run on overlapping samples. Fires before the model is built."""
+    no_ddp = TaskCaps(has_head=True, supports_policy=True, supports_ddp=False)
+    spec = TrainSpec.probe(optim={"head": go()})
+    assert check_spec(spec, no_ddp, is_dist=False).ok
+    assert any("does not support DDP" in x for x in check_spec(spec, no_ddp, is_dist=True).errors)
+    assert check_spec(spec, HEAD_POLICY, is_dist=True).ok  # default caps: DDP allowed
+
+
 def test_missing_optim_group_errors():
     spec = TrainSpec.finetune(optim={"head": go()})  # missing backbone group
     assert any("optim[backbone] missing" in x for x in check_spec(spec, HEAD_ONLY).errors)

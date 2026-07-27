@@ -180,7 +180,8 @@ def train(cfg: In1kConfig) -> None:
     run_dir: Path | None = None
     if ddp.is_main():
         ts = time.strftime("%Y-%m-%d-%H%M%S-%Z")
-        exp_name = f"in1k_{cfg.mode}_{cfg.model_repo.split('/')[-1]}_{cfg.n_timesteps}t_s{cfg.scene_size}_{ts}"
+        exp_name = cfg.run_name or (
+            f"in1k_{cfg.mode}_{cfg.model_repo.split('/')[-1]}_{cfg.n_timesteps}t_s{cfg.scene_size}_{ts}")
         exp = make_tracker(
             tracker=cfg.tracker, is_main=True, is_seeding=False, run_name=exp_name,
             wandb_project=cfg.wandb_project, wandb_entity=cfg.wandb_entity, wandb_dir=cfg.wandb_dir,

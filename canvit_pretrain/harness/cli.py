@@ -68,10 +68,12 @@ class HarnessOpts:
     ckpt_dir: Path | None = None
     """Explicit checkpoint dir. Overrides the ``logs_dir/run_group/run_name`` convention."""
     run_dir: Path | None = None
-    """Root for this run's artifacts — where ``visualization/`` is written (and
-    ``checkpoints/`` when ``--opts.ckpt-dir`` is unset). ade20k/in1k only: they have no
-    run_group to derive one from, so without this there is nowhere to put figures and viz
-    stays off. distill derives its own from ``cfg.logs_dir/run_group/run_name``."""
+    """OVERRIDE for this run's artifact root (``visualization/``, and ``checkpoints/``
+    when ``--opts.ckpt-dir`` is unset). Normally leave it unset: all three tasks derive
+    ``cfg.logs_dir/cfg.run_group/cfg.run_name`` themselves."""
+    ema_alpha: float | None = None
+    """EMA smoothing of the logged loss series (0 => log raw). None => the task's own
+    default (distill ``cfg.ema_alpha``; ade20k/in1k the harness default 0.1)."""
     resume: bool | None = None
     """Resume from ``find_latest(ckpt_dir)`` if a checkpoint exists. None => the task
     default: True for distill (array jobs must continue across tasks), False for the
@@ -86,11 +88,16 @@ class HarnessOpts:
     log_timing: bool = True
 
 
-def _resolve_run_dir(logs_dir: Path, run_group: str | None,
-                     run_name: str | None) -> tuple[Path | None, str]:
+def _resolve_run_dir(logs_dir: Path, run_group: str | None, run_name: str | None,
+                     *, prefix: str = "") -> tuple[Path | None, str]:
     """The ``logs_dir/run_group/run_name`` convention (train/loop.py 157-161): an
-    auto-generated timestamp name when unset, and no run dir at all without a group."""
-    name = run_name or datetime.now().strftime("%Y-%m-%d_%H-%M")
+    auto-generated timestamp name when unset, and no run dir at all without a group.
+    ALL THREE tasks resolve their identity here — ade20k used to hardcode the tracker
+    name ``"ade20k"`` and in1k defaulted to the constant ``"in1k-clf"``, so unnamed runs
+    of either collided in the wandb UI. ``prefix`` labels the auto-generated name
+    (distill passes none, keeping the old loop's bare timestamp)."""
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    name = run_name or (f"{prefix}_{ts}" if prefix else ts)
     if run_group is None:
         return None, name
     return logs_dir / run_group / name, name
@@ -106,12 +113,35 @@ def _tracker(kind: str) -> str:
 
 def _common(opts: HarnessOpts) -> dict[str, Any]:
     """HarnessOpts fields that map straight onto RunSettings."""
-    return {
+    out = {
         "start_step": opts.start_step, "ckpt_every": opts.ckpt_every,
-        "viz_every": opts.viz_every, "ckpt_dir": opts.ckpt_dir,
+        "viz_every": opts.viz_every,
         "signal_checkpoint": opts.signal_checkpoint,
         "use_failed_marker": opts.use_failed_marker, "amp_dtype": opts.amp_dtype,
         "log_grad_norms": opts.log_grad_norms, "log_timing": opts.log_timing,
+    }
+    if opts.ema_alpha is not None:   # else: the task's own default (see each build())
+        out["ema_alpha"] = opts.ema_alpha
+    return out
+
+
+def _identity(cfg: Any, opts: HarnessOpts, *, prefix: str,
+              legacy_ckpt_dir: Path | None = None) -> dict[str, Any]:
+    """Run identity + artifact roots + tracker, resolved THE SAME WAY for all three tasks
+    from the config trio (``run_group`` / ``run_name`` / ``logs_dir``).
+
+    ``ckpt_dir`` precedence: ``--opts.ckpt-dir`` > ``run_dir/checkpoints`` (derived in
+    ``run()``) > the task's flat legacy dir (``probe_ckpt_dir`` / ``clf_ckpt_dir``).
+    ade20k/in1k previously took that flat dir UNCONDITIONALLY, so two runs sharing it
+    overwrote each other's ``best.pt`` / ``step-N.pt`` — every launcher had to pass
+    ``OPT_CKPT_DIR`` by hand to stay safe. distill passes no legacy dir (it has none)."""
+    run_dir, run_name = _resolve_run_dir(cfg.logs_dir, cfg.run_group, cfg.run_name, prefix=prefix)
+    run_dir = opts.run_dir or run_dir
+    return {
+        "run_name": run_name, "run_dir": run_dir,
+        "ckpt_dir": opts.ckpt_dir or (None if run_dir is not None else legacy_ckpt_dir),
+        "tracker": _tracker(cfg.tracker), "wandb_project": cfg.wandb_project,
+        "wandb_entity": cfg.wandb_entity, "wandb_dir": cfg.wandb_dir,
     }
 
 
@@ -126,8 +156,6 @@ class DistillCmd:
     def build(self) -> tuple[Any, RunSettings]:
         from canvit_pretrain.tasks.distill.task import DistillRunTask
 
-        run_dir, run_name = _resolve_run_dir(self.cfg.logs_dir, self.cfg.run_group,
-                                             self.cfg.run_name)
         settings = RunSettings(
             # The shard-schedule window IS the job length for distill: a job trains
             # exactly steps_per_job steps and the next array task resumes at the next
@@ -137,18 +165,16 @@ class DistillCmd:
             log_every=self.cfg.log_every, grad_clip=self.cfg.grad_clip, amp=self.cfg.amp,
             seed=self.opts.seed if self.opts.seed is not None else self.cfg.seed,
             device=str(self.cfg.device), compile=self.cfg.compile,
-            ema_alpha=self.cfg.ema_alpha, seed_ckpt=self.cfg.seed_ckpt,
-            tracker=_tracker(self.cfg.tracker), wandb_project=self.cfg.wandb_project,
-            wandb_entity=self.cfg.wandb_entity, wandb_dir=self.cfg.wandb_dir,
-            run_name=run_name, run_dir=run_dir,
+            seed_ckpt=self.cfg.seed_ckpt,
             resume=self.opts.resume if self.opts.resume is not None else True,
+            **_identity(self.cfg, self.opts, prefix=""),
             # Break `patcher` down into kpe / embed_head / conditioner (and the
             # conditioner one level deeper) so foveated runs get the old loop's
             # `grad_norm/patcher.kpe` + `grad_norm/patcher.conditioner.mlp` series
             # instead of a single aggregate (train/loop.py 881-883).
             grad_norm_deep_prefixes=(("patcher", "patcher.conditioner")
                                      if self.cfg.log_patcher_grad_detail else ()),
-            **{**_common(self.opts),
+            **{"ema_alpha": self.cfg.ema_alpha, **_common(self.opts),
                # `pca_train`: the old loop rendered the TRAINING-batch PCA whenever it
                # validated AND on every viz_every_n_vals-th validation (train/loop.py
                # 680-681) — i.e. exactly `step % (val_every * viz_every_n_vals) == 0`.
@@ -179,15 +205,14 @@ class Ade20kCmd:
             n_steps=self.opts.n_steps if self.opts.n_steps is not None else self.cfg.max_steps,
             eval_every=self.opts.eval_every if self.opts.eval_every is not None else self.cfg.val_every,
             log_every=self.cfg.log_every, grad_clip=self.cfg.grad_clip, amp=self.cfg.amp,
-            seed=self.opts.seed if self.opts.seed is not None else 0,
-            device=self.cfg.device, tracker=_tracker(self.cfg.tracker),
-            wandb_project=self.cfg.wandb_project, wandb_entity=self.cfg.wandb_entity,
-            wandb_dir=self.cfg.wandb_dir, run_name="ade20k", run_dir=self.opts.run_dir,
+            seed=self.opts.seed if self.opts.seed is not None else self.cfg.seed,
+            device=self.cfg.device,
             resume=self.opts.resume if self.opts.resume is not None else False,
+            **_identity(self.cfg, self.opts, prefix="ade20k",
+                        legacy_ckpt_dir=self.cfg.probe_ckpt_dir),
             **{**_common(self.opts),
-               "ckpt_dir": self.opts.ckpt_dir or self.cfg.probe_ckpt_dir,
                # specialize's segmentation overlay cadence (cfg.viz_every, default 500).
-               # Needs --opts.run-dir to have a sink; harmless no-op without one.
+               # Silently a no-op without a run dir, i.e. without cfg.run_group.
                "viz_every": self.opts.viz_every or self.cfg.viz_every},
         )
         return Ade20kRunTask(self.cfg, rl=self.rl), settings
@@ -219,13 +244,11 @@ class In1kCmd:
             eval_every=self.opts.eval_every if self.opts.eval_every is not None else self.cfg.val_every,
             log_every=self.cfg.log_every, grad_clip=self.cfg.grad_clip, amp=self.cfg.amp,
             seed=self.opts.seed if self.opts.seed is not None else self.cfg.seed,
-            device=self.cfg.device, tracker=_tracker(self.cfg.tracker),
-            wandb_project=self.cfg.wandb_project, wandb_entity=self.cfg.wandb_entity,
-            wandb_dir=self.cfg.wandb_dir, run_name=self.cfg.run_name,
-            run_dir=self.opts.run_dir,
+            device=self.cfg.device,
             resume=self.opts.resume if self.opts.resume is not None else False,
-            **{**_common(self.opts),
-               "ckpt_dir": self.opts.ckpt_dir or self.cfg.clf_ckpt_dir},
+            **_identity(self.cfg, self.opts, prefix="in1k",
+                        legacy_ckpt_dir=self.cfg.clf_ckpt_dir),
+            **_common(self.opts),
         )
         return In1kRunTask(self.cfg, rl=self.rl, total_steps=self.cfg.max_steps), settings
 

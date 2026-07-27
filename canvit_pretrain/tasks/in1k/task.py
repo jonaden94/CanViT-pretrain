@@ -103,7 +103,9 @@ class In1kRunTask:
 
     def caps(self):
         from canvit_pretrain.harness.spec import TaskCaps
-        return TaskCaps(has_head=True, supports_policy=True)
+        # DDP yes (the webdataset schedule shards by rank); wrapper-level compile no — like
+        # ade20k this task steps .canvit/.head directly, so it would be a silent no-op.
+        return TaskCaps(has_head=True, supports_policy=True, supports_compile=False)
 
     def default_spec(self):
         """cfg.mode drives the default: 'frozen' => probe (backbone frozen, bptt none);

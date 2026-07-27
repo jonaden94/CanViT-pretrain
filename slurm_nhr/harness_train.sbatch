@@ -115,34 +115,39 @@ for name in $(compgen -v); do
     _ARGS+=("${prefix}$(echo "$stem" | tr '[:upper:]_' '[:lower:]-')" "$val")
 done
 
-# Per-task required flags. Only distill takes the run-group/logs-dir/data trio;
-# ade20k and in1k read their data roots from ADE20K_ROOT / IN1K_* in env.sh and
-# have no run_group concept, so passing those flags there would be a hard error.
-_TASK_ARGS=()
+# Run identity is now the SAME for all three tasks (--cfg.run-group / --cfg.run-name /
+# --cfg.logs-dir), so each derives `LOGS_DIR/GROUP/NAME/{checkpoints,visualization}` and
+# its own wandb run name. ade20k/in1k used to get neither: their checkpoints went to one
+# flat shared dir and every ade20k run was named "ade20k" in wandb, which is why the
+# launchers had to pass OPT_CKPT_DIR by hand. Those still work — an explicit CFG_/OPT_
+# override lands in _ARGS, after these, and tyro takes the last flag.
+: "${RUN_GROUP:?RUN_GROUP must be set (all tasks)}"
+: "${RUN_NAME:?RUN_NAME must be set (all tasks)}"
+: "${LOGS_DIR:?LOGS_DIR must be set in .envrc.grete}"
+_TASK_ARGS=(--cfg.run-group "$RUN_GROUP" --cfg.run-name "$RUN_NAME" --cfg.logs-dir "$LOGS_DIR")
+
+# Per-task required flags: only distill takes the data-path trio (ade20k and in1k read
+# their data roots from ADE20K_ROOT / IN1K_* in env.sh), so passing those there would be
+# a hard error.
 case "$TASK" in
     distill)
-        : "${RUN_GROUP:?RUN_GROUP must be set for TASK=distill}"
-        : "${RUN_NAME:?RUN_NAME must be set for TASK=distill}"
-        : "${LOGS_DIR:?LOGS_DIR must be set in .envrc.grete}"
         : "${WEBDATASET_DIR:?WEBDATASET_DIR must be set in .envrc.grete}"
         : "${VAL_DIR:?VAL_DIR must be set in .envrc.grete}"
-        _TASK_ARGS+=(--cfg.run-group "$RUN_GROUP" --cfg.run-name "$RUN_NAME"
-                     --cfg.logs-dir "$LOGS_DIR" --cfg.webdataset-dir "$WEBDATASET_DIR"
-                     --cfg.val-dir "$VAL_DIR")
+        _TASK_ARGS+=(--cfg.webdataset-dir "$WEBDATASET_DIR" --cfg.val-dir "$VAL_DIR")
         # if-statements rather than `[ x ] && arr+=(...)`: the &&-form yields status 1
         # when the test is false, which is harmless mid-script under `set -e` but bites
         # if such a line ever ends up last in a script or function.
         if [ -n "${VAL_INDEX_DIR:-}" ]; then _TASK_ARGS+=(--cfg.val-index-dir "$VAL_INDEX_DIR"); fi
         ;;
     ade20k|in1k)
-        # These two have no run_group in their configs, so they cannot derive a run dir
-        # the way distill does — without one there is nowhere to put visualization/ and
-        # the segmentation figures silently stay off. Give them the same
-        # logs/GROUP/NAME convention when the launcher exports those (all of them do).
-        # Checkpoints are unaffected: their ckpt_dir is always set (cfg.probe_ckpt_dir /
-        # cfg.clf_ckpt_dir default non-None), so it keeps winning over run_dir.
-        if [ -n "${RUN_GROUP:-}" ] && [ -n "${RUN_NAME:-}" ]; then
-            _TASK_ARGS+=(--opts.run-dir "logs/$RUN_GROUP/$RUN_NAME")
+        # Nothing task-specific left: identity is set above, data roots come from env.sh.
+        # ade20k is SINGLE-GPU only — its loader takes no world_size/rank, so ranks would
+        # draw overlapping samples. The task asserts this too (caps().supports_ddp and
+        # build_loaders); catching it here kills the job instantly instead of after the
+        # model load, and names the variable that is actually wrong.
+        if [ "$TASK" = ade20k ] && [ "${NGPU:-1}" -gt 1 ]; then
+            log "ERROR: TASK=ade20k does not support DDP (NGPU=$NGPU) — use NGPU=1"
+            exit 1
         fi
         ;;
     *) log "ERROR: TASK must be distill|ade20k|in1k, got '$TASK'"; exit 1 ;;

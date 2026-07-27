@@ -116,8 +116,11 @@ class In1kConfig:
     aug_min_scale: float = 0.35
     aug_flip_prob: float = 0.5
     resize_mode: ResizeMode = "center_crop"
-    """Val resize (aspect-preserving center_crop matches canvit_eval's canonical
-    IN1k preprocessing; foveated/square models MUST stay aspect-preserving)."""
+    """Val resize. ``center_crop`` (default) matches canvit_eval's canonical IN1k
+    preprocessing and preserves geometry; ``squish`` keeps the full frame but distorts
+    aspect ratio. Both work for every patcher — see Ade20kConfig.resize_mode for the
+    trade-off (aspect-preserving reads better against human viewing for foveated models,
+    squish for comparability with numbers measured under squish)."""
 
     # Debug / smoke: cap batches per eval (None = full). Train length is `max_steps`.
     limit_val_batches: int | None = None
@@ -130,7 +133,16 @@ class In1kConfig:
     amp: bool = True
     seed: int = 0
     clf_ckpt_dir: Path | None = field(default_factory=_default_clf_ckpt_dir)
-    run_name: str = "in1k-clf"
+
+    # Run identity — see Ade20kConfig for the shared contract. `run_name` used to default
+    # to the constant "in1k-clf" and was read by the harness ONLY (the standalone always
+    # auto-named), so every unnamed harness run showed up under one wandb name while the
+    # standalone silently ignored the field.
+    run_group: str | None = None
+    run_name: str | None = None
+    """None => auto: the descriptive `in1k_{mode}_{model}_{T}t_s{scene}_{ts}` name in the
+    standalone, `in1k_{timestamp}` in the harness."""
+    logs_dir: Path = Path("logs")
     tracker: Literal["comet", "wandb", "none"] = "wandb"
     wandb_project: str | None = field(default_factory=_default_wandb_project)
     wandb_entity: str | None = field(default_factory=_default_wandb_entity)

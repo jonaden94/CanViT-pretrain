@@ -65,10 +65,10 @@ class PolicyTrainConfig:
     glimpse_px: int | None = 128
     resize_mode: ResizeMode = "center_crop"
     """Val/eval image resize (train and eval use the same protocol here). Default
-    ``center_crop`` is aspect-preserving (matches pretraining; REQUIRED for
-    foveated/square models). Pass ``--resize-mode squish`` to reproduce the
-    CanViT-PyTorch-RL qband band / EG-C2F numbers, which were measured on
-    aspect-distorting squish resize."""
+    ``center_crop`` preserves geometry (matches pretraining); pass ``--resize-mode squish``
+    for the CanViT-PyTorch-RL qband band / EG-C2F numbers, which were measured under
+    aspect-distorting squish. Both are valid for every patcher — see
+    ``Ade20kConfig.resize_mode`` for which to prefer when."""
 
     # Action space / net (uniform models: safebox grid; foveated/square: fixation grid)
     scales: tuple[float, ...] = (0.5, 0.25)
