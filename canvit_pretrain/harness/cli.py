@@ -135,6 +135,12 @@ class DistillCmd:
             wandb_entity=self.cfg.wandb_entity, wandb_dir=self.cfg.wandb_dir,
             run_name=run_name, run_dir=run_dir,
             resume=self.opts.resume if self.opts.resume is not None else True,
+            # Break `patcher` down into kpe / embed_head / conditioner (and the
+            # conditioner one level deeper) so foveated runs get the old loop's
+            # `grad_norm/patcher.kpe` + `grad_norm/patcher.conditioner.mlp` series
+            # instead of a single aggregate (train/loop.py 881-883).
+            grad_norm_deep_prefixes=(("patcher", "patcher.conditioner")
+                                     if self.cfg.log_patcher_grad_detail else ()),
             **_common(self.opts),
         )
         return DistillRunTask(self.cfg), settings

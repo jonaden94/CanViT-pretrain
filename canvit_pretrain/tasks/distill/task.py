@@ -214,7 +214,11 @@ class DistillRunTask:
             if train.has_features:
                 init_normalizer_stats_from_tar(
                     train.first_shard_path(), self.scene_norm, self.cls_norm, self._device,
-                    self.cfg.normalizer_max_samples or 512,
+                    # `0` is the documented sentinel for "use the whole shard" (config.py);
+                    # an `or 512` here silently capped it at 512 and gave the harness
+                    # DIFFERENT target statistics than train/loop.py (exp23: 512 vs 4096
+                    # samples off the same shard). Pass it through, like the raw branch.
+                    self.cfg.normalizer_max_samples,
                 )
             else:
                 # Raw (jpg+json) shards carry no teacher features — seed the stats from
