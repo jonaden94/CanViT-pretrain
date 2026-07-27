@@ -207,11 +207,53 @@ class Ade20kRunTask:
         return BoundAde20kTask(seg=model, masks=masks.to(device),
                                canvas_grid=self.canvas_grid(model), glimpse_px=self.cfg.glimpse_px)
 
+    # --- visualization (specialize's segmentation overlay, restored) -------
+    def viz_frame(self, *, model, images, gout, viewpoint, loss):
+        """Branch-0 capture for the segmentation figure: the first ``viz_samples`` canvas
+        features and this glimpse's argmax prediction, both moved to CPU. The engine fires
+        this per glimpse; only t0 and the last one get drawn."""
+        seg = getattr(model, "module", model)
+        n = min(self.cfg.viz_samples, gout.readout.shape[0])
+        hidden = gout.readout[:n].detach().float()
+        with torch.no_grad():
+            pred = seg.head(hidden).argmax(1)
+        return hidden.cpu(), pred.cpu()
+
+    def render_viz(self, viz, *, batch, run_dir, step):
+        """Training-batch segmentation figure -> ``{run_dir}/visualization/seg_train/``."""
+        from canvit_pretrain.ade20k.viz import make_seg_viz_figure
+        from canvit_pretrain.train.viz.disk import save_figure
+
+        if not viz.frames:
+            return
+        hidden, preds = zip(*viz.frames)
+        n = hidden[0].shape[0]
+        images, masks = batch
+        fig = make_seg_viz_figure(hidden=hidden, preds=preds, images=images[:n], masks=masks[:n])
+        save_figure(fig, run_dir, "seg_train", step)
+
+    def _render_val_viz(self, head, hidden, images, masks, run_dir, step):
+        """Same figure for the first val batch -> ``{run_dir}/visualization/seg_val/``.
+        Diagnostic only: a plotting failure must never abort validation."""
+        from canvit_pretrain.ade20k.viz import make_seg_viz_figure
+        from canvit_pretrain.train.viz.disk import save_figure
+
+        try:
+            n = min(self.cfg.viz_samples, images.shape[0])
+            pair = [hidden[0][:n].float(), hidden[-1][:n].float()]
+            preds = [head(h).argmax(1).cpu() for h in pair]
+            fig = make_seg_viz_figure(hidden=[h.cpu() for h in pair], preds=preds,
+                                      images=images[:n].cpu(), masks=masks[:n].cpu())
+            save_figure(fig, run_dir, "seg_val", step)
+        except Exception:
+            log.exception("ade20k val viz failed at step %d (validation continues)", step)
+
     # --- eval & checkpoint -------------------------------------------------
     @torch.no_grad()
     def evaluate(self, *, model, head, val_loader, device, step, tracker=None, run_dir=None):
-        # tracker/run_dir unused: this task returns its scalars for the caller to log
-        # and renders no validation figures (owner: distill viz only).
+        # tracker unused: this task returns its scalars for the caller to log. run_dir is
+        # the sink for the segmentation figure (specialize's `viz_val`), rendered from the
+        # FIRST val batch on cfg.viz_every — the rollout it already runs, no recomputation.
         """mIoU per timestep over the val set (the historical ade20k eval), reusing the
         tested rollout + probe-eval helpers. Returns t0 / final / mean mIoU."""
         from canvit_pretrain.ade20k.data import IGNORE_LABEL, NUM_CLASSES
@@ -224,6 +266,8 @@ class Ade20kRunTask:
         model.head.eval()
         ious = [mIoUAccumulator(NUM_CLASSES, IGNORE_LABEL, device) for _ in range(T)]
         amp = torch.autocast("cuda", dtype=torch.bfloat16) if device.type == "cuda" else nullcontext()
+        do_viz = (run_dir is not None and self.cfg.viz_every
+                  and step % self.cfg.viz_every == 0)
         for vi, vm in val_loader:
             vi, vm = vi.to(device), vm.to(device)
             vps = make_random_viewpoints(vi.shape[0], device, T, min_scale=self.cfg.min_vp_scale,
@@ -234,6 +278,9 @@ class Ade20kRunTask:
                                                canvas_grid=cg, glimpse_px=self.cfg.glimpse_px)
             for t in range(T):
                 eval_probe_on_batch(model.head, hidden[t], vm, ious[t])
+            if do_viz:  # first batch only
+                do_viz = False
+                self._render_val_viz(model.head, hidden, vi, vm, run_dir, step)
         mious = [m.compute() for m in ious]
         if was_training:
             model.head.train()

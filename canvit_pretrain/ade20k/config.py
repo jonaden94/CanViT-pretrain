@@ -102,6 +102,14 @@ class Ade20kConfig:
     # Logging / checkpoints
     log_every: int = 20
     val_every: int = 500
+    viz_every: int = 500
+    """Render the segmentation overlay figure every N steps (0 = off), for the training
+    batch and the first val batch. Specialize's default, restored — but the figures go to
+    ``{run_dir}/visualization/seg_{train,val}/`` on disk instead of the wandb Media tab.
+    Under the harness this needs ``--opts.run-dir`` set (ade20k has no run_group of its
+    own to derive one from); without it there is nowhere to write and viz stays off."""
+    viz_samples: int = 4
+    """Images per figure (one row each)."""
     device: str = "cuda"
     amp: bool = True
     probe_ckpt_dir: Path | None = field(default_factory=_default_probe_ckpt_dir)

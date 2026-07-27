@@ -134,7 +134,17 @@ case "$TASK" in
         # if such a line ever ends up last in a script or function.
         if [ -n "${VAL_INDEX_DIR:-}" ]; then _TASK_ARGS+=(--cfg.val-index-dir "$VAL_INDEX_DIR"); fi
         ;;
-    ade20k|in1k) ;;
+    ade20k|in1k)
+        # These two have no run_group in their configs, so they cannot derive a run dir
+        # the way distill does — without one there is nowhere to put visualization/ and
+        # the segmentation figures silently stay off. Give them the same
+        # logs/GROUP/NAME convention when the launcher exports those (all of them do).
+        # Checkpoints are unaffected: their ckpt_dir is always set (cfg.probe_ckpt_dir /
+        # cfg.clf_ckpt_dir default non-None), so it keeps winning over run_dir.
+        if [ -n "${RUN_GROUP:-}" ] && [ -n "${RUN_NAME:-}" ]; then
+            _TASK_ARGS+=(--opts.run-dir "logs/$RUN_GROUP/$RUN_NAME")
+        fi
+        ;;
     *) log "ERROR: TASK must be distill|ade20k|in1k, got '$TASK'"; exit 1 ;;
 esac
 if [ -n "${WANDB_ENTITY:-}" ]; then _TASK_ARGS+=(--cfg.wandb-entity "$WANDB_ENTITY"); fi

@@ -62,9 +62,16 @@ class HarnessOpts:
     ckpt_every: int = 0
     """Periodic checkpoints every N steps (0 => only the end-of-run checkpoint)."""
     viz_every: int = 0
-    """Render the task's training-batch visualization every N steps (distill only)."""
+    """Render the task's training-batch visualization every N steps. 0 => the task
+    config's own cadence (distill: ``val_every * viz_every_n_vals``; ade20k:
+    ``cfg.viz_every``)."""
     ckpt_dir: Path | None = None
     """Explicit checkpoint dir. Overrides the ``logs_dir/run_group/run_name`` convention."""
+    run_dir: Path | None = None
+    """Root for this run's artifacts — where ``visualization/`` is written (and
+    ``checkpoints/`` when ``--opts.ckpt-dir`` is unset). ade20k/in1k only: they have no
+    run_group to derive one from, so without this there is nowhere to put figures and viz
+    stays off. distill derives its own from ``cfg.logs_dir/run_group/run_name``."""
     resume: bool | None = None
     """Resume from ``find_latest(ckpt_dir)`` if a checkpoint exists. None => the task
     default: True for distill (array jobs must continue across tasks), False for the
@@ -141,7 +148,13 @@ class DistillCmd:
             # instead of a single aggregate (train/loop.py 881-883).
             grad_norm_deep_prefixes=(("patcher", "patcher.conditioner")
                                      if self.cfg.log_patcher_grad_detail else ()),
-            **_common(self.opts),
+            **{**_common(self.opts),
+               # `pca_train`: the old loop rendered the TRAINING-batch PCA whenever it
+               # validated AND on every viz_every_n_vals-th validation (train/loop.py
+               # 680-681) — i.e. exactly `step % (val_every * viz_every_n_vals) == 0`.
+               # Left at 0 the harness wrote `pca_val` only (exp23).
+               "viz_every": self.opts.viz_every
+               or self.cfg.val_every * max(1, self.cfg.viz_every_n_vals)},
         )
         return DistillRunTask(self.cfg), settings
 
@@ -169,10 +182,13 @@ class Ade20kCmd:
             seed=self.opts.seed if self.opts.seed is not None else 0,
             device=self.cfg.device, tracker=_tracker(self.cfg.tracker),
             wandb_project=self.cfg.wandb_project, wandb_entity=self.cfg.wandb_entity,
-            wandb_dir=self.cfg.wandb_dir, run_name="ade20k",
+            wandb_dir=self.cfg.wandb_dir, run_name="ade20k", run_dir=self.opts.run_dir,
             resume=self.opts.resume if self.opts.resume is not None else False,
             **{**_common(self.opts),
-               "ckpt_dir": self.opts.ckpt_dir or self.cfg.probe_ckpt_dir},
+               "ckpt_dir": self.opts.ckpt_dir or self.cfg.probe_ckpt_dir,
+               # specialize's segmentation overlay cadence (cfg.viz_every, default 500).
+               # Needs --opts.run-dir to have a sink; harmless no-op without one.
+               "viz_every": self.opts.viz_every or self.cfg.viz_every},
         )
         return Ade20kRunTask(self.cfg, rl=self.rl), settings
 
@@ -206,6 +222,7 @@ class In1kCmd:
             device=self.cfg.device, tracker=_tracker(self.cfg.tracker),
             wandb_project=self.cfg.wandb_project, wandb_entity=self.cfg.wandb_entity,
             wandb_dir=self.cfg.wandb_dir, run_name=self.cfg.run_name,
+            run_dir=self.opts.run_dir,
             resume=self.opts.resume if self.opts.resume is not None else False,
             **{**_common(self.opts),
                "ckpt_dir": self.opts.ckpt_dir or self.cfg.clf_ckpt_dir},
