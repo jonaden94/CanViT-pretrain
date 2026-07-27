@@ -27,7 +27,7 @@ set -euo pipefail
 # === ESSENTIALS ===
 RUN_GROUP=jon_exp22_full_runs
 RUN_NAME=exp22-uniform16
-ARRAY=0-234%1                                  # 235 remaining of 245 (resume from step 81920; first 10 ran as a --qos=2h test chunk, job 14754609)
+ARRAY=0-227%1                                  # 228 remaining of 245 (resume from step 139264: 10 qos-test + 7 continuation jobs done)
 TIME=0-02:00:00
 MEM=128G
 NGPU=1
@@ -46,7 +46,7 @@ EXTRA_ARGS="--model.patcher-name uniform --webdataset-dir /mnt/lustre-rzg/worksp
 # Pin all pretraining code to exact commits. base_train.sbatch extracts these
 # via offline `git archive` from the local clones (no network/SSH), snapshotting
 # the run against any future `git pull` on the originals while the array is in flight.
-PRETRAIN_COMMIT=66a12c4
+PRETRAIN_COMMIT=fe24aa1  # repin: includes d2f7b50 (foveated validation at the training scale; no-op for uniform)
 PYTORCH_COMMIT=3277048
 FOVI_COMMIT=c399d3b
 

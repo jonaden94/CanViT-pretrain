@@ -33,7 +33,7 @@ set -euo pipefail
 # === ESSENTIALS ===
 RUN_GROUP=jon_exp22_full_runs
 RUN_NAME=exp22-fovi
-ARRAY=0-244%1                                  # 245 jobs x 8192 = 2,007,040 steps (~2M, fresh full run)
+ARRAY=0-224%1                                  # 225 remaining of 245 (resume from step 163840; 20 jobs done)
 TIME=0-02:00:00
 MEM=128G
 NGPU=1
@@ -52,7 +52,7 @@ EXTRA_ARGS="--model.patcher-name foveated --model.foveated-patcher.fov 35 --mode
 # Pin all pretraining code to exact commits. base_train.sbatch extracts these
 # via offline `git archive` from the local clones (no network/SSH), snapshotting
 # the run against any future `git pull` on the originals while the array is in flight.
-PRETRAIN_COMMIT=66a12c4
+PRETRAIN_COMMIT=fe24aa1  # repin: includes d2f7b50 (foveated validation at the training scale; no-op for uniform)
 PYTORCH_COMMIT=3277048
 FOVI_COMMIT=c399d3b
 
