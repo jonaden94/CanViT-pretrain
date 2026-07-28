@@ -91,10 +91,13 @@ for rep in $(seq 1 "$REPS"); do
                 out=$($PY $SRC/CanViT-pretrain/unification_docs/throughput_oldloop.py --once \
                         --steps $((STEPS + WARMUP)) 2>&1 | tail -40 || true) ;;
         esac
-        ms=$(echo "$out" | grep -oE "^MEDIAN_MS [0-9.]+" | awk '{print $2}' | tail -1)
+        # `grep` exits 1 when the arm produced no MEDIAN_MS, and under `set -e` +
+        # pipefail that killed the JOB before the diagnostic branch below could run —
+        # which is exactly how rep 1 of job 15089880 was lost. Never let extraction fail.
+        ms=$(echo "$out" | grep -oE "^MEDIAN_MS [0-9.]+" | awk '{print $2}' | tail -1 || true)
         if [ -z "$ms" ]; then
             echo "  [$arm] FAILED — no MEDIAN_MS. tail:"
-            echo "$out" | tail -12 | sed 's/^/      /'
+            echo "$out" | tail -30 | sed 's/^/      /'
             continue
         fi
         printf "  %-6s %8s ms/step\n" "$arm" "$ms"

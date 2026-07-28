@@ -20,6 +20,7 @@ import re
 import statistics
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -27,8 +28,18 @@ WDS = ("/mnt/lustre-rzg/workspaces/ws/nib00021/u25995-inet21k-feat/"
        "webdataset-imagenet-21k-with-features")
 VAL = "/user/henrich1/u25995/jonathan/datasets/imagenet1k-val"
 
-# tqdm writes "... 123/456 [01:23<02:34,  1.23it/s, loss=...]" (or s/it when slow)
-RATE = re.compile(r"[\[,]\s*(\d+\.?\d*)(it/s|s/it)")
+# We parse tqdm's STEP COUNTER ("123/456 [") and take our own wall-clock stamp on each
+# redraw, rather than reading tqdm's printed rate. tqdm reports a SMOOTHED EMA over the
+# whole run (default smoothing=0.3), which is dominated by the slow torch.compile/warmup
+# steps and does not converge within a short run: it reported 1220 ms/step for a loop
+# whose steady state is ~470-680 ms on the same device. Own-timestamp deltas give the
+# true per-step interval and are directly comparable to how throughput_ab.py times the
+# harness (inter-log-record intervals, warmup discarded).
+# MUST be anchored to the TRAINING bar (train/loop.py:682 sets desc="Training").
+# The teacher weight load renders its own tqdm ("Loading weights: 211/211 [...]"), and an
+# unanchored counter regex reads THAT: it saw 0 -> 211, concluded 211 steps had elapsed,
+# and killed the run seconds in, before training even started.
+COUNT = re.compile(r"Training:.*?(\d+)/\d+\s*\[")
 
 
 def run_once(steps: int, steps_per_job: int, batch: int, tail_frac: float) -> float:
@@ -51,28 +62,56 @@ def run_once(steps: int, steps_per_job: int, batch: int, tail_frac: float) -> fl
     env.setdefault("HF_HOME", "/user/henrich1/u25995/.cache/huggingface")
     env.setdefault("HF_HUB_OFFLINE", "1")
 
-    rates: list[float] = []
+    marks: list[tuple[float, int]] = []
     proc = subprocess.Popen(cmd, cwd=REPO, env=env, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.PIPE, text=True, bufsize=1)
+                            stderr=subprocess.PIPE)
     assert proc.stderr is not None
-    for line in proc.stderr:
-        for chunk in line.replace("\r", "\n").splitlines():
-            m = RATE.search(chunk)
-            if not m:
-                continue
-            v = float(m.group(1))
-            rates.append(1000.0 / v if m.group(2) == "it/s" else v * 1000.0)
-            if len(rates) >= steps:
-                proc.terminate()
+    # RAW chunked reads, split on \r AND \n. `for line in proc.stderr` would block
+    # forever here: tqdm redraws with a CARRIAGE RETURN and emits no newline until the
+    # bar closes, so a newline-delimited iterator yields nothing while the run proceeds.
+    # That is why the `old` arm of job 15089880 produced no reading and failed.
+    fd = proc.stderr.fileno()
+    buf = ""
+    # Keep a rolling tail of the child's stderr. The reader consumes stderr to find the
+    # counter, so without this a crash in the child is INVISIBLE: we would only see
+    # "too few readings" and none of the traceback that explains it.
+    tail_lines: list[str] = []
+    try:
+        while True:
+            data = os.read(fd, 4096)
+            if not data:
                 break
-        else:
-            continue
-        break
-    proc.wait(timeout=120)
-    if not rates:
-        raise RuntimeError("no tqdm rate readings captured — did the run fail?")
-    tail = rates[int(len(rates) * (1 - tail_frac)):]
-    return statistics.median(tail)
+            buf += data.decode("utf-8", "replace")
+            parts = re.split(r"[\r\n]", buf)
+            buf = parts.pop()                 # keep the incomplete tail
+            for chunk in parts:
+                if chunk.strip():
+                    tail_lines.append(chunk)
+            del tail_lines[:-40]
+            now = time.perf_counter()
+            for chunk in parts:
+                m = COUNT.search(chunk)
+                if not m:
+                    continue
+                n = int(m.group(1))
+                if not marks or n > marks[-1][1]:
+                    marks.append((now, n))
+            if marks and marks[-1][1] - marks[0][1] >= steps:
+                break
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    if len(marks) < 5:
+        ctx = "\n      ".join(tail_lines[-30:]) or "(no stderr captured)"
+        raise RuntimeError(
+            f"only {len(marks)} tqdm counter readings captured (rc={proc.returncode}). "
+            f"child stderr tail:\n      {ctx}")
+    per_step = [(t1 - t0) / (n1 - n0) for (t0, n0), (t1, n1) in zip(marks, marks[1:]) if n1 > n0]
+    tail = per_step[int(len(per_step) * (1 - tail_frac)):]   # drop compile/warmup
+    return statistics.median(tail) * 1000.0
 
 
 def main() -> None:
