@@ -44,8 +44,12 @@ COUNT = re.compile(r"Training:.*?(\d+)/\d+\s*\[")
 
 def run_once(steps: int, steps_per_job: int, batch: int, tail_frac: float) -> float:
     """Return median ms/step over the steady-state tail of one old-loop run."""
+    # sys.executable, NOT REPO/.venv-cu126: under commit pinning REPO is the `git
+    # archive` SNAPSHOT, which contains no venv (git does not track it). The parent is
+    # already running the right interpreter, and PYTHONPATH/PYTHONSAFEPATH set by the
+    # sbatch make the child import the pinned sources too.
     cmd = [
-        str(REPO / ".venv-cu126/bin/python"), "-m", "canvit_pretrain.train",
+        sys.executable, "-m", "canvit_pretrain.train",
         "--webdataset-dir", WDS, "--val-dir", VAL,
         "--batch-size-per-gpu", str(batch),
         "--steps-per-job", str(steps_per_job),

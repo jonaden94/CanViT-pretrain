@@ -120,8 +120,15 @@ for a, v in res.items():
         print(f"  {a:6s} mean {statistics.mean(v):8.1f} ms"
               + (f"  sd {statistics.stdev(v):5.1f}" if len(v) > 1 else ""))
 if res["sync"] and res["async"]:
-    s, y = statistics.mean(res["sync"]), statistics.mean(res["async"])
-    print(f"\n  fix (async vs sync):        {(y/s-1)*100:+.1f}%")
+    # PAIRED per-rep ratios. A ratio of means is wrong here: grete:shared shares the
+    # NODE, so a co-tenant inflates whichever reps overlap it (job 15091113 saw
+    # sync 487/489/284/487 on one card). Within a rep the arms run back to back, so
+    # the ratio survives contention that the absolute numbers do not.
+    per = [(y/s-1)*100 for s, y in zip(res["sync"], res["async"])]
+    print(f"\n  fix, paired per rep:        {' '.join(f'{d:+.1f}%' for d in per)}")
+    print(f"  median of those:            {statistics.median(per):+.1f}%")
+    print(f"  quietest rep (min abs ms):  "
+          f"{(min(res['async'])/min(res['sync'])-1)*100:+.1f}%   <- least-contended estimate")
 if res["old"] and res["async"]:
     o, y = statistics.mean(res["old"]), statistics.mean(res["async"])
     print(f"  fixed harness vs OLD LOOP:  {(y/o-1)*100:+.1f}%   <- 0% means fully explained")
