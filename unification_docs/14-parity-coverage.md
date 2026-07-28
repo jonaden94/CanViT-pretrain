@@ -131,6 +131,85 @@ exp23 uniform showed the harness below the old loop at 15/18 eval points past 32
 built to test it; the owner ruled the difference noise and the trainings equally good, so
 it was **not submitted** and the launcher was deleted. Do not re-open this.
 
+## exp26 read-out: the foveated production gate PASSES (2026-07-28)
+
+exp26 finished (harness arm 8/8 tasks = 57,344 steps; old-loop seed-1 arm 7/8). Verdict
+below. **Judge this on TRAIN metrics, not val** — see the eval-scale caveat two sections
+down; train is also the less noisy signal.
+
+Binned `train/total_loss` (16,384-step bins) at step 49,152, five runs of the *same*
+fovi-teacher-init config:
+
+| run | loop | seed | loss | scene_cos_norm |
+|---|---|---|---|---|
+| `exp23-fovi-ti-oldloop` | old | 0 | 0.908 | 0.761 |
+| `exp22-fovi-teacherinit` | old | 0 | 1.036 | 0.726 |
+| `exp26-fovi-ti-oldloop-seed1` | old | 1 | 1.082 | 0.711 |
+| **`exp26-fovi-ti-harness-normfix`** | **harness** | 0 | **1.074** | **0.714** |
+| `exp23-fovi-ti-harness` (pre-normfix) | harness | 0 | 1.121 | 0.700 |
+
+**Spread among the three OLD-LOOP runs = 0.174 loss / 0.050 cos.
+Harness to nearest old-loop run = 0.008 loss / 0.004 cos.** The harness sits inside the
+old loop's own run-to-run envelope with a ~20x margin. Even the pre-normfix harness is
+only 0.038 outside it, which reframes the original "foveated regression" as substantially
+a baseline-choice artifact.
+
+### The methodological trap (this is the reusable lesson)
+
+The verdict rule as originally written compared the harness against `exp23-fovi-ti-oldloop`
+alone — and that run is the **fast outlier** of the three. Any single old-loop run is an
+unusable baseline for this config, because:
+
+- `exp22-fovi-teacherinit` and `exp23-fovi-ti-oldloop` are **the same seed (0)** with
+  identical config, launcher, sbatch, venv and pins, and they still diverge to **-0.129**
+  loss at step 32,768 — then **re-converge monotonically** to -0.039 by step 196,608.
+  Transient trajectory divergence during the 100k-step warmup.
+- Same-seed rerun spread (0.128) is most of the seed-to-seed spread (0.174). The seed is
+  not even the dominant variable; plain rerun nondeterminism is.
+
+Root cause is uncontrolled execution nondeterminism, not configuration. The runs are
+**functionally equivalent** — verified exhaustively: all 151 wandb config keys match
+except `seed` + 4 identity keys; launcher `CFG_*`/`OPT_*` lines diff clean (and exp22's are
+unchanged since its original commit `7ded881`); `WORLD_SIZE=1` in every task;
+`slurm_nhr/base_train.sbatch` has no commits since before 2026-07-08 (it is NOT
+commit-pinned, so this had to be checked); venv `.venv-cu126` / torch `2.11.0+cu126`
+installed Jun 24 and untouched; `canvit_pytorch 3277048` + `fovi c399d3b` on every single
+array task. What is *not* controlled: the A100 40GB/80GB mix (exp22 149/8, exp23 18/7,
+exp26 4/3) under TF32 + cuDNN autotune + `compile=True`.
+
+**Rule going forward: never gate a production A/B on one baseline run.** Two old-loop
+seeds is the minimum; three is what made this readable.
+
+### Coverage asymmetry, stated plainly
+
+The **uniform** pair ran 25 array tasks (~205k steps); the fixed **foveated** harness arm
+ran only 8 (~57k steps). The 57k window does cover where the original bug became
+unmissable (24k-41k), which is why this is a pass rather than "too early" — but it is not
+the same standard as the uniform arm, and should not be described as if it were.
+
+### Caveat: exp22 fovi val curves are broken before their break step
+
+The exp22 arrays were submitted at pretrain pin `66a12c4` and resumed on `fe24aa1`. The
+only substantive commit between them is `d2f7b50` *"validate: run foveated eval viewpoints
+at the training scale (fixed mode)"* — `make_eval_viewpoints_foveated` previously hardcoded
+`scales=1.0`, and this config trains at `--foveated-scale.fixed-scale 2.0`, so the early
+part of every exp22 **fovi** run was validated at a fixation window it never trained on.
+(It is a no-op only when `fixed_scale == 1`, which is not this config.)
+
+`exp22-fovi-teacherinit` jumps **+0.058 in a single eval** at exactly step 139,264 (task 17,
+the pin boundary), and its gap to the same-config exp23 rerun collapses from ~0.080 to
+~0.019 there. Old-pin task counts: `exp22-fovi-teacherinit` 0-16 (break 139,264),
+`exp22-fovi` 20 (~163,840), `exp22-fovi-nocond` 17 (~139,264). Uniform runs are unaffected.
+
+**Training is untouched** — `d2f7b50` modifies only `make_eval_viewpoints_foveated`, the
+`validate()` call site in `loop.py`, and `viz/validate.py` (read the diff, not the commit
+message). So train metrics remain comparable across the pin change, which is exactly why
+the verdict above is built on them.
+
+Operational lesson: a long `%1` array pins per **task**, at task start — so one run can
+straddle a code change. Grep `Pinned canvit_pretrain →` across *all* of a run's logs, not
+just task 0.
+
 ## What is NOT claimed
 
 - The **foveated** rollout is deliberately NOT identical to specialize: specialize's
@@ -139,3 +218,23 @@ it was **not submitted** and the launcher was deleted. Do not re-open this.
   Identity here would mean reproducing a bug.
 - `parity_configs.py` uses synthetic targets and identity denorm, so it does not exercise
   the normalizer. That is `setup_arg_parity.py`'s job, by design.
+
+### Open items as of 2026-07-28 — reproduction is proven, new capability is not
+
+Everything above establishes that the harness **reproduces the old loop**. That is a
+different claim from "the harness is correct", because the unified harness also has
+capabilities the old loop never had. Those rest on unit + smoke tests only:
+
+| item | status |
+|---|---|
+| DDP at production scale | mechanically validated on 2xA100 ([[ddp_validation.md]]); never a real run. Owner deprioritized. |
+| foveated past 57k steps | unmeasured on the fixed harness |
+| `teacher_dim` fix | only fires on a ViT-L teacher; no harness run has used one |
+| ade20k `finetune` mode + `probe_repo` head init | added 2026-07-27, unit-tested, never production-run |
+| joint task+policy on ade20k/in1k | the flagship new capability; 10-step integration smokes only |
+| in1k finetune head-init (`8f780ba`) | exp25 arrays still in flight, not read out |
+
+The first three are reproduction-adjacent and low risk. The last three are new function —
+no parity tool speaks to them, and only runs will close them. In particular **the joint
+policy path is the substrate for all CanViT-RL work**, so the first real RL run doubles as
+its production gate.
