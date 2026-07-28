@@ -34,9 +34,10 @@ class _IdentityNorm:
         return x
 
 
-def _task(*, initialized, reset=False, has_features=True):
+def _task(tmp_path, *, initialized, reset=False, has_features=True, normalizer_shards=4):
     cfg = Config(webdataset_dir="/nonexistent", batch_size_per_gpu=_BS, steps_per_job=64,
-                 canvas_patch_grid_size=_G, reset_normalizer=reset)
+                 canvas_patch_grid_size=_G, reset_normalizer=reset,
+                 normalizer_shards=normalizer_shards)
     t = DistillRunTask(cfg)
     t.scene_norm = SimpleNamespace(initialized=initialized)
     t.cls_norm = SimpleNamespace()
@@ -44,7 +45,14 @@ def _task(*, initialized, reset=False, has_features=True):
     t._model = SimpleNamespace(backbone=SimpleNamespace(patch_size_px=_PATCH))
     loader = object.__new__(WebDatasetTrainLoader)
     loader.samples_per_shard, loader.has_features = 512, has_features
-    loader.shard_files = [__import__("pathlib").Path("shard-000000.tar")]
+    # `normalizer_shard_paths` globs train_dir rather than reading shard_files (the
+    # schedule slice), so the stub needs a real directory of shard-shaped names. 8 of
+    # them: the default is 4 and the last is excluded as partial, so this leaves room
+    # to raise the default without the fixture silently becoming the binding constraint.
+    for i in range(8):
+        (tmp_path / f"shard-{i:06d}.tar").touch()
+    loader.train_dir = tmp_path
+    loader.shard_files = [tmp_path / "shard-000000.tar"]
     return t, loader
 
 
@@ -63,44 +71,57 @@ def _stub_init(monkeypatch, task, loader):
 
 
 # --- which initialiser, and when -------------------------------------------
-def test_feature_shards_use_the_precomputed_initializer(monkeypatch):
-    t, loader = _task(initialized=False, has_features=True)
+def test_feature_shards_use_the_precomputed_initializer(monkeypatch, tmp_path):
+    t, loader = _task(tmp_path, initialized=False, has_features=True)
     seen = _stub_init(monkeypatch, t, loader)
     t.build_loaders(world_size=1, rank=0)
     assert len(seen["tar"]) == 1 and not seen["raw"]
 
 
-def test_raw_shards_use_the_on_the_fly_initializer(monkeypatch):
+def test_raw_shards_use_the_on_the_fly_initializer(monkeypatch, tmp_path):
     """Raw shards have no cls.npy/ptch.npy — calling the precomputed initialiser on them
     would read keys that aren't there."""
-    t, loader = _task(initialized=False, has_features=False)
+    t, loader = _task(tmp_path, initialized=False, has_features=False)
     seen = _stub_init(monkeypatch, t, loader)
     t.build_loaders(world_size=1, rank=0)
     assert len(seen["raw"]) == 1 and not seen["tar"]
     assert seen["raw"][0][1]["image_size"] == _G * _PATCH  # decoded at the scene resolution
 
 
-def test_initialized_normalizer_is_not_reinitialized(monkeypatch):
-    t, loader = _task(initialized=True)
+def test_normalizer_shards_reaches_the_initializer(monkeypatch, tmp_path):
+    """cfg.normalizer_shards must be threaded through, and the selection must be the
+    sorted head of train_dir — NOT loader.shard_files, which is the seed-dependent
+    schedule slice and would make the stats a function of the seed."""
+    t, loader = _task(tmp_path, initialized=False, normalizer_shards=3)
+    seen = _stub_init(monkeypatch, t, loader)
+    t.build_loaders(world_size=1, rank=0)
+    paths = seen["tar"][0][0][0]
+    assert [p.name for p in paths] == [
+        "shard-000000.tar", "shard-000001.tar", "shard-000002.tar"
+    ]
+
+
+def test_initialized_normalizer_is_not_reinitialized(monkeypatch, tmp_path):
+    t, loader = _task(tmp_path, initialized=True)
     seen = _stub_init(monkeypatch, t, loader)
     t.build_loaders(world_size=1, rank=0)
     assert not seen["tar"] and not seen["raw"]
 
 
-def test_reset_normalizer_forces_reinit(monkeypatch):
+def test_reset_normalizer_forces_reinit(monkeypatch, tmp_path):
     """cfg.reset_normalizer must re-init even though the checkpoint carried stats —
     otherwise the flag silently does nothing on resume."""
-    t, loader = _task(initialized=True, reset=True)
+    t, loader = _task(tmp_path, initialized=True, reset=True)
     seen = _stub_init(monkeypatch, t, loader)
     t.build_loaders(world_size=1, rank=0)
     assert len(seen["tar"]) == 1
 
 
 # --- per-batch targets ------------------------------------------------------
-def test_bind_computes_teacher_targets_when_the_batch_has_none(monkeypatch):
+def test_bind_computes_teacher_targets_when_the_batch_has_none(monkeypatch, tmp_path):
     """Raw shards yield (images, None, None, labels); bind must produce the targets
     rather than call .to() on a None."""
-    t, loader = _task(initialized=True, has_features=False)
+    t, loader = _task(tmp_path, initialized=True, has_features=False)
     _stub_init(monkeypatch, t, loader)
     t.scene_norm = t.cls_norm = _IdentityNorm()
     images = torch.randn(_BS, 3, _G * _PATCH, _G * _PATCH)
@@ -144,8 +165,8 @@ def test_checkpoint_model_config_wins_over_cli_defaults():
     assert t3.cfg.model.canvas_update_mode == "convex"
 
 
-def test_bind_uses_precomputed_targets_when_present(monkeypatch):
-    t, loader = _task(initialized=True, has_features=True)
+def test_bind_uses_precomputed_targets_when_present(monkeypatch, tmp_path):
+    t, loader = _task(tmp_path, initialized=True, has_features=True)
     _stub_init(monkeypatch, t, loader)
     t.scene_norm = t.cls_norm = _IdentityNorm()
     patches, cls = torch.randn(_BS, _G * _G, _D), torch.randn(_BS, _D)

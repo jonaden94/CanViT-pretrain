@@ -259,7 +259,8 @@ class DistillRunTask:
         if self.cfg.reset_normalizer or not self.scene_norm.initialized:
             if train.has_features:
                 init_normalizer_stats_from_tar(
-                    train.first_shard_path(), self.scene_norm, self.cls_norm, self._device,
+                    train.normalizer_shard_paths(self.cfg.normalizer_shards),
+                    self.scene_norm, self.cls_norm, self._device,
                     # `0` is the documented sentinel for "use the whole shard" (config.py);
                     # an `or 512` here silently capped it at 512 and gave the harness
                     # DIFFERENT target statistics than train/loop.py (exp23: 512 vs 4096
@@ -271,7 +272,8 @@ class DistillRunTask:
                 # teacher forwards on the fly, like train/loop.py's raw branch.
                 sz = self._scene_size_px()
                 init_normalizer_stats_from_tar_raw(
-                    train.first_shard_path(), self.scene_norm, self.cls_norm,
+                    train.normalizer_shard_paths(self.cfg.normalizer_shards),
+                    self.scene_norm, self.cls_norm,
                     image_size=sz, compute_features=lambda imgs: self._teacher_targets(imgs, sz),
                     device=self._device, max_samples=self.cfg.normalizer_max_samples,
                 )

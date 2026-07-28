@@ -74,7 +74,7 @@ def main() -> None:
         steps_per_job=_STEPS_PER_JOB, image_size=_RES, world_size=1, rank=0, num_workers=6,
     )
     cls_norm, scene_norm = model.standardizers(_G)
-    init_normalizer_stats_from_tar(loader.first_shard_path(), scene_norm, cls_norm, dev, 512)
+    init_normalizer_stats_from_tar([loader.first_shard_path()], scene_norm, cls_norm, dev, 512)
 
     spec = TrainSpec(
         train_backbone=True, train_head=False, task_grad_to_backbone=True,

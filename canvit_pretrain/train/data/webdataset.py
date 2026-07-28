@@ -21,7 +21,7 @@ import io
 import json
 import logging
 import tarfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -218,6 +218,26 @@ class WebDatasetTrainLoader:
     def first_shard_path(self) -> Path:
         return self.shard_files[0]
 
+    def normalizer_shard_paths(self, n_shards: int) -> list[Path]:
+        """The first `n_shards` shards of the sorted training set, for normalizer stats.
+
+        Deliberately NOT `self.shard_files[:n]`: that list comes from
+        `compute_schedule_slice`, so it depends on `seed`, `job_index` and `rank` — two
+        runs of the same config with different seeds seeded their standardizers from
+        different shards. Pinning to the sorted head makes the stats a property of the
+        DATASET, identical across every run and rank.
+
+        Excludes the last shard, which `compute_schedule_slice` treats as partial.
+        """
+        assert n_shards >= 1, f"normalizer_shards must be >= 1, got {n_shards}"
+        train_shards = sorted(self.train_dir.glob("shard-*.tar"))[:-1]
+        assert len(train_shards) >= n_shards, (
+            f"cfg.normalizer_shards={n_shards} but {self.train_dir} has only "
+            f"{len(train_shards)} full shards (the last is excluded as partial). "
+            f"Lower normalizer_shards, or point at a larger dataset."
+        )
+        return train_shards[:n_shards]
+
     def _ensure_iter(self) -> None:
         if self._iter is not None:
             return
@@ -259,66 +279,132 @@ class WebDatasetTrainLoader:
         return images, raw_patches, raw_cls, labels
 
 
+class _MomentAcc:
+    """Streaming per-(token, channel) mean/var, so pooling shards costs O(1) memory.
+
+    `set_stats` reduces over dim 0, so the obvious "concatenate every shard and call it
+    once" needs n_shards * samples_per_shard * n_tokens * embed_dim floats resident —
+    4 shards at 4096x1024x768 is ~51 GB. Accumulating sum/sum-of-squares instead keeps
+    two [n_tokens, embed_dim] buffers regardless of how many shards are pooled.
+
+    float64 because the sum of ~10^4 squared feature values loses meaningful precision
+    in float32, and this runs once per training run.
+    """
+
+    def __init__(self, device: torch.device) -> None:
+        self.n = 0
+        self._sum: Tensor | None = None
+        self._sumsq: Tensor | None = None
+        self._device = device
+
+    def add(self, batch: Tensor) -> None:
+        """batch: [B, tokens, D]."""
+        x = batch.to(self._device, torch.float64)
+        if self._sum is None:
+            self._sum = torch.zeros(x.shape[1:], dtype=torch.float64, device=self._device)
+            self._sumsq = torch.zeros_like(self._sum)
+        self._sum += x.sum(dim=0)
+        self._sumsq += (x * x).sum(dim=0)
+        self.n += x.shape[0]
+
+    def moments(self) -> tuple[Tensor, Tensor]:
+        assert self.n > 0 and self._sum is not None and self._sumsq is not None
+        mean = self._sum / self.n
+        # Matches set_stats' unbiased=False.
+        var = (self._sumsq / self.n - mean * mean).clamp_min(0)
+        return mean, var
+
+
+def _freeze_stats(norm, acc: _MomentAcc) -> None:
+    """Freeze `norm`'s buffers to the accumulated moments, via the public `set_stats`.
+
+    `set_stats(data)` computes `data.mean(dim=0)` and `data.var(dim=0, unbiased=False)`,
+    so we hand it a two-row surrogate carrying exactly the moments we streamed: for
+    ``x = [m + s, m - s]``  ->  ``mean = m`` and ``var = ((+s)^2 + (-s)^2)/2 = s^2``.
+    The frozen buffers are therefore the same values the full tensor would have produced,
+    without ever materialising it. (Using the public API keeps this working if the
+    standardizer ever gains validation or extra state in `set_stats`.)
+    """
+    mean, var = acc.moments()
+    std = var.sqrt()
+    norm.set_stats(torch.stack([mean + std, mean - std]).float())
+
+
 def init_normalizer_stats_from_tar(
-    shard_path: Path,
+    shard_paths: Sequence[Path],
     scene_norm: PatchStandardizer,
     cls_norm: CLSStandardizer,
     device: torch.device,
     max_samples: int,
 ) -> None:
-    """Initialise standardizer stats from a single WebDataset tar shard.
+    """Initialise standardizer stats from one or more WebDataset tar shards.
 
-    Streams `cls.npy` and `ptch.npy` entries directly from the tar via the
-    stdlib `tarfile` module, accumulates up to `max_samples` samples, then
-    calls `set_stats` exactly like `init_normalizer_stats_from_shard`.
+    Streams `cls.npy` and `ptch.npy` entries directly from each tar via the stdlib
+    `tarfile` module and accumulates moments across ALL of `shard_paths`, taking up to
+    `max_samples` samples PER SHARD (0 = the whole shard). Pass
+    `loader.normalizer_shard_paths(cfg.normalizer_shards)` to get a seed-independent
+    selection.
     """
-    log.info(f"Computing normalizer stats from tar: {shard_path.name}")
+    log.info("Computing normalizer stats from %d tar(s): %s",
+             len(shard_paths), ", ".join(p.name for p in shard_paths))
+    assert len(shard_paths) > 0, "shard_paths must not be empty"
 
-    cls_buf: list[np.ndarray] = []
-    ptch_buf: list[np.ndarray] = []
-    keys_seen: dict[str, dict[str, np.ndarray]] = {}
+    scene_acc, cls_acc = _MomentAcc(device), _MomentAcc(device)
+    chunk = 256  # amortise the host->device copy without holding a whole shard
 
-    with tarfile.open(shard_path, "r") as tf:
-        for member in tf:
-            if not member.isfile():
-                continue
-            name = member.name
-            # entries are <key>.cls.npy and <key>.ptch.npy
-            if name.endswith(".cls.npy"):
-                key, kind = name[: -len(".cls.npy")], "cls"
-            elif name.endswith(".ptch.npy"):
-                key, kind = name[: -len(".ptch.npy")], "ptch"
-            else:
-                continue
-            f = tf.extractfile(member)
-            assert f is not None
-            arr = np.load(io.BytesIO(f.read()))
-            keys_seen.setdefault(key, {})[kind] = arr
+    for shard_path in shard_paths:
+        cls_buf: list[np.ndarray] = []
+        ptch_buf: list[np.ndarray] = []
+        keys_seen: dict[str, dict[str, np.ndarray]] = {}
+        n_shard = 0
 
-            entry = keys_seen[key]
-            if "cls" in entry and "ptch" in entry:
-                cls_buf.append(entry["cls"])
-                ptch_buf.append(entry["ptch"])
-                del keys_seen[key]
-                if max_samples > 0 and len(cls_buf) >= max_samples:
-                    break
+        def flush() -> None:
+            if not cls_buf:
+                return
+            cls_acc.add(torch.from_numpy(np.stack(cls_buf)).unsqueeze(1))  # [B, 1, D]
+            scene_acc.add(torch.from_numpy(np.stack(ptch_buf)))            # [B, T, D]
+            cls_buf.clear()
+            ptch_buf.clear()
 
-    n = len(cls_buf)
-    assert n > 0, f"No cls/ptch pairs found in {shard_path}"
-    log.info(f"  Collected {n} samples from {shard_path.name}")
+        with tarfile.open(shard_path, "r") as tf:
+            for member in tf:
+                if not member.isfile():
+                    continue
+                name = member.name
+                # entries are <key>.cls.npy and <key>.ptch.npy
+                if name.endswith(".cls.npy"):
+                    key, kind = name[: -len(".cls.npy")], "cls"
+                elif name.endswith(".ptch.npy"):
+                    key, kind = name[: -len(".ptch.npy")], "ptch"
+                else:
+                    continue
+                f = tf.extractfile(member)
+                assert f is not None
+                arr = np.load(io.BytesIO(f.read()))
+                keys_seen.setdefault(key, {})[kind] = arr
 
-    cls = torch.from_numpy(np.stack(cls_buf)).float().to(device)  # [n, D]
-    patches = torch.from_numpy(np.stack(ptch_buf)).float().to(device)  # [n, T, D]
+                entry = keys_seen[key]
+                if "cls" in entry and "ptch" in entry:
+                    cls_buf.append(entry["cls"])
+                    ptch_buf.append(entry["ptch"])
+                    del keys_seen[key]
+                    n_shard += 1
+                    if len(cls_buf) >= chunk:
+                        flush()
+                    if max_samples > 0 and n_shard >= max_samples:
+                        break
+        flush()
+        assert n_shard > 0, f"No cls/ptch pairs found in {shard_path}"
+        log.info(f"  Collected {n_shard} samples from {shard_path.name}")
 
-    scene_norm.set_stats(patches)
-    cls_norm.set_stats(cls.unsqueeze(1))
-    log.info(f"  Scene/CLS stats from {n} samples")
-    del cls, patches
+    _freeze_stats(scene_norm, scene_acc)
+    _freeze_stats(cls_norm, cls_acc)
+    log.info(f"  Scene/CLS stats from {scene_acc.n} samples across {len(shard_paths)} shard(s)")
     torch.cuda.empty_cache()
 
 
 def init_normalizer_stats_from_tar_raw(
-    shard_path: Path,
+    shard_paths: Sequence[Path],
     scene_norm: PatchStandardizer,
     cls_norm: CLSStandardizer,
     *,
@@ -328,52 +414,56 @@ def init_normalizer_stats_from_tar_raw(
     max_samples: int,
     sub_batch: int = 64,
 ) -> None:
-    """Initialise standardizer stats from a RAW (no-feature) WebDataset shard.
+    """Initialise standardizer stats from one or more RAW (no-feature) WebDataset shards.
 
-    Streams ``jpg`` images from the tar, decodes them to ``image_size``, and
-    computes teacher features on the fly via ``compute_features`` (which returns
-    an object exposing ``.patches`` [B, T, D] and ``.cls`` [B, D]). Teacher
-    forwards run in sub-batches of ``sub_batch``; features are accumulated on the
-    CPU to bound GPU memory, then ``set_stats`` is called exactly like the
-    precomputed-feature path.
+    Streams ``jpg`` images from each tar, decodes them to ``image_size``, and computes
+    teacher features on the fly via ``compute_features`` (which returns an object exposing
+    ``.patches`` [B, T, D] and ``.cls`` [B, D]). Teacher forwards run in sub-batches of
+    ``sub_batch`` and are folded straight into the moment accumulators, so neither the
+    images nor the features are held for the whole run.
 
-    Only reached for a fresh (step-0) run on raw shards — resumed runs load
-    standardizer stats from the checkpoint and skip init entirely.
+    ``max_samples`` is PER SHARD, and unlike the precomputed path its 0-sentinel is capped
+    (teacher forwards for a full shard are expensive), so pooling n shards costs n teacher
+    passes over ``cap`` images each.
+
+    Only reached for a fresh (step-0) run on raw shards — resumed runs load standardizer
+    stats from the checkpoint and skip init entirely.
     """
+    assert len(shard_paths) > 0, "shard_paths must not be empty"
     # max_samples<=0 means "use the whole shard"; computing teacher features for
     # a full 4096-image shard is many forwards — cap to keep init quick/bounded.
     cap = max_samples if max_samples > 0 else 2048
     log.info(
-        f"Computing normalizer stats from RAW tar (teacher on the fly): "
-        f"{shard_path.name}, up to {cap} samples"
+        "Computing normalizer stats from %d RAW tar(s) (teacher on the fly): %s, "
+        "up to %d samples each",
+        len(shard_paths), ", ".join(p.name for p in shard_paths), cap,
     )
 
-    imgs: list[Tensor] = []
-    with tarfile.open(shard_path, "r") as tf:
-        for member in tf:
-            if not member.isfile() or not member.name.endswith(".jpg"):
-                continue
-            f = tf.extractfile(member)
-            assert f is not None
-            imgs.append(_decode_jpg(f.read(), image_size))
-            if len(imgs) >= cap:
-                break
+    scene_acc, cls_acc = _MomentAcc(device), _MomentAcc(device)
 
-    n = len(imgs)
-    assert n > 0, f"No jpg images found in {shard_path}"
+    for shard_path in shard_paths:
+        imgs: list[Tensor] = []
+        with tarfile.open(shard_path, "r") as tf:
+            for member in tf:
+                if not member.isfile() or not member.name.endswith(".jpg"):
+                    continue
+                f = tf.extractfile(member)
+                assert f is not None
+                imgs.append(_decode_jpg(f.read(), image_size))
+                if len(imgs) >= cap:
+                    break
 
-    cls_buf: list[Tensor] = []
-    ptch_buf: list[Tensor] = []
-    for i in range(0, n, sub_batch):
-        batch = torch.stack(imgs[i : i + sub_batch]).to(device, non_blocking=True)
-        feats = compute_features(batch)
-        cls_buf.append(feats.cls.detach().float().cpu())       # type: ignore[attr-defined]
-        ptch_buf.append(feats.patches.detach().float().cpu())  # type: ignore[attr-defined]
+        n = len(imgs)
+        assert n > 0, f"No jpg images found in {shard_path}"
+        for i in range(0, n, sub_batch):
+            batch = torch.stack(imgs[i : i + sub_batch]).to(device, non_blocking=True)
+            feats = compute_features(batch)
+            cls_acc.add(feats.cls.detach().float().unsqueeze(1))    # type: ignore[attr-defined]
+            scene_acc.add(feats.patches.detach().float())           # type: ignore[attr-defined]
+        log.info(f"  Collected {n} samples from {shard_path.name}")
 
-    cls = torch.cat(cls_buf).to(device)       # [n, D]
-    patches = torch.cat(ptch_buf).to(device)  # [n, T, D]
-    scene_norm.set_stats(patches)
-    cls_norm.set_stats(cls.unsqueeze(1))
-    log.info(f"  Scene/CLS stats from {n} samples (computed live)")
-    del cls, patches
+    _freeze_stats(scene_norm, scene_acc)
+    _freeze_stats(cls_norm, cls_acc)
+    log.info(f"  Scene/CLS stats from {scene_acc.n} samples across {len(shard_paths)} "
+             f"shard(s) (computed live)")
     torch.cuda.empty_cache()

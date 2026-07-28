@@ -45,14 +45,14 @@ def test_the_check_actually_catches_a_divergent_arg(tmp_path):
     old.write_text(
         "def go(cfg, scene_norm, cls_norm, train_loader):\n"
         "    init_normalizer_stats_from_tar(\n"
-        "        train_loader.first_shard_path(), scene_norm, cls_norm,\n"
+        "        train_loader.normalizer_shard_paths(cfg.normalizer_shards), scene_norm, cls_norm,\n"
         "        cfg.device, cfg.normalizer_max_samples)\n"
     )
     new.write_text(
         "class T:\n"
         "    def go(self, train):\n"
         "        init_normalizer_stats_from_tar(\n"
-        "            train.first_shard_path(), self.scene_norm, self.cls_norm,\n"
+        "            train.normalizer_shard_paths(self.cfg.normalizer_shards), self.scene_norm, self.cls_norm,\n"
         "            self._device, self.cfg.normalizer_max_samples or 512)\n"
     )
     problems = m.compare(old, new)

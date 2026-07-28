@@ -60,7 +60,7 @@ ALIASES = {
     "self._device": "cfg.device",
     "self.scene_norm": "scene_norm",
     "self.cls_norm": "cls_norm",
-    "train.first_shard_path()": "train_loader.first_shard_path()",
+    "train.normalizer_shard_paths": "train_loader.normalizer_shard_paths",
     "sz": "scene_size",
     "self._teacher_targets": "compute_raw_targets",
     # DDP identity: the old loop asks the ddp module, the harness receives it as a

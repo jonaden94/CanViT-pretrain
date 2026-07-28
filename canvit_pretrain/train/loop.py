@@ -559,14 +559,14 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 assert isinstance(train_loader, WebDatasetTrainLoader)
                 if train_loader.has_features:
                     init_normalizer_stats_from_tar(
-                        train_loader.first_shard_path(),
+                        train_loader.normalizer_shard_paths(cfg.normalizer_shards),
                         scene_norm, cls_norm,
                         cfg.device, cfg.normalizer_max_samples,
                     )
                 else:
                     # Raw shards: compute teacher features on the fly to seed stats.
                     init_normalizer_stats_from_tar_raw(
-                        train_loader.first_shard_path(),
+                        train_loader.normalizer_shard_paths(cfg.normalizer_shards),
                         scene_norm, cls_norm,
                         image_size=scene_size,
                         compute_features=lambda imgs: compute_raw_targets(imgs, scene_size),
@@ -578,6 +578,15 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 shards_dir = cfg.feature_base_dir / cfg.teacher_name / str(cfg.scene_resolution) / "shards"
                 shard_files = sorted(shards_dir.glob("*.pt"))
                 assert shard_files, f"No shards in {shards_dir}"
+                # Legacy .pt-shard path: single shard only. Say so rather than silently
+                # ignoring the knob — but do NOT assert: normalizer_shards defaults to 4,
+                # so an assert would break this path for anyone who configured nothing.
+                if cfg.normalizer_shards != 1:
+                    log.warning(
+                        "normalizer_shards=%d is a webdataset-only feature; the "
+                        "feature_base_dir shard path pools ONE shard. Using 1.",
+                        cfg.normalizer_shards,
+                    )
                 init_normalizer_stats_from_shard(shard_files[0], scene_norm, cls_norm, cfg.device, cfg.normalizer_max_samples)
         ddp.barrier()
         if ddp.is_dist():

@@ -54,7 +54,7 @@ def main() -> None:
         steps_per_job=_STEPS_PER_JOB, image_size=_RES, world_size=1, rank=0, num_workers=4,
     )
     cls_norm, scene_norm = model.standardizers(_G)
-    init_normalizer_stats_from_tar(loader.first_shard_path(), scene_norm, cls_norm, dev, 512)
+    init_normalizer_stats_from_tar([loader.first_shard_path()], scene_norm, cls_norm, dev, 512)
     print("normalizer initialized from first shard")
 
     selector = RandomSelector(is_foveated=False, foveated_scale=FoveatedScaleConfig(), min_viewpoint_scale=0.05)

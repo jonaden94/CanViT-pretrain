@@ -186,7 +186,31 @@ class Config:
     reset_normalizer: bool = False
     """Re-warmup normalizer stats when loading any checkpoint."""
     normalizer_max_samples: int = 0
-    """Max samples from shard for normalizer stats. 0 = use all samples."""
+    """Max samples per shard for normalizer stats. 0 = use all samples in the shard."""
+    normalizer_shards: int = 4
+    """How many shards to pool for the normalizer stats (see `normalizer_shard_paths`).
+
+    The standardizers are POSITION-AWARE (`set_stats` reduces over dim 0 only), so each
+    of the grid_size^2 x embed_dim means/vars is estimated from `normalizer_shards *
+    samples_per_shard` samples — NOT from that many times the token count. At one shard
+    (4096 samples) the sampling error is ~1.3% of a std on the mean and ~1.4% on the std;
+    it falls as 1/sqrt(n_shards), so the default 4 puts it near 0.65%. Measured 2026-07-28
+    on the in21k with-features set: shard-to-shard variation is 1.05x pure split-half
+    sampling noise, i.e. shards are effectively i.i.d., so pooling more shards behaves
+    exactly like drawing more samples. Cost is ~40 s per shard, paid ONCE per run (array
+    task 0; later tasks load the frozen buffers from the checkpoint and skip init).
+
+    The shards are the first n of the SORTED shard list, so every run pools the same
+    shards regardless of `seed`, `job_index` or `rank` — unlike the historical
+    `first_shard_path()`, which took the head of the seed-dependent schedule slice and so
+    made the target statistics a function of the seed.
+
+    Changing this value changes the target normalization and therefore the absolute loss
+    scale: `*_cos_norm` and the losses are NOT comparable across different values. Metrics
+    that are: `*_cos_raw` (destandardized back into true teacher-feature space) and
+    `val/in1k_tts_top1_t*` (downstream probe accuracy, normalizer-independent).
+
+    Runs before 2026-07-28 all used 1 shard, chosen by seed."""
     # Training
     num_workers: int = 4
     scene_resolution: int = 512
