@@ -501,6 +501,8 @@ def test_distill_scene_size_uses_the_teacher_patch_size(monkeypatch):
     identical while both are /16, wrong for a mixed pair."""
     from types import SimpleNamespace
 
+    import torch
+
     from canvit_pretrain.tasks.distill.task import DistillRunTask
     from canvit_pretrain.train.config import Config
 
@@ -510,3 +512,38 @@ def test_distill_scene_size_uses_the_teacher_patch_size(monkeypatch):
     task._teacher = SimpleNamespace(model=SimpleNamespace(config=SimpleNamespace(patch_size=16)))
     # 32 * 16 (teacher), not 32 * 8 (student)
     assert task._scene_size_px() == 512
+
+
+def test_teacher_init_is_not_broken_by_compile(monkeypatch):
+    """REGRESSION: `compile_teacher` rewraps teacher.model, renaming every parameter with
+    an `_orig_mod.` prefix. Backbone teacher-init looks weights up BY NAME, so compiling
+    BEFORE `load_student_backbone` made `init_backbone_from_teacher=True` + `compile=True`
+    — the production config — crash at startup with "Teacher has fewer than 12 transformer
+    layers". train/loop.py orders it load(284) -> init(291) -> compile(303); the task must
+    too, hence `_load_teacher` (never compiles) vs `_teacher_for_forward` (compiles)."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from canvit_pretrain.tasks.distill.task import DistillRunTask
+    from canvit_pretrain.train.config import Config
+
+    compiled: list[str] = []
+    monkeypatch.setattr("canvit_pretrain.train.model.compile_teacher",
+                        lambda t: compiled.append("compiled"))
+    fake = SimpleNamespace(embed_dim=768, model=SimpleNamespace(config=SimpleNamespace(patch_size=16)))
+    monkeypatch.setattr("canvit_pretrain.train.model.load_teacher", lambda cfg: fake)
+
+    t = DistillRunTask(Config(webdataset_dir="/nonexistent", compile=True,
+                              init_backbone_from_teacher=True))
+    dev = torch.device("cpu")
+
+    # what build_model / _scene_size_px use: must hand back an UNCOMPILED teacher
+    assert t._load_teacher(dev) is fake
+    assert compiled == [], "teacher must NOT be compiled on the structural path"
+
+    # forward path: compiles, once
+    assert t._teacher_for_forward(dev) is fake
+    assert compiled == ["compiled"]
+    t._teacher_for_forward(dev)
+    assert compiled == ["compiled"], "compile must happen at most once"

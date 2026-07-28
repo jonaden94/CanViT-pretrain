@@ -111,6 +111,7 @@ class DistillRunTask:
         self.scene_norm = None
         self.cls_norm = None
         self._teacher = None
+        self._teacher_compiled = False
         self._probe = None
         # WebDataset shard schedule (see resume_start_step): index of the job this
         # process runs, and the saved schedule inputs it must still agree with.
@@ -218,19 +219,40 @@ class DistillRunTask:
         return self._load_teacher(device).embed_dim
 
     def _load_teacher(self, device):
+        """The teacher, NEVER compiled. See `_teacher_for_forward` for why that matters."""
         if self._teacher is None:
-            from canvit_pretrain.train.model import compile_teacher, load_teacher
+            from canvit_pretrain.train.model import load_teacher
             self._teacher = load_teacher(self.cfg)
-            # train/loop.py:303 compiles the teacher alongside the model under
-            # cfg.compile ("Compiling teacher and model"); the harness compiled only the
-            # student, so every harness run drove an EAGER teacher for validation targets
-            # and for raw-shard on-the-fly training targets. Measured impact on the
-            # targets is negligible (1-cos 1.2e-07, unification_docs/teacher_compile_delta.py)
-            # — this is for speed and for not leaving a gratuitous asymmetry behind.
-            if self.cfg.compile:
-                log.info("Compiling teacher (torch.compile), matching train/loop.py")
-                compile_teacher(self._teacher)
         return self._teacher
+
+    def _teacher_for_forward(self, device):
+        """The teacher for FORWARD passes, compiled under cfg.compile.
+
+        Compilation is deliberately NOT done in `_load_teacher`, and the split is load-
+        bearing: `compile_teacher` does `teacher.model = torch.compile(teacher.model)`,
+        and the wrapper renames every parameter with an `_orig_mod.` prefix. Backbone
+        teacher-init looks weights up BY NAME (`load_dinov3_weights_into_backbone` checks
+        `model.layer.{n-1}.norm1.weight`), so initialising from a compiled teacher raises
+        "Teacher has fewer than 12 transformer layers" — a hard startup crash for the
+        production config (`init_backbone_from_teacher=True` + `compile=True`).
+        train/loop.py gets this right by ordering: load_teacher(284) ->
+        load_student_backbone(291) -> compile_teacher(303). Anything that reads the
+        teacher STRUCTURALLY (weights, `.config`, `.embed_dim`) must use `_load_teacher`.
+
+        train/loop.py:303 compiles the teacher alongside the model under cfg.compile
+        ("Compiling teacher and model"); the harness used to compile only the student, so
+        every harness run drove an EAGER teacher for validation targets and for raw-shard
+        on-the-fly training targets. Measured impact on the targets is negligible
+        (1-cos 1.2e-07, unification_docs/teacher_compile_delta.py) — this is for speed and
+        for not leaving a gratuitous asymmetry behind.
+        """
+        teacher = self._load_teacher(device)
+        if self.cfg.compile and not self._teacher_compiled:
+            from canvit_pretrain.train.model import compile_teacher
+            log.info("Compiling teacher (torch.compile), matching train/loop.py")
+            compile_teacher(teacher)
+            self._teacher_compiled = True
+        return teacher
 
     def canvas_grid(self, model):
         return self.cfg.canvas_patch_grid_size
@@ -301,7 +323,7 @@ class DistillRunTask:
         """Frozen-teacher features for RAW shards (the on-the-fly path). Resizes to the
         scene resolution first, exactly like train/loop.py's ``compute_raw_targets``."""
         from canvit_pytorch.backbone.vit import NormFeatures
-        teacher = self._load_teacher(self._device)
+        teacher = self._teacher_for_forward(self._device)
         amp = (torch.autocast("cuda", dtype=torch.bfloat16)
                if self._device.type == "cuda" else nullcontext())
         with torch.no_grad(), amp:
@@ -473,18 +495,26 @@ class DistillRunTask:
         }
 
     def batch_images(self, batch, device):
-        return batch[0].to(device, non_blocking=True)
+        return batch[0].to(device, non_blocking=self.cfg.non_blocking_transfer)
 
     def bind(self, batch, device, *, model, head):
         images, raw_patches, raw_cls, _ = batch
+        nb = self.cfg.non_blocking_transfer  # train/loop.py:631 honours this; we must too
         if raw_patches is None:
             # RAW (no-feature) shards: the loader supplies images only, so the frozen
             # teacher produces this batch's targets here (train/loop.py load_train_batch).
-            feats = self._teacher_targets(images.to(device, non_blocking=True), self._scene_size_px())
+            feats = self._teacher_targets(images.to(device, non_blocking=nb), self._scene_size_px())
             raw_patches, raw_cls = feats.patches, feats.cls
         else:
-            raw_patches = raw_patches.to(device, dtype=torch.float32)
-            raw_cls = raw_cls.to(device, dtype=torch.float32)
+            # non_blocking is NOT cosmetic here. Without it, `.to(device, dtype=float32)`
+            # from a pinned fp16 tensor casts on the HOST first: measured 191 ms of
+            # CPU-thread stall per step for the [B,1024,768] targets (vs 0.2 ms with it),
+            # and the unpinned intermediate cannot overlap either. That stall is hidden
+            # only to the extent the GPU still has queued work, which is why it cost ~10%
+            # end-to-end and inflated step-time variance 5x (the hiding depends on the
+            # stochastic rollout length). train/loop.py:655-656 always had this.
+            raw_patches = raw_patches.to(device, dtype=torch.float32, non_blocking=nb)
+            raw_cls = raw_cls.to(device, dtype=torch.float32, non_blocking=nb)
         return BoundDistillTask(
             DistillTask(
                 scene_target=self.scene_norm(raw_patches),
@@ -516,7 +546,7 @@ class DistillRunTask:
         from canvit_pretrain.train.tracker import make_tracker
         from canvit_pretrain.train.viz import validate
         try:
-            teacher = self._load_teacher(device)
+            teacher = self._teacher_for_forward(device)  # validation targets: compiled
             amp = torch.autocast("cuda", dtype=torch.bfloat16) if device.type == "cuda" else nullcontext()
 
             def compute_raw_targets(images, sz):
