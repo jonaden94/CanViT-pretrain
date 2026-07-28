@@ -509,3 +509,42 @@ GPU campaign.
   schedules with different total-step semantics need care.
 - **Deferred GPU gate.** The framework can be *built and unit-correct* without GPU, but is
   not *proven* until the stage-4 runs. Accepted.
+
+## BPTT: the one rule that must not be broken (2026-07-28)
+
+**A FROZEN backbone ALWAYS takes `bptt.mode="none"`.** Never pair `train_backbone=False`
+with `"full"` or `"chunked"`.
+
+`bptt` moves the **backbone and nothing else**. The head reads the canvas state at t and
+never feeds back into it, so no head parameter influences a later timestep and there is no
+cross-timestep path to propagate. Measured (`harness/tests/test_bptt_chunking.py`): head
+gradients are **bit-identical** between `none` and `full` — whether the backbone is frozen
+*or* trainable. Building a graph over a frozen backbone therefore changes no number and
+holds activations for the whole rollout.
+
+Three layers enforce this, so it should be impossible to get wrong:
+
+1. `harness.spec.fixed_horizon_bptt` — the single mapping used by every task's
+   `default_spec` AND by `cli.resolve_spec`. `frozen=True` returns `none`, ignoring
+   `chunk_size`. The config path cannot express the mistake.
+2. `check_spec` emits a warning if a spec pairs a frozen backbone with a graph regime.
+   That catches hand-built `TrainSpec`s, the only remaining route. Warning, not error —
+   it is wasteful, not incorrect.
+3. `BpttSpec`'s docstring states the rule where anyone configuring it will read it.
+
+**Not covered:** `train_policy` runs. The policy's cross-timestep path has not been
+measured, so `check_spec` deliberately does not warn there. Measure before assuming.
+
+### Chunk length is otherwise free
+
+`horizon` need NOT be divisible by `chunk_size`. `run_rollout` flushes the trailing
+partial chunk, and every chunk normalises by `n_glimpses` rather than by its own length,
+so the accumulated gradient is identical however the rollout is split. 7 glimpses at chunk
+3 runs `[0,1,2][3,4,5][6]`. Prime horizons are fine — verified for 6@3, 6@2, 7@3, 7@2,
+5@4, 11@3. `chunk_size >= horizon` collapses to `full`.
+
+| task | length | regimes reachable from a launcher |
+|---|---|---|
+| distill | stochastic (`CFG_CHUNK_SIZE`, `CFG_CONTINUE_PROB`) | `chunked` |
+| ade20k / in1k, `mode=frozen` | fixed `n_timesteps` | `none` (forced) |
+| ade20k / in1k, `mode=finetune` | fixed `n_timesteps` | `full` (default) or `chunked` via `CFG_BPTT_CHUNK_SIZE` |

@@ -34,7 +34,8 @@ import tyro
 
 from canvit_pretrain.ade20k.config import Ade20kConfig
 from canvit_pretrain.harness.run import RunSettings, run
-from canvit_pretrain.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TrainSpec
+from canvit_pretrain.harness.spec import (
+    BpttSpec, GroupOptim, ScheduleSpec, TrainSpec, fixed_horizon_bptt)
 from canvit_pretrain.in1k.config import In1kConfig
 from canvit_pretrain.train.config import Config, JointPolicyConfig
 
@@ -265,8 +266,11 @@ def resolve_spec(task: Any, preset: str, lr: float, wd: float) -> TrainSpec:
     if preset == "default":
         return task.default_spec()
     horizon = getattr(task.cfg, "n_timesteps", 10)
-    bptt_none = BpttSpec(mode="none", horizon=horizon)
-    bptt_full = BpttSpec(mode="full", horizon=horizon)
+    # Same rule the tasks' own default_spec uses, so `--preset finetune` and
+    # `--cfg.mode finetune` agree on the regime instead of quietly differing.
+    chunk = getattr(task.cfg, "bptt_chunk_size", 0)
+    bptt_none = fixed_horizon_bptt(frozen=True, horizon=horizon)
+    bptt_full = fixed_horizon_bptt(frozen=False, horizon=horizon, chunk_size=chunk)
     if preset == "probe":
         spec = TrainSpec.probe(bptt=bptt_none)
     elif preset == "finetune":

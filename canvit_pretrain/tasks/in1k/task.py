@@ -116,7 +116,8 @@ class In1kRunTask:
         over ``total_steps`` (the run length; = ``cfg.max_steps`` for a full run) — the same
         step-based recipe the standalone now uses.
         """
-        from canvit_pretrain.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TrainSpec
+        from canvit_pretrain.harness.spec import (
+            GroupOptim, ScheduleSpec, TrainSpec, fixed_horizon_bptt)
         T = self.cfg.n_timesteps
         if self.total_steps is None:
             sched = ScheduleSpec(kind="warmup_constant", warmup_steps=0)
@@ -127,10 +128,12 @@ class In1kRunTask:
                                  start_lr=self.cfg.peak_lr * self.cfg.warmup_lr_ratio)
         head_go = GroupOptim(lr=self.cfg.peak_lr, weight_decay=self.cfg.weight_decay,
                              schedule=sched)
-        if self.cfg.mode == "finetune":
-            return TrainSpec.finetune(bptt=BpttSpec(mode="full", horizon=T),
-                                      optim={"backbone": head_go, "head": head_go})
-        return TrainSpec.probe(bptt=BpttSpec(mode="none", horizon=T), optim={"head": head_go})
+        finetune = self.cfg.mode == "finetune"
+        bptt = fixed_horizon_bptt(frozen=not finetune, horizon=T,
+                                  chunk_size=self.cfg.bptt_chunk_size)
+        if finetune:
+            return TrainSpec.finetune(bptt=bptt, optim={"backbone": head_go, "head": head_go})
+        return TrainSpec.probe(bptt=bptt, optim={"head": head_go})
 
     def build_model(self, device, prior_model_config=None):
         # prior_model_config is unused: the backbone arch comes from the HF repo the head

@@ -118,20 +118,22 @@ class Ade20kRunTask:
         with the same max_steps / warmup_steps / warmup_lr_ratio). Structured like
         ``tasks/in1k/task.py::default_spec`` so both downstream tasks map ``cfg.mode``
         onto a spec identically."""
-        from canvit_pretrain.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TrainSpec
+        from canvit_pretrain.harness.spec import (
+            GroupOptim, ScheduleSpec, TrainSpec, fixed_horizon_bptt)
         go = GroupOptim(
             lr=self.cfg.peak_lr, weight_decay=self.cfg.weight_decay,
             schedule=ScheduleSpec(kind="warmup_onecycle", warmup_steps=self.cfg.warmup_steps,
                                   total_steps=self.cfg.max_steps,
                                   warmup_lr_ratio=self.cfg.warmup_lr_ratio))
-        if self.cfg.mode == "finetune":
-            # bptt=full: the task loss must reach the trunk, so the rollout keeps one
-            # graph over all glimpses (probe mode runs the backbone under no_grad).
-            return TrainSpec.finetune(bptt=BpttSpec(mode="full", horizon=self.cfg.n_timesteps),
-                                      optim={"backbone": go, "head": go})
-        return TrainSpec.probe(
-            bptt=BpttSpec(mode="none", horizon=self.cfg.n_timesteps), optim={"head": go},
-        )
+        # The task loss must reach the trunk in finetune, so the rollout keeps a graph
+        # (one over all glimpses, or one per cfg.bptt_chunk_size); probe mode runs the
+        # backbone under no_grad, where bptt is a no-op — see fixed_horizon_bptt.
+        finetune = self.cfg.mode == "finetune"
+        bptt = fixed_horizon_bptt(frozen=not finetune, horizon=self.cfg.n_timesteps,
+                                  chunk_size=self.cfg.bptt_chunk_size)
+        if finetune:
+            return TrainSpec.finetune(bptt=bptt, optim={"backbone": go, "head": go})
+        return TrainSpec.probe(bptt=bptt, optim={"head": go})
 
     # --- construction ------------------------------------------------------
     def build_model(self, device, prior_model_config=None):

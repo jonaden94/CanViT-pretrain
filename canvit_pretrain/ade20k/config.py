@@ -67,6 +67,20 @@ class Ade20kConfig:
 
     # Rollout
     n_timesteps: int = 10
+    bptt_chunk_size: int = 0
+    """Truncated-BPTT chunk size for ``mode="finetune"``. 0 (default) = one graph over the
+    whole rollout; n>0 = backward + detach every n glimpses, capping activation memory at
+    n steps instead of ``n_timesteps``.
+
+    ``n_timesteps`` need NOT be divisible by this: the rollout flushes the trailing
+    partial chunk and every chunk normalises by ``n_timesteps``, so e.g. 7 glimpses at
+    chunk 3 runs [0,1,2][3,4,5][6] with the same total gradient. ``n >= n_timesteps``
+    collapses to one graph.
+
+    IGNORED in ``mode="frozen"``: the backbone runs under ``no_grad`` there, and ``bptt``
+    only ever moves the backbone — head gradients are bit-identical between ``none`` and
+    ``full`` (measured 2026-07-28). Chunking a frozen backbone costs memory and changes
+    nothing. See ``harness.spec.fixed_horizon_bptt``."""
     glimpse_px: int | None = None
     """Uniform-patcher glimpse crop size in px. None = derive from the model's
     glimpse_grid_size × patch size/stride (the canvit_eval rule). Ignored for

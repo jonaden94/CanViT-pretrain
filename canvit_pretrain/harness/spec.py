@@ -95,6 +95,22 @@ class BpttSpec:
 
     Exactly one of ``horizon`` / ``continue_prob`` defines the length. ``continue_prob``
     is only meaningful with ``mode='chunked'``.
+
+    **RULE — a FROZEN backbone ALWAYS takes ``mode='none'``.** Do not pair
+    ``train_backbone=False`` with ``'full'`` or ``'chunked'``: ``bptt`` moves the BACKBONE
+    and nothing else. The head reads the canvas state at t and never feeds back into it,
+    so no head parameter influences a later timestep and there is no cross-timestep path
+    to propagate. Measured 2026-07-28 (``tests/test_bptt_chunking.py``): head gradients
+    are BIT-IDENTICAL between ``'none'`` and ``'full'`` whether the backbone is frozen or
+    trainable. Keeping a graph over a frozen backbone changes no number and holds
+    activations for the entire rollout. ``check_spec`` warns if you do it; the config path
+    (``fixed_horizon_bptt``, used by every task's ``default_spec`` AND by ``resolve_spec``)
+    enforces it for you, so this can only be reached by hand-building a ``TrainSpec``.
+
+    Chunk length is otherwise free: ``horizon`` need NOT be divisible by ``chunk_size``.
+    ``run_rollout`` flushes the trailing partial chunk and every chunk normalises by
+    ``n_glimpses``, so 7 glimpses at chunk 3 runs ``[0,1,2][3,4,5][6]`` and accumulates the
+    same total gradient as one graph. Prime horizons are fine.
     """
 
     mode: Literal["none", "full", "chunked"] = "chunked"
@@ -121,6 +137,35 @@ class BpttSpec:
     @property
     def stochastic(self) -> bool:
         return self.continue_prob is not None
+
+
+def fixed_horizon_bptt(*, frozen: bool, horizon: int, chunk_size: int = 0) -> BpttSpec:
+    """The BPTT regime for a fixed-length task (ade20k / in1k), from cfg.
+
+    Shared so the two downstream tasks cannot drift apart — their `default_spec`s are
+    deliberately structured the same way.
+
+    * ``frozen`` (probe mode) -> ``none``, ALWAYS, ignoring ``chunk_size``. With the
+      backbone under ``no_grad`` there is nothing for a graph to accumulate into: the
+      head reads the canvas state at t and never feeds back into it, so no head
+      parameter influences a later timestep. Measured 2026-07-28: head gradients are
+      BIT-IDENTICAL between ``none`` and ``full`` whether the backbone is frozen or
+      trainable — ``bptt`` moves the backbone only. Chunking a frozen backbone would
+      cost memory and change nothing.
+    * ``chunk_size <= 0`` (default) -> ``full``: one graph over the whole rollout.
+    * ``chunk_size >= horizon`` -> ``full`` too; chunking at or beyond the horizon is
+      the same computation, so collapse it rather than pretend otherwise.
+    * otherwise -> ``chunked``: backward + detach every ``chunk_size`` glimpses.
+      ``horizon`` need NOT be divisible by ``chunk_size`` — ``run_rollout`` flushes the
+      trailing partial chunk, and every chunk normalises by ``n_glimpses``, so a prime
+      horizon just ends with a short chunk (7 @ 3 -> [0,1,2][3,4,5][6]).
+    """
+    assert horizon > 0, f"horizon must be > 0, got {horizon}"
+    if frozen:
+        return BpttSpec(mode="none", horizon=horizon)
+    if chunk_size <= 0 or chunk_size >= horizon:
+        return BpttSpec(mode="full", horizon=horizon)
+    return BpttSpec(mode="chunked", chunk_size=chunk_size, horizon=horizon)
 
 
 @dataclass(frozen=True)
@@ -326,6 +371,18 @@ def check_spec(spec: TrainSpec, caps: TaskCaps, *, is_dist: bool = False) -> Spe
         w.append("train_head is True but task_weight == 0 — the head receives no gradient")
     if spec.train_backbone and not (spec.task_grad_to_backbone or spec.policy_grad_to_backbone):
         w.append("train_backbone is True but no loss is routed to the backbone — it won't learn")
+    if not spec.train_backbone and spec.bptt.mode != "none" and not spec.train_policy:
+        # THE RULE: frozen backbone => bptt MUST be 'none'. Warned rather than errored
+        # only because it is wasteful, not wrong. See BpttSpec / fixed_horizon_bptt.
+        w.append(
+            f"bptt.mode={spec.bptt.mode!r} with a FROZEN backbone (train_backbone=False) — "
+            "use mode='none'. bptt only ever moves the backbone: the head reads the canvas "
+            "state at t and never feeds back into it, so no head parameter influences a "
+            "later timestep. Measured 2026-07-28: head gradients are BIT-IDENTICAL between "
+            "'none' and 'full'. Keeping a graph here buys nothing and costs activation "
+            "memory for the whole rollout. (Not warned for train_policy runs — the "
+            "policy's cross-timestep path has not been measured.)"
+        )
     if (spec.train_backbone and not spec.task_grad_to_backbone
             and spec.policy_grad_to_backbone and not spec.task_loss_active):
         w.append("backbone is trained solely by the policy loss (no task signal) — unusual but valid")
