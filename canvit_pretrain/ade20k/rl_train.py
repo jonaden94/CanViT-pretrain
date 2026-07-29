@@ -88,6 +88,19 @@ class PolicyTrainConfig:
 
     # Objective (flat knobs; `objective` selects the sum-type member)
     objective: Literal["qreg", "pg"] = "qreg"
+    select_bn_eval: bool = False
+    """Choose the training glimpse under EVAL-mode BN (running stats) instead of the
+    train-mode forward that also carries the loss.
+
+    ``False`` is "BN mode (a)" (p3-notes, a recorded user decision): the in-graph rollout
+    merged selection into the training forward, so ``frontend.bn`` selects on BATCH stats.
+    ``True`` is mode (b) — what CanViT-PyTorch-RL does, which it got for free from its
+    separate detached collect pass.
+
+    Not cosmetic: measured 2026-07-29, the two modes disagree on **45.7%** of chosen
+    glimpses. Costs one extra scorer forward per depth (5.7M params, small next to a
+    backbone glimpse forward). Under investigation as the cause of the residual ~0.15
+    mIoU gap to the qband band at matched CE — see `unification_docs/17`."""
     prime_on_policy: float = 0.5
     dueling: bool = True
     entropy_bonus: float = 0.01
@@ -214,14 +227,26 @@ def rollout_and_loss(
     for _ in range(cfg.train_horizon):
         with torch.no_grad():
             f = encoder(st, logits=logits).float()
-        flat = net(f).reshape(B, -1)  # train-mode forward: selects AND trains (mode (a))
+        flat = net(f).reshape(B, -1)  # train-mode forward: carries the graph, feeds the loss
+        if cfg.select_bn_eval:
+            # Mode (b): the glimpse is CHOSEN under EVAL-mode BN (running stats), as the
+            # RL repo does. It got that for free from its separate detached collect pass;
+            # the in-graph rollout merged selection into the training forward, forcing
+            # batch stats (p3-notes "BN mode (a)"). Measured 2026-07-29: the two modes
+            # disagree on 45.7% of chosen glimpses, so this is not a cosmetic difference.
+            with torch.no_grad():
+                net.eval()
+                sel = net(f).reshape(B, -1)
+                net.train()
+        else:
+            sel = flat.detach()
         if isinstance(obj, PG):
-            probs = F.softmax(flat.detach().float(), dim=1)
+            probs = F.softmax(sel.float(), dim=1)
             idx = torch.multinomial(probs, 1, generator=gen).squeeze(1)
             if critic is not None:
                 crit_rows.append(critic(f).reshape(B, -1))
         else:
-            greedy = flat.detach().argmax(dim=1)
+            greedy = sel.argmax(dim=1)
             rand_idx = torch.randint(A, (B,), device=device, generator=gen)
             on_pol = torch.rand(B, device=device, generator=gen) < obj.prime_on_policy
             idx = torch.where(on_pol, greedy, rand_idx)
