@@ -1,0 +1,57 @@
+#!/bin/bash
+# exp27 ARM A (CONTROL) — the gate-validated RL trainer, at TODAY's code.
+#
+# `python -m canvit_pretrain.ade20k.rl_train`, canonical QReg recipe, seed 0.
+# This is the reference the harness arm is judged against. Two reasons it exists
+# rather than just citing the published band:
+#
+#   1. The band (0.6853 +- 0.0007 mean t1-t4 val CE, 8 seeds) was measured on the
+#      RL repo's machine. A LOCAL reference removes the hardware/stack question
+#      from the comparison entirely.
+#   2. The 2026-07-23 P3 gate runs (15025279 / 15025337) predate commit 845e401,
+#      which added per-timestep mIoU to the deploy eval — so they logged CE only.
+#      The harness arm reports BOTH, and this arm must too or half the comparison
+#      has no counterpart.
+#
+# Expected: mean(t1-t4) val CE inside 0.6845 ... 0.6865 (the band's own per-seed
+# spread). ~65 min on one A100 (job 15025279 took 01:04:46).
+#
+# NOTHING IS SUBMITTED by writing this file.
+set -euo pipefail
+
+# === ESSENTIALS ===
+RUN_GROUP=exp27
+RUN_NAME=exp27-policy-oldloop-s0
+TIME=0-03:00:00
+MEM=64G
+
+export ADE20K_ROOT=/user/henrich1/u25995/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016
+export WANDB_PROJECT=exp27
+
+# Pin the reference implementation. cea4dee is this session's commit; rl_train.py
+# itself is untouched by it (the session changed the HARNESS path), so this pins
+# "today's code" without the arm depending on any of it.
+PRETRAIN_COMMIT=cea4dee
+PYTORCH_COMMIT=017ce9b
+FOVI_COMMIT=c399d3b
+
+cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-pretrain
+mkdir -p "logs/$RUN_GROUP"
+export PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
+
+# Recipe = rl_train's own defaults (lr 2e-4, wd 1e-2, betas .9/.95, clip 1.0,
+# 640k glimpse-forwards -> 8000 steps, warmup 12.5% then hold, batch 16,
+# train_horizon 4, score_res 128, NO augmentation, c64 probe). Only the run
+# identity and seed are passed; everything else must come from the defaults, or
+# this stops being the reference.
+sbatch \
+    --job-name="$RUN_NAME" \
+    --time=$TIME \
+    --mem=$MEM \
+    --output="logs/$RUN_GROUP/${RUN_NAME}-%j.log" \
+    --error="logs/$RUN_GROUP/${RUN_NAME}-%j.log" \
+    --export=ALL \
+    slurm_nhr/ade20k/train_policy.sbatch \
+    --run-name "$RUN_NAME" \
+    --seed 0 \
+    --wandb-project exp27
