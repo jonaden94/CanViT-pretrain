@@ -34,19 +34,31 @@ from canvit_pretrain.ade20k.rl_train import (
 )
 
 p = argparse.ArgumentParser()
-p.add_argument("run_dir", type=Path)
+p.add_argument("run_dir", type=Path, nargs="?", help="local run dir (omit with --policy-repo)")
+p.add_argument("--policy-repo", default="",
+               help="evaluate a PUBLISHED ViewpointScorer from the Hub instead of a local "
+                    "ckpt, e.g. canvit/qpolicy-ade20k-c64-t5-qband-2026-07-04-s2. Their "
+                    "per-seed numbers are in CanViT-PyTorch-RL/docs/qband_results.md, so "
+                    "this measures OUR eval against THEIR reference weights.")
 p.add_argument("--ckpt", default="best.pt")
 p.add_argument("--limit", type=int, default=0, help="0 = full val split")
 p.add_argument("--batch-size", type=int, default=16)
+p.add_argument("--no-amp", action="store_true", help="fp32 control (isolates bf16)")
 args = p.parse_args()
+assert bool(args.run_dir) != bool(args.policy_repo), "pass exactly one of run_dir / --policy-repo"
 
 device = torch.device("cuda")
-cfg = PolicyTrainConfig(run_name="measure")          # canonical recipe defaults
-assert cfg.resize_mode == "squish", cfg.resize_mode  # the band's protocol
+cfg = PolicyTrainConfig(run_name="measure", amp=not args.no_amp)  # canonical recipe defaults
+assert cfg.resize_mode == "squish", cfg.resize_mode               # the band's protocol
 
-ck = torch.load(args.run_dir / args.ckpt, map_location="cpu", weights_only=False)
-print(f"ckpt step={ck['step']}  logged val_ce={ck['val_ce']:.4f}  "
-      f"logged miou_per_t={[round(m, 4) for m in ck.get('val_miou_per_t', [])]}")
+ck = None
+if args.run_dir:
+    ck = torch.load(args.run_dir / args.ckpt, map_location="cpu", weights_only=False)
+    print(f"LOCAL ckpt step={ck['step']}  logged val_ce={ck['val_ce']:.4f}  "
+          f"logged miou_per_t={[round(m, 4) for m in ck.get('val_miou_per_t', [])]}")
+else:
+    print(f"PUBLISHED policy: {args.policy_repo}")
+print(f"amp={cfg.amp}")
 
 seg = CanViTForSemanticSegmentation.from_pretrained_with_probe(
     pretrained_repo=cfg.model_repo, probe_repo=cfg.resolved_probe_repo).to(device)
@@ -55,12 +67,15 @@ seg.eval().requires_grad_(False)
 vp_flat, n_scale = build_action_table(seg, cfg)
 vp_flat = vp_flat.to(device)
 fixation = consumes_full_image(seg)
-net = ViewpointScorer(
-    canvas_dim=seg.canvas_dim, width=cfg.width, n_scale=n_scale,
-    scales=(1.0,) if fixation else cfg.scales, centers_per_axis=cfg.centers_per_axis,
-    block_layers=cfg.block_layers, groups=cfg.feature_groups, dueling=True,
-    action_space="fixation" if fixation else "safebox").to(device)
-net.load_state_dict(ck["net_state"])
+if args.policy_repo:
+    net = ViewpointScorer.from_pretrained(args.policy_repo).to(device)
+else:
+    net = ViewpointScorer(
+        canvas_dim=seg.canvas_dim, width=cfg.width, n_scale=n_scale,
+        scales=(1.0,) if fixation else cfg.scales, centers_per_axis=cfg.centers_per_axis,
+        block_layers=cfg.block_layers, groups=cfg.feature_groups, dueling=True,
+        action_space="fixation" if fixation else "safebox").to(device)
+    net.load_state_dict(ck["net_state"])
 net.eval()
 encoder = StateEncoder(seg, canvas_grid=cfg.canvas_grid, feature_groups=cfg.feature_groups)
 
@@ -73,9 +88,12 @@ loader = torch.utils.data.DataLoader(ds, args.batch_size, num_workers=4, pin_mem
 print(f"val images: {len(ds)}  batch={args.batch_size}  T=t1..t{cfg.train_horizon}")
 
 H = cfg.train_horizon
-acc_pretrain = [mIoUAccumulator(NUM_CLASSES, IGNORE_LABEL, device) for _ in range(H)]
-acc_paper = [mIoUAccumulator(NUM_CLASSES, IGNORE_LABEL, device) for _ in range(H)]
-ce_total, count = torch.zeros(H, dtype=torch.float64), 0
+# index 0 = t0 (the FULL-SCENE state) then t1..tH. t0 is POLICY-INDEPENDENT, so it is the
+# reference any other implementation's t0 must match — a t0 mismatch is a setup bug, not a
+# policy difference (this is how the harness's frozen-head BN drift was caught).
+acc_pretrain = [mIoUAccumulator(NUM_CLASSES, IGNORE_LABEL, device) for _ in range(H + 1)]
+acc_paper = [mIoUAccumulator(NUM_CLASSES, IGNORE_LABEL, device) for _ in range(H + 1)]
+ce_total, count = torch.zeros(H + 1, dtype=torch.float64), 0
 
 amp_ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=cfg.amp)
 t_start = time.time()
@@ -86,6 +104,14 @@ with torch.no_grad():
             st = full_scene_state(seg, images, canvas_grid=cfg.canvas_grid, glimpse_px=cfg.glimpse_px)
             logits = head_logits(seg, st.canvas, canvas_grid=cfg.canvas_grid)
         encoder.reset()
+
+        def _score(slot: int, lg, mk):
+            acc_pretrain[slot].update(upsample_preds(lg.argmax(1), mk.shape[1], mk.shape[2]), mk)
+            up = F.interpolate(lg.float(), size=mk.shape[-2:], mode="bilinear", align_corners=False)
+            acc_paper[slot].update(up.argmax(1), mk)
+            ce_total[slot] += ce_from_logits(lg, mk, score_res=None).double().sum().cpu()
+
+        _score(0, logits, masks)  # t0: full-scene, policy-independent
         for t in range(H):
             f = encoder(st, logits=logits).float()
             idx = net(f).reshape(images.shape[0], -1).argmax(dim=1)
@@ -93,14 +119,7 @@ with torch.no_grad():
                 st = advance_state(seg, images, st, vp_flat[idx], cfg.glimpse_px)
                 logits = head_logits(seg, st.canvas, canvas_grid=cfg.canvas_grid)
 
-            # ---- the ONLY difference: order of argmax vs upsample ----
-            acc_pretrain[t].update(
-                upsample_preds(logits.argmax(1), masks.shape[1], masks.shape[2]), masks)
-            up = F.interpolate(logits.float(), size=masks.shape[-2:],
-                               mode="bilinear", align_corners=False)
-            acc_paper[t].update(up.argmax(1), masks)
-
-            ce_total[t] += ce_from_logits(logits, masks, score_res=None).double().sum().cpu()
+            _score(t + 1, logits, masks)
         count += images.shape[0]
         if bi % 20 == 0:
             print(f"  batch {bi}/{len(loader)}  ({time.time() - t_start:.0f}s)", flush=True)
@@ -111,9 +130,12 @@ ce = (ce_total / count).tolist()
 
 print(f"\nimages={count}  wall={time.time() - t_start:.0f}s")
 print(f"{'t':>3} {'CE':>9} {'mIoU pretrain':>15} {'mIoU paper':>12} {'delta':>8}")
-for t in range(H):
-    print(f"t{t + 1:<2} {ce[t]:9.4f} {mi_pre[t] * 100:15.2f} {mi_pap[t] * 100:12.2f} "
+for t in range(H + 1):
+    tag = "t0*" if t == 0 else f"t{t}"
+    print(f"{tag:<3} {ce[t]:9.4f} {mi_pre[t] * 100:15.2f} {mi_pap[t] * 100:12.2f} "
           f"{(mi_pap[t] - mi_pre[t]) * 100:+8.2f}")
-print(f"\nmean(t1..t{H}) CE = {sum(ce) / H:.4f}   (band 0.6853 +- 0.0007)")
+print("t0* = full-scene, POLICY-INDEPENDENT: any other implementation must match it exactly")
+print(f"\nmean(t1..t{H}) CE = {sum(ce[1:]) / H:.4f}   "
+      f"(band re-measured under our eval: 0.6855 +- 0.0007)")
 print(f"mIoU t{H}: pretrain {mi_pre[-1] * 100:.2f}  paper {mi_pap[-1] * 100:.2f}  "
-      f"(band {44.97:.2f} +- 0.10)")
+      f"(band re-measured: 44.94 +- 0.09)")

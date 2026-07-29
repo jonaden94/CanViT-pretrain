@@ -122,6 +122,46 @@ the metric (eval-mode BN, dataset-level mIoU, per-image CE mean).
 
 ---
 
+## A2. OPEN (2026-07-29): the harness's t0 does not match, and t0 is POLICY-INDEPENDENT
+
+**Use t0 as the first check on any policy implementation.** It is the full-scene anchor —
+same frozen backbone, same probe, no policy involved — so every implementation must produce
+the same number. The reference, measured with `measure_miou_order.py`:
+
+```
+t0:  CE 0.7651    mIoU 39.57   (paper Table 4 says 39.6 for c64 — match)
+```
+
+The harness reports **t0 mIoU 39.03, CE 0.7886** — off by −0.54 mIoU / +0.024 CE. It is
+reproducible locally, identical at step 0 (so not BN drift), and identical under both
+`--cfg.eval-policy policy` and `--cfg.eval-policy full` (so not the selector).
+
+This is how the frozen-head BN bug was caught (t0 was 38.50 vs 38.75 across seeds, and a
+policy-independent quantity cannot be seed-dependent). Fixing that moved t0 to 39.03 but
+did **not** close it, so at least one more difference remains.
+
+### Eliminated, by direct measurement — do not re-check these
+
+| candidate | verdict |
+|---|---|
+| t0 forward code path (`full_scene_state`+`head_logits` vs `_policy_rollout`+`eval_probe_on_batch`) | **bit-identical**: max\|Δlogits\| = 0.000000, 100% argmax agreement, same canvas |
+| the selector's FULL branch | t0 identical via the open-loop `full` generator (0.39030 both) |
+| `glimpse_px` None vs 128 | equivalent — `derive_glimpse_px` computes (8−1)·16+16 = 128 for None |
+| `NUM_CLASSES` / `IGNORE_LABEL` | both paths import them from `canvit_pretrain.ade20k.data` |
+| val loader / transforms | same `make_val_transforms(512,"squish")`, same `ADE20kDataset`, no shuffle/drop_last |
+| eval batch size (16 vs 32) | t0 = 39.57 / 39.58 — not batch-size dependent, so head BN is genuinely frozen |
+| config | wandb config confirms resize_mode=squish, scene_size 512, canvas_grid 64, n_timesteps 5, augment False, probe loaded ("Initialising head from published probe … mode=frozen") |
+| mIoU reduction | pin includes `68b635f`, so both use the paper order |
+
+### Next step
+
+Static reading is exhausted. Dump the harness's t0 logits for a FIXED val batch from inside
+`Ade20kRunTask.evaluate` and diff against `measure_miou_order.py`'s t0 logits for the same
+batch. Predictions are provably identical on a hand-built batch, so the divergence is in
+what reaches the model — bisect the batch tensors (image and mask) before the logits.
+
+---
+
 ## B. DEFERRED: unify the eval ROLLOUT (the "layer 2" unification)
 
 The `eval_policy` work unified **which viewpoints** validation takes. It did NOT unify
