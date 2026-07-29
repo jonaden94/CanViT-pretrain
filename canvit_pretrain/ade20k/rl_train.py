@@ -47,7 +47,7 @@ from canvit_pretrain.train.tracker import make_tracker
 
 from .config import ResizeMode, _default_ade20k_root, _default_wandb_dir, _default_wandb_entity, _default_wandb_project
 from .data import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset, make_val_transforms
-from .metrics import mIoUAccumulator, upsample_preds
+from .metrics import mIoUAccumulator, preds_from_logits
 from .rollout import consumes_full_image, derive_glimpse_px
 
 log = logging.getLogger(__name__)
@@ -295,7 +295,7 @@ def evaluate(
                 st = advance_state(seg, images, st, vp_flat[idx], cfg.glimpse_px)
                 logits = head_logits(seg, st.canvas, canvas_grid=cfg.canvas_grid)
             ces.append(ce_from_logits(logits, masks, score_res=None))
-            ious[t].update(upsample_preds(logits.argmax(1), masks.shape[1], masks.shape[2]), masks)
+            ious[t].update(preds_from_logits(logits, masks.shape[1], masks.shape[2]), masks)
         total += torch.stack(ces).mean(dim=0).sum().item()
         count += images.shape[0]
     net.train()

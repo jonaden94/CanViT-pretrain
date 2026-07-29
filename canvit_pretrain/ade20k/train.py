@@ -26,7 +26,7 @@ from canvit_pretrain.train.tracker import make_tracker
 from ..harness.eval_viewpoints import open_loop_viewpoints, resolve
 from .config import Ade20kConfig
 from .data import IGNORE_LABEL, NUM_CLASSES, make_ade20k_loaders, make_amp_ctx, make_optimizer_and_scheduler
-from .metrics import ProbeState, ce_loss, eval_probe_on_batch, mIoUAccumulator, upsample_preds
+from .metrics import ProbeState, ce_loss, eval_probe_on_batch, mIoUAccumulator, preds_from_logits
 from .rollout import consumes_full_image, make_random_viewpoints, rollout_canvas_hidden
 
 log = logging.getLogger(__name__)
@@ -225,8 +225,8 @@ def train(cfg: Ade20kConfig) -> None:
 
         with torch.no_grad():
             for t, logits in enumerate(logits_list):
-                preds_up = upsample_preds(logits.detach().argmax(1), masks.shape[1], masks.shape[2])
-                train_iou[t].update(preds_up, masks)
+                train_iou[t].update(
+                    preds_from_logits(logits.detach(), masks.shape[1], masks.shape[2]), masks)
 
         step += 1
         pbar.update(1)
