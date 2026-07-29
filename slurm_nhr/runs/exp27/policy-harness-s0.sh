@@ -13,7 +13,7 @@
 #
 # CONFIG MAPPING — rl_train -> harness (unification_docs/15 SS A). Everything below
 # is a deliberate match; anything NOT listed is already identical by default
-# (model_repo, scene_size 512, batch_size 16, mode=frozen, resize_mode=center_crop,
+# (model_repo, scene_size 512, batch_size 16, mode=frozen,
 # and the whole JointPolicyConfig: qreg, scales (0.5,0.25), centers_per_axis 16,
 # width 128, block_layers 3, prime_on_policy 0.5, dueling, lr 2e-4, wd 1e-2,
 # betas (0.9,0.95), warmup_frac 0.125, target_momentum 0.997).
@@ -73,10 +73,10 @@ CFG_NUM_WORKERS=4
 EXTRA_ARGS="--preset policy_only --cfg.no-augment"
 # =================
 
-# cea4dee = this session: shared eval-viewpoint knob (so a policy run is validated
-# by DEPLOYING the policy instead of on random glimpses) + the recipe knobs
-# (betas, LR ramp, augment, probe head in frozen mode).
-PRETRAIN_COMMIT=cea4dee
+# cea4dee: shared eval-viewpoint knob (so a policy run is validated by DEPLOYING the
+# policy instead of on random glimpses) + the recipe knobs (betas, LR ramp, augment,
+# probe head in frozen mode). 4db7c3f: the squish protocol fix above.
+PRETRAIN_COMMIT=4db7c3f
 PYTORCH_COMMIT=017ce9b
 FOVI_COMMIT=c399d3b
 

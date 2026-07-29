@@ -29,10 +29,10 @@ MEM=64G
 export ADE20K_ROOT=/user/henrich1/u25995/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016
 export WANDB_PROJECT=exp27
 
-# Pin the reference implementation. cea4dee is this session's commit; rl_train.py
-# itself is untouched by it (the session changed the HARNESS path), so this pins
-# "today's code" without the arm depending on any of it.
-PRETRAIN_COMMIT=cea4dee
+# Pin the reference implementation. 4db7c3f restores rl_train's resize_mode default
+# to squish, so THIS ARM DOES DEPEND ON IT — do not roll the pin back to cea4dee or
+# earlier, where the default was center_crop and the run is not band-comparable.
+PRETRAIN_COMMIT=4db7c3f
 PYTORCH_COMMIT=017ce9b
 FOVI_COMMIT=c399d3b
 
