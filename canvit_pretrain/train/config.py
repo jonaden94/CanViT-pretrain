@@ -69,6 +69,15 @@ class JointPolicyConfig:
     ONLY the scorer (backbone/head shaped purely by the distill loss). False couples
     them: the policy loss also reshapes the backbone ('glimpse-plannable' features),
     more ambitious and more memory (backbone activations enter the policy graph)."""
+    select_bn_eval: bool = False
+    """Pick the glimpse with a separate EVAL-mode forward of the scorer ("BN mode (b)",
+    the default in `ade20k/rl_train.py`). The scorer's one BatchNorm makes train-mode
+    selection normalize on batch statistics where the RL reference uses running stats:
+    45.7% of chosen glimpses differ, and mode (a) measured 0.19 mIoU t4 worse at matched
+    CE (exp27 arm A vs arm C). ~9% step time.
+
+    False by default so the `run_rollout` parity digest is untouched — flipping this
+    default is a separate decision from making it available."""
     keep_random_branch: bool = False
     """False (default): every branch is a policy branch (all t>=1 glimpses are the
     policy's grid picks; the distill loss trains on exactly those states). True:
@@ -77,7 +86,14 @@ class JointPolicyConfig:
     coverage — needs n_full_start_branches>=1 and n_random_start_branches>=1."""
 
     # Objective
-    objective: Literal["qreg", "pg"] = "qreg"
+    objective: Literal["qreg", "pg", "vpg"] = "qreg"
+    """``qreg``/``pg``: the CanViT-PyTorch-RL recipes (per-glimpse fractional reward,
+    EMA-standardized). ``vpg``: vanilla policy gradient with a learned V(s) baseline and a
+    TERMINAL reward — the ``autoreg_tryout`` recipe (see :class:`~canvit_pretrain.train.rl.VPG`).
+    ``vpg`` targets the FOVEATED/SQUARE patcher (the only kind autoreg ever ran: a pure
+    fixation heatmap, no scale dimension, centred t0), forces ``dueling=True`` (that is
+    where V(s) lives), and is incompatible with ``bptt.mode='chunked'`` +
+    ``policy_grad_to_backbone=True``."""
     prime_on_policy: float = 0.5
     """QReg ε-greedy: fraction of glimpses taken by the net's argmax (rest = a random
     candidate). Ramped 0 -> this over ``policy_warmup_steps`` (the ε-curriculum)."""
@@ -87,6 +103,19 @@ class JointPolicyConfig:
     alpha_lr: float = 0.05
     policy_warmup_steps: int = 0
     """Steps to ramp prime_on_policy 0 -> its target (0 = constant target from step 0)."""
+
+    # VPG only (objective="vpg"); ignored by qreg/pg. Defaults = autoreg exp12's values.
+    vpg_entropy_bonus: float = 5e-3
+    """FIXED entropy weight (autoreg ``rl_entropy_weight``). Separate from ``entropy_bonus``
+    because that one doubles as PG's dual-ascent alpha init/floor and VPG has no dual."""
+    vpg_reinforce_weight: float = 1.0
+    vpg_baseline_weight: float = 1.0
+    vpg_normalize_advantage: bool = True
+    """Normalize the advantage per timestep across the batch (autoreg exp12: True)."""
+    vpg_value_bias_init: float | None = None
+    """Warm-start for V(s)'s output bias. autoreg uses -log(num_classes); that is wrong
+    here (a policy run starts from a pretrained probe at CE ~0.8, not chance ~5.0), so the
+    default leaves torch's init."""
 
     # Action space / scorer net
     centers_per_axis: int = 16

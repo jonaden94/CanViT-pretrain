@@ -70,6 +70,17 @@ class PolicySelector:
     feats_detached: bool = False
     """Detach the state before featurizing, so the policy gradient reaches only the
     scorer (not the backbone). Default False keeps P4a's no_grad-context behavior."""
+    select_bn_eval: bool = False
+    """Choose the glimpse with a SEPARATE eval-mode ``no_grad`` forward instead of reusing
+    the grad-carrying train-mode scores ("BN mode (b)", `ade20k/rl_train.py`'s default).
+
+    The scorer carries one BatchNorm (`frontend.bn`), so a train-mode selection normalizes
+    on batch statistics where the RL reference uses running statistics — the two disagree on
+    45.7% of chosen glimpses, and mode (a) measured 0.19 mIoU t4 worse at matched CE
+    (exp27 arm A vs arm C). Costs one extra scorer forward per glimpse (~9% step time).
+
+    **Default False on purpose:** with it off this method is byte-identical to its previous
+    form, so the `run_rollout` parity digest is unaffected. Adds NO RNG draws either way."""
     generator: torch.Generator | None = None
     last_aux: dict | None = None
 
@@ -101,11 +112,22 @@ class PolicySelector:
         else:
             feats = self.encoder(state)  # type: ignore[operator]
         scores = self.net(feats.float()).reshape(batch_size, -1)  # type: ignore[operator]
+        if self.select_bn_eval:
+            # Mode (b): SELECT under eval-mode BN (running stats), keeping `scores` — the
+            # train-mode forward — for the loss. See the field docstring.
+            was_training = self.net.training  # type: ignore[attr-defined]
+            self.net.eval()  # type: ignore[attr-defined]
+            with torch.no_grad():
+                sel_scores = self.net(feats.float()).reshape(batch_size, -1)  # type: ignore[operator]
+            if was_training:
+                self.net.train()  # type: ignore[attr-defined]
+        else:
+            sel_scores = scores.detach()
         if self.mode == "sample":
-            probs = torch.softmax(scores.detach().float(), dim=1)
+            probs = torch.softmax(sel_scores.float(), dim=1)
             idx = torch.multinomial(probs, 1, generator=self.generator).squeeze(1)
         else:
-            idx = scores.detach().argmax(dim=1)
+            idx = sel_scores.argmax(dim=1)
             if self.prime_on_policy < 1.0:  # ε-greedy DAgger: mix in random candidates
                 a = scores.shape[1]
                 rand_idx = torch.randint(a, (batch_size,), device=device, generator=self.generator)
