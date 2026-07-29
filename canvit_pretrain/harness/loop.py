@@ -136,6 +136,15 @@ def apply_requires_grad(*, model: Any, head: Any, joint: Any, spec: TrainSpec) -
         trunk.eval()
     if head is not None:
         head.requires_grad_(spec.train_head)
+        # requires_grad_(False) does NOT freeze BatchNorm running statistics — the probe
+        # head carries one (`head.bn`), and it kept updating from every training forward.
+        # On a policy run that is corrosive: the reward IS the probe's CE reduction, so
+        # the scorer chases a probe drifting under its feet, and the drift is data-order
+        # (i.e. seed) dependent. Caught by exp27 arm B, where the POLICY-INDEPENDENT t0
+        # mIoU came out 38.50 vs 38.75 on two seeds against a reference 39.6.
+        # `rl_train` never had this: it does seg.eval() on the whole model.
+        if not spec.train_head:
+            head.eval()
     if joint is not None:
         joint.scorer.requires_grad_(spec.train_policy)
 
