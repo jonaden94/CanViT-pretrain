@@ -257,6 +257,30 @@ class In1kCmd:
         return self.cfg.peak_lr, self.cfg.weight_decay
 
 
+def _policy_warmup_steps(task: Any, pol: Any) -> int:
+    """The scorer's LR ramp, in steps, on ANY task.
+
+    ``policy_warmup_steps`` wins when set. Otherwise ``policy_warmup_frac`` is resolved
+    against the task's run length — which only ade20k/in1k have at config time
+    (``max_steps``). Distill is SLURM-array-shaped (``steps_per_job``) with no total, so
+    the fraction cannot be resolved there and this WARNS instead of returning 0 quietly:
+    a silently-absent ramp is exactly the deviation from the RL recipe that doc 15 §A
+    gap #2 was about, and it would be invisible in a run's logs."""
+    if pol.policy_warmup_steps > 0:
+        return pol.policy_warmup_steps
+    if pol.policy_warmup_frac <= 0:
+        return 0
+    total = getattr(task.cfg, "max_steps", None) or getattr(task.cfg, "cosine_total_steps", None) or 0
+    if total <= 0:
+        log.warning(
+            "policy_warmup_frac=%.3f cannot be resolved on task %r: it has no config-time "
+            "run length (no max_steps / cosine_total_steps). The scorer will train with NO "
+            "LR ramp. Set --rl.policy-warmup-steps to get one.",
+            pol.policy_warmup_frac, getattr(task, "name", "?"))
+        return 0
+    return int(pol.policy_warmup_frac * total)
+
+
 def resolve_spec(task: Any, preset: str, lr: float, wd: float) -> TrainSpec:
     """Pick the spec from ``preset`` (``default`` = the task's own ``default_spec``) and
     give every trainable module an optimizer group (the presets ship an empty ``optim``,
@@ -302,7 +326,15 @@ def resolve_spec(task: Any, preset: str, lr: float, wd: float) -> TrainSpec:
         if m in optim:
             continue
         if m == "policy":
-            optim[m] = GroupOptim(lr=pol.policy_lr, weight_decay=pol.policy_weight_decay)
+            # The scorer carries its OWN optimizer recipe on every task — betas and the
+            # ramp-then-hold schedule come from JointPolicyConfig, not from the task's
+            # probe/finetune settings. Falling through to a bare GroupOptim gave the
+            # scorer torch's betas and NO warmup, both deviations from the RL recipe.
+            optim[m] = GroupOptim(
+                lr=pol.policy_lr, weight_decay=pol.policy_weight_decay, betas=pol.policy_betas,
+                schedule=ScheduleSpec(kind="warmup_constant",
+                                      warmup_steps=_policy_warmup_steps(task, pol)),
+            )
         elif (base := base_optim.get(m)) is not None:
             optim[m] = base  # the task already tuned this group (lr, wd and schedule)
         else:

@@ -16,6 +16,7 @@ from ..ade20k.config import (
     _default_wandb_entity,
     _default_wandb_project,
 )
+from ..harness.eval_viewpoints import EvalPolicy
 from ..train.config import FoveatedScaleConfig
 
 NUM_CLASSES = 1000
@@ -96,8 +97,11 @@ class In1kConfig:
     how the backbone was pretrained (``fix_size = scale * H``; off-scale glimpses
     are out of distribution). Ignored for uniform models. See ade20k/config.py."""
 
-    # EVAL viewpoint policy: coarse-to-fine quadtree (the canvit_eval deploy default)
-    eval_policy: Literal["coarse_to_fine", "random", "full"] = "coarse_to_fine"
+    # EVAL viewpoint policy — the SHARED option set (harness/eval_viewpoints.py), the
+    # same one distill and ade20k take. "auto" = this task's historical trajectory,
+    # coarse-to-fine (the canvit_eval deploy default), for uniform AND foveated alike.
+    # See HISTORICAL_DEFAULTS on why foveated keeps C2F despite the scale mismatch.
+    eval_policy: EvalPolicy = "auto"
 
     # Training (step-based, like Ade20kConfig). Train uses the SAME resumable, shard-
     # aligned schedule as distill pretraining (canvit_pretrain.train.data.schedule): a
@@ -127,8 +131,17 @@ class In1kConfig:
     (resume-safe: it permutes WITHIN the job's shards, never across the job boundary)."""
 
     # Data augmentation (train): RandomResizedCrop + flip (canonical IN1k probe recipe)
+    augment: bool = True
+    """Train-split augmentation. ``False`` makes the TRAIN split use the val
+    preprocessing — the protocol policy training is defined under (doc 15 §A). Same name
+    and meaning as ``Ade20kConfig.augment``; the implementations differ because the two
+    tasks use different transform stacks, so this is a shared INTERFACE, not shared code.
+
+    Default ``True``: every in1k probe/finetune number, including the exp25 arrays and the
+    standalone gate (job 15046042), was measured with augmentation on."""
     aug_min_scale: float = 0.35
     aug_flip_prob: float = 0.5
+    """Both ignored when ``augment=False``."""
     resize_mode: ResizeMode = "center_crop"
     """Val resize. ``center_crop`` (default) matches canvit_eval's canonical IN1k
     preprocessing and preserves geometry; ``squish`` keeps the full frame but distorts

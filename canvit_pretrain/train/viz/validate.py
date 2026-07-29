@@ -4,20 +4,22 @@ import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from canvit_pytorch import CanViTOutput, CLSStandardizer, PatchStandardizer, RecurrentState
 from canvit_pytorch.backbone.vit import NormFeatures
-from canvit_pytorch.viewpoint import Viewpoint as CanvitViewpoint
 from canvit_pytorch.teacher import DINOv3Teacher
+from canvit_pytorch.viewpoint import Viewpoint as CanvitViewpoint
 from dinov3_in1k_probes import DINOv3LinearClassificationHead
 from torch import Tensor
 
 from canvit_pretrain import CanViTForPretraining
 from canvit_pretrain.train.utils import assert_shape
 
+from ...harness.eval_viewpoints import open_loop_viewpoints, resolve
 from ..probe import (
     compute_in1k_top1,
     get_imagenet_class_names,
@@ -26,7 +28,6 @@ from ..probe import (
     labels_are_in1k,
 )
 from ..tracker import Tracker
-from ..viewpoint import make_eval_viewpoints, make_eval_viewpoints_foveated
 from .disk import plot_combined_curves, save_figure
 from .image import imagenet_denormalize_to_numpy
 from .plot import TimestepPredictions, plot_multistep_pca
@@ -133,6 +134,32 @@ def _log_pca(
         )
 
 
+def _deploy_viewpoints(*, model, images, joint, n, canvas_grid_size):
+    """The trajectory a trained scorer actually takes on this batch (argmax deploy).
+
+    Distill validates through core's ``forward_reduce``, which consumes a precomputed
+    viewpoint list, so the closed-loop selection runs FIRST and its result is then
+    replayed through the unchanged metric machinery. That costs one extra backbone pass
+    per glimpse — deliberate: distill validation is a 256-sample readout on a 1000-step
+    cadence, and the alternative is restructuring ``_run_chunk``'s init_fn/step_fn
+    around a per-glimpse loop, which is not worth the risk here. The replay is exact:
+    argmax selection under ``no_grad`` consumes no RNG, so it revisits the same states.
+    (ade20k/in1k collect their readout DURING selection and pay nothing extra.)
+    """
+    from canvit_pretrain.harness.eval_viewpoints import deploy_rollout_viewpoints
+    from canvit_pretrain.train.viewpoint import ViewpointType
+
+    B = images.shape[0]
+
+    def advance(vp, state, t):
+        if state is None:  # t0: the rollout owns its own state init
+            state = model.init_state(batch_size=B, canvas_grid_size=canvas_grid_size)
+        return model(image=images, state=state, viewpoint=vp).state
+
+    return deploy_rollout_viewpoints(joint=joint, advance=advance, t0_type=ViewpointType.FULL,
+                                     batch_size=B, device=images.device, n=n)
+
+
 def validate(
     *,
     exp: Tracker,
@@ -150,6 +177,9 @@ def validate(
     n_eval_viewpoints: int = 10,
     min_viewpoint_scale: float = 0.05,
     foveated_eval_scale: float = 1.0,
+    eval_policy: str = "auto",
+    foveated_scale: Any = None,
+    joint: Any = None,
     prefix: str = "val",
     probe: DINOv3LinearClassificationHead | None = None,
     log_curves: bool = False,
@@ -177,6 +207,7 @@ def validate(
             )
 
     is_foveated = getattr(model.cfg, "patcher_name", "uniform") in ("foveated", "square")
+    policy = resolve(eval_policy, task="distill", is_foveated=is_foveated)
     has_cls = model.scene_cls_head is not None
 
     model_was_training = model.training
@@ -186,12 +217,17 @@ def validate(
         """Evaluate one chunk. Returns (acc, batch_size, teacher_acc, target_sample0,
         viewpoints, gt_idx, gt_name); per-timestep entries in ``acc`` are batch means."""
         B = images.shape[0]
-        if is_foveated:
-            viewpoints = make_eval_viewpoints_foveated(
-                B, images.device, n_viewpoints=n_eval_viewpoints, scale=foveated_eval_scale
+        if policy == "policy":
+            viewpoints = _deploy_viewpoints(
+                model=model, images=images, joint=joint, n=n_eval_viewpoints,
+                canvas_grid_size=canvas_grid_size,
             )
         else:
-            viewpoints = make_eval_viewpoints(B, images.device, n_viewpoints=n_eval_viewpoints)
+            viewpoints = open_loop_viewpoints(
+                policy, batch_size=B, device=images.device, n=n_eval_viewpoints,
+                is_foveated=is_foveated, foveated_scale=foveated_scale,
+                min_scale=min_viewpoint_scale, foveated_eval_scale=foveated_eval_scale,
+            )
         has_probe = probe is not None and labels is not None and labels_are_in1k(labels)
 
         raw_feats = compute_raw_targets(images, scene_size_px)

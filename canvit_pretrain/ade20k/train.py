@@ -23,6 +23,7 @@ from tqdm import tqdm
 
 from canvit_pretrain.train.tracker import make_tracker
 
+from ..harness.eval_viewpoints import open_loop_viewpoints, resolve
 from .config import Ade20kConfig
 from .data import IGNORE_LABEL, NUM_CLASSES, make_ade20k_loaders, make_amp_ctx, make_optimizer_and_scheduler
 from .metrics import ProbeState, ce_loss, eval_probe_on_batch, mIoUAccumulator, upsample_preds
@@ -89,6 +90,7 @@ def train(cfg: Ade20kConfig) -> None:
     # Same predicate names two things: how the glimpse is fed (full image vs
     # pre-crop) and which random-viewpoint law applies (foveated vs safe-box).
     full_image = is_foveated = consumes_full_image(seg)
+    eval_policy = resolve(cfg.eval_policy, task="ade20k", is_foveated=is_foveated)
     log.info(
         f"  backbone FROZEN ({sum(p.numel() for p in seg.canvit.parameters()) / 1e6:.1f}M params), "
         f"patcher={'foveated/square (full-image)' if full_image else 'uniform (pre-crop)'}"
@@ -167,11 +169,15 @@ def train(cfg: Ade20kConfig) -> None:
                     if cfg.limit_val_batches is not None and vb >= cfg.limit_val_batches:
                         break
                     vi, vm = vi.to(device), vm.to(device)
-                    vps = make_random_viewpoints(
-                        vi.shape[0], device, cfg.n_timesteps,
-                        min_scale=cfg.min_vp_scale, max_scale=cfg.max_vp_scale,
-                        start_with_full_scene=True,
+                    # Through the SHARED dispatcher, so `--eval-policy` on this entry
+                    # point does what it says instead of being silently ignored. The
+                    # default ("auto" -> "random") is this exact call; "policy" fails
+                    # loudly here, since the standalone trains no scorer.
+                    vps = open_loop_viewpoints(
+                        eval_policy, batch_size=vi.shape[0], device=device, n=cfg.n_timesteps,
                         is_foveated=is_foveated, foveated_scale=cfg.foveated_scale,
+                        min_scale=cfg.min_vp_scale, max_scale=cfg.max_vp_scale,
+                        foveated_eval_scale=getattr(cfg.foveated_scale, "fixed_scale", 1.0),
                     )
                     with amp_ctx:
                         hidden = rollout_canvas_hidden(

@@ -115,7 +115,13 @@ def make_train_loader(
         shards_per_gpu=shards_per_gpu, world_size=world_size, rank=rank,
     )
     nw = _resolve_num_workers(cfg.num_workers, shards_per_gpu)
-    transform = make_train_transform(cfg.scene_size, min_scale=cfg.aug_min_scale, flip_prob=cfg.aug_flip_prob)
+    # augment=False => the train split uses the VAL preprocessing, mirroring
+    # Ade20kConfig.augment. Needed for policy training, whose reference protocol trains
+    # on unaugmented images (doc 15 §A); harmless for probe/finetune, which default True.
+    transform = (
+        make_train_transform(cfg.scene_size, min_scale=cfg.aug_min_scale, flip_prob=cfg.aug_flip_prob)
+        if cfg.augment else preprocess(cfg.scene_size)
+    )
     ds = build_train_pipeline(
         shard_files, transform=transform, batch_size=cfg.batch_size, num_workers=nw,
         shuffle_buffer=cfg.shuffle_buffer, shuffle_seed=cfg.seed + job_index,

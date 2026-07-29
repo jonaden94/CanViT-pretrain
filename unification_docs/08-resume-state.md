@@ -243,6 +243,15 @@ launcher sets both at the cutover.
   local value), the §9 support matrix. This is now the ONLY remaining item before the cutover.
 
 ## NEXT STEPS (in order)
+0. **RL track (added 2026-07-29) — see `15-rl-recipe-parity-and-open-items.md`.** The harness gained
+   policy-deploy validation (`eval_policy="policy"`), which was the blocking gap: before it, a
+   `--preset policy_only` run validated on RANDOM glimpses. But the harness has the CAPABILITY, not
+   the RECIPE — 4 knobs still differ from the gate-validated `ade20k/rl_train.py` (Adam betas, LR
+   ramp, train-data augmentation, step budget) plus the deferred reward `score_res`. Doc 15 §A has
+   the table and the fix per knob. Doc 15 §B records the deliberately deferred eval-ROLLOUT
+   unification (do it AFTER the gate run, not before). Note `rl_train.py` is itself slated for
+   deletion at step 4 below — it is the reference kept alive to A/B against, exactly like the old
+   distill loop.
 1. (optional) Port ADE20K's `WarmupOneCycleLR` into `harness/optim.py` (currently onecycle raises;
    the run wrappers default to warmup_constant/cosine). Not blocking.
 2. (optional) Distill `evaluate()` reuses `validate()` (confirmed working on real data — val_metric

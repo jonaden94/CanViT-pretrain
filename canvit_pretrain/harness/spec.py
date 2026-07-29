@@ -70,12 +70,19 @@ class GroupOptim:
 
     lr: float
     weight_decay: float = 0.0
+    betas: tuple[float, float] = (0.9, 0.999)
+    """AdamW betas for THIS group. Per-group because the recipes genuinely differ: the
+    RL viewpoint-scorer wants (0.9, 0.95) while the task recipes use torch's default.
+    Before this existed the harness silently gave every group (0.9, 0.999), which is a
+    real deviation from the CanViT-PyTorch-RL recipe (see doc 15 §A)."""
     schedule: ScheduleSpec = field(default_factory=ScheduleSpec)
 
     def errors(self, *, group: str) -> list[str]:
         errs = [] if self.lr > 0 else [f"optim[{group}].lr must be > 0"]
         if self.weight_decay < 0:
             errs.append(f"optim[{group}].weight_decay must be >= 0")
+        if not all(0.0 <= b < 1.0 for b in self.betas):
+            errs.append(f"optim[{group}].betas must each be in [0, 1), got {self.betas}")
         return errs + self.schedule.errors(group=group)
 
 

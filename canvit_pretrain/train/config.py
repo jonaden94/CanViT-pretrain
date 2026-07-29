@@ -8,6 +8,7 @@ from typing import Literal
 import torch
 
 from canvit_pretrain import CanViTForPretrainingConfig
+from canvit_pretrain.harness.eval_viewpoints import EvalPolicy
 from canvit_pretrain.train.utils import get_sensible_device
 
 # Default HF repo for the teacher model
@@ -96,10 +97,29 @@ class JointPolicyConfig:
     feature_groups: tuple[str, ...] = ("cos_prev", "cos_init", "ln_feat", "feat_delta")
     """= policy.features.INTRINSIC_GROUPS — the probe-free groups (distill has no probe)."""
 
-    # Target standardizer + policy optimizer
+    # Target standardizer + policy optimizer. These are the CanViT-PyTorch-RL canonical
+    # values and they apply to a policy group on ANY task (distill / ade20k / in1k) —
+    # the scorer's recipe belongs to the scorer, not to whatever task it rides on.
     target_momentum: float = 0.997
     policy_lr: float = 2e-4
     policy_weight_decay: float = 1e-2
+    policy_betas: tuple[float, float] = (0.9, 0.95)
+    """AdamW betas for the scorer. NOT torch's default: the RL recipe uses beta2=0.95,
+    and the harness silently used 0.999 until 2026-07-29 (doc 15 §A, gap #1)."""
+    policy_warmup_frac: float = 0.125
+    """Fraction of the run spent linearly ramping the scorer's LR, then HOLD
+    (``warmup_constant``) — `rl_train.py`'s `warmup_frac`. The harness previously left
+    the policy group on ``ScheduleSpec()`` = warmup_steps 0, i.e. no ramp at all
+    (doc 15 §A, gap #2). 0.0 disables the ramp.
+
+    Needs a run length to resolve against. ade20k/in1k have ``cfg.max_steps``; DISTILL
+    DOES NOT — it is SLURM-array-shaped (``steps_per_job``) and its total is not known at
+    config time. On such a task use ``policy_warmup_steps`` instead; ``resolve_spec``
+    warns rather than silently ramping over 0 steps."""
+    policy_warmup_steps: int = 0
+    """Absolute scorer warmup, in steps. Wins over ``policy_warmup_frac`` when > 0. This
+    is the escape hatch for tasks with no config-time total (distill). The RL recipe is
+    0.125 * 8000 = 1000 steps if you want to set it explicitly."""
 
 
 @dataclass
@@ -218,7 +238,15 @@ class Config:
     # Logging
     log_every: int = 20
     val_every: int = 1000
-    n_eval_viewpoints: int = 10  # Number of viewpoints in validation (quadtree)
+    n_eval_viewpoints: int = 10  # Number of viewpoints in validation
+    eval_policy: EvalPolicy = "auto"
+    """Validation trajectory — the SHARED option set (harness/eval_viewpoints.py), the
+    same one ade20k and in1k take. ``"auto"`` = this task's historical, PATCHER-DEPENDENT
+    choice: quadtree ``coarse_to_fine`` for uniform, ``fixation_grid`` (deterministic
+    centre + shuffled 3x3 at the training scale) for foveated/square, because the
+    quadtree's varying scales are out of distribution for a fixed-scale foveated model.
+    ``"policy"`` deploys a trained scorer by argmax. Left at ``"auto"`` for
+    comparability: the exp22/23/26 val curves were all measured under it."""
     n_val_samples: int = 256
     """Number of validation samples evaluated per validation, independent of
     ``batch_size_per_gpu`` and of world size. A fixed, seeded random subset of the

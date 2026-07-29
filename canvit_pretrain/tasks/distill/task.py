@@ -530,7 +530,8 @@ class DistillRunTask:
         )
 
     @torch.no_grad()
-    def evaluate(self, *, model, head, val_loader, device, step, tracker=None, run_dir=None):
+    def evaluate(self, *, model, head, val_loader, device, step, tracker=None, run_dir=None,
+                 joint=None):
         """The full distill validation phase (train/loop.py 689-734): ``validate()`` over
         the fixed val subset, logging its per-timestep cos/recon series through the REAL
         tracker, plus the IN1k linear-probe readout, the curve plots and the PCA figure on
@@ -585,6 +586,10 @@ class DistillRunTask:
                     # foveated/square validate at the TRAINING scale for mode='fixed';
                     # sampled modes keep the scale-1 FULL anchor.
                     foveated_eval_scale=(fs.fixed_scale if fs.mode == "fixed" else 1.0),
+                    # The shared validation-trajectory knob (harness/eval_viewpoints.py).
+                    # "auto" (the default) reproduces this task's historical choice
+                    # exactly: C2F for uniform, fixation_grid for foveated/square.
+                    eval_policy=self.cfg.eval_policy, foveated_scale=fs, joint=joint,
                     prefix="val", probe=self._probe,
                     log_curves=(val_count % max(1, self.cfg.curve_every_n_vals) == 0),
                     log_pca=(val_count % max(1, self.cfg.viz_every_n_vals) == 0),

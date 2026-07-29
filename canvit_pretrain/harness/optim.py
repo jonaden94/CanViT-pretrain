@@ -103,7 +103,8 @@ def build_optimizer_and_scheduler(
         if m not in param_groups:
             raise ValueError(f"param_groups missing {m!r} (trainable module with no parameters supplied)")
         params = list(param_groups[m])
-        groups.append({"params": params, "lr": go.lr, "weight_decay": go.weight_decay})
+        groups.append({"params": params, "lr": go.lr, "weight_decay": go.weight_decay,
+                       "betas": go.betas})
         lambdas.append(_lr_lambda(go.schedule, go.lr))
     if not groups:
         raise ValueError("no trainable groups to optimize")

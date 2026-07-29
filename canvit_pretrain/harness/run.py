@@ -150,7 +150,11 @@ class RunTask(Protocol):
     def batch_images(self, batch: Any, device: torch.device) -> torch.Tensor: ...
     def bind(self, batch: Any, device: torch.device, *, model: Any, head: Any) -> Any: ...
     def evaluate(self, *, model: Any, head: Any, val_loader: Any, device: torch.device,
-                 step: int, tracker: Any = None, run_dir: Path | None = None) -> dict: ...
+                 step: int, tracker: Any = None, run_dir: Path | None = None,
+                 joint: Any = None) -> dict: ...
+    # `joint` is the run's JointPolicy (None when no policy is trained) — needed so a task
+    # can validate under `eval_policy="policy"`, i.e. deploy the scorer it just trained
+    # instead of the open-loop trajectory it inherited. See harness/eval_viewpoints.py.
     def model_config(self, model: Any) -> dict: ...
     def checkpoint_metadata(self, model: Any) -> dict: ...
 
@@ -383,7 +387,7 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
             return {}
         t_val = time.perf_counter()
         metrics = task.evaluate(model=model, head=head, val_loader=val_loader, device=device,
-                                step=step, tracker=tracker, run_dir=run_dir)
+                                step=step, tracker=tracker, run_dir=run_dir, joint=joint)
         val_seconds = time.perf_counter() - t_val
         log.info("step %d  eval (%.1fs): %s", step, val_seconds, metrics)
         if tracker is not None:

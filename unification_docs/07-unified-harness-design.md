@@ -548,3 +548,59 @@ so the accumulated gradient is identical however the rollout is split. 7 glimpse
 | distill | stochastic (`CFG_CHUNK_SIZE`, `CFG_CONTINUE_PROB`) | `chunked` |
 | ade20k / in1k, `mode=frozen` | fixed `n_timesteps` | `none` (forced) |
 | ade20k / in1k, `mode=finetune` | fixed `n_timesteps` | `full` (default) or `chunked` via `CFG_BPTT_CHUNK_SIZE` |
+
+## Validation viewpoints: one knob for all three tasks (2026-07-28)
+
+`harness/eval_viewpoints.py`. Until now each task chose its validation trajectory a
+different way — not by design, but because every `evaluate()` was lifted from a different
+ancestor and kept that ancestor's habit:
+
+| task | validation trajectory before | why |
+|---|---|---|
+| distill | C2F quadtree (uniform) / centre+3x3 fixation grid (foveated) | lifted verbatim from the old loop's `validate()` |
+| ade20k | IID random, **no knob at all** | the specialize probe TRAINED on random, so validating on random was consistent |
+| in1k | C2F, and it already had `eval_policy` | canvit_eval's deploy convention |
+
+Nothing about the tasks required this. The *metrics* genuinely differ (mIoU vs top-1/5 vs
+cosine-to-teacher) and stay task-owned; the viewpoint sequence is a rollout concern, and
+it had been swept onto the task side by accident. The seam had been drawn one notch too
+coarse.
+
+**The shared option set**, now reachable from every task's config and CLI
+(`--cfg.eval-policy`, `CFG_EVAL_POLICY`):
+
+`coarse_to_fine` · `random` · `full` · `fixation_grid` · `policy` · `auto` (default)
+
+### `"policy"` — the capability this unlocks
+
+Before, `--preset policy_only` trained a scorer and then validated it on **random**
+glimpses, and `best_metric = "miou_final"` selected `best.pt` on that number. Nothing
+crashed; every logged `eval/miou_t*` simply described a trajectory the policy never chose.
+`"policy"` deploys the trained scorer by argmax (eval mode, `no_grad`, `prime_on_policy=1.0`
+so it consumes no RNG), and ade20k's `best_metric` follows it to `neg_ce_mean` — because
+mean t1..tH CE is the rule the CanViT-PyTorch-RL qband band is defined by, and selecting a
+policy on mIoU would put our checkpoints on a different axis from the band we are matching.
+
+ade20k and in1k collect their readout **during** selection (no extra cost). Distill
+validates through core's `forward_reduce`, which consumes a precomputed list, so it selects
+first and replays the chosen viewpoints through the unchanged metric machinery — one extra
+backbone pass per glimpse, deliberate, because distill validation is a 256-sample readout on
+a 1000-step cadence and the alternative is restructuring `_run_chunk`. The replay is exact:
+argmax under `no_grad` consumes no RNG, so it revisits the same states.
+
+### DEFAULTS ARE DELIBERATELY NOT UNIFIED
+
+`"auto"` resolves per task via `HISTORICAL_DEFAULTS`, reproducing exactly what each task
+did before. This is not timidity: flipping ade20k to C2F would silently break comparability
+with every specialize probe number and every exp24 run; flipping distill would break the
+exp22/23/26 val curves; in1k/foveated keeps C2F — a known scale-OOD footgun — because
+exp25's arrays were measured under it. The knob is shared, the default is per-task, and the
+divergence is now written down in ONE table instead of scattered across three files.
+
+Because defaults did not move, this change is a **no-op for every existing config**. That
+is what makes it verifiable rather than a leap, and it is what the tests pin: three
+bit-identity tests run the OLD generator and the new dispatch under the same seed and
+demand identical tensors (`harness/tests/test_eval_viewpoints.py`). The full suite and the
+`setup_arg_parity` checker are green; the checker's first-ever `KNOWN_ABSENT` entry records
+that ade20k's harness eval now reaches `make_random_viewpoints` through the dispatcher
+rather than by name.

@@ -10,6 +10,7 @@ from typing import Literal
 from canvit_pytorch import resolve_canvit_repo
 from canvit_pytorch.data.ade20k import ResizeMode  # noqa: F401  (re-exported for this repo's consumers)
 
+from ..harness.eval_viewpoints import EvalPolicy
 from ..train.config import FoveatedScaleConfig
 
 
@@ -58,12 +59,21 @@ class Ade20kConfig:
     entry point trains the probe only and ignores it."""
 
     probe_repo: str | None = None
-    """FINETUNE only: a published segmentation probe to initialise the head from
-    (core ``from_pretrained_with_probe``) instead of a fresh random one — the ADE20K
-    analogue of ``In1kConfig.probe_repo`` and of specialize's ``init_probe_repo``.
-    Starting a finetune from a RANDOM head at the small finetune LR trains far too
-    slowly; that exact bug cost the unified in1k finetune a whole run (fixed in
-    8f780ba). ``None`` => fresh head. Ignored in ``frozen`` mode."""
+    """A published segmentation probe to initialise the head from (core
+    ``from_pretrained_with_probe``) instead of a fresh random one — the ADE20K analogue
+    of ``In1kConfig.probe_repo`` and of specialize's ``init_probe_repo``. ``None`` =>
+    fresh head.
+
+    Honoured in BOTH modes (it was finetune-only until 2026-07-29):
+    * ``finetune`` — starting from a RANDOM head at the small finetune LR trains far too
+      slowly; that exact bug cost the unified in1k finetune a whole run (8f780ba).
+    * ``frozen`` — **REQUIRED for policy training.** The scorer's reward is the fraction
+      of the PROBE's cross-entropy a glimpse removes, so a random head makes the reward
+      noise. `--preset policy_only` runs in frozen mode, where this used to be ignored and
+      the run silently trained against an untrained probe. `rl_train.py` always loads one
+      (its default is ``probe-ade20k-40k-s512-c{canvas_grid}-in21k``).
+
+    Probe TRAINING leaves this unset and is unaffected."""
 
     # Rollout
     n_timesteps: int = 10
@@ -101,6 +111,21 @@ class Ade20kConfig:
     Pass the pretrain run's value, e.g. ``--foveated-scale.fixed-scale 2.0`` for
     exp22-fovi. Ignored for uniform models, which use ``min/max_vp_scale``."""
 
+    # EVAL viewpoint policy — the SHARED option set (harness/eval_viewpoints.py), the
+    # same one distill and in1k take.
+    eval_policy: EvalPolicy = "auto"
+    """Validation trajectory. ``"auto"`` = this task's historical one, IID random from a
+    full-scene anchor — inherited from the specialize probe, which TRAINED on random
+    viewpoints so validating on random was consistent. That reasoning stops holding the
+    moment a policy is in the loop: under ``"policy"`` the scorer is deployed by argmax
+    and validation measures the thing that was actually trained. Other options:
+    ``coarse_to_fine`` (quadtree, the canvit_eval deploy convention), ``full`` (repeated
+    full scene), ``fixation_grid`` (deterministic centre + 3x3 at the training scale —
+    the scale-safe choice for a fixed-scale foveated model).
+
+    Left at ``"auto"`` for comparability: every specialize probe number and every exp24
+    run was measured under random, so changing the default would silently break them."""
+
     # Training
     batch_size: int = 16
     eval_batch_size: int = 32
@@ -114,8 +139,22 @@ class Ade20kConfig:
     dropout: float = 0.1
 
     # Data augmentation
+    augment: bool = True
+    """Train-split augmentation. ``False`` makes the TRAIN split use the val transform —
+    the CanViT-PyTorch-RL protocol for policy training (`rl_train.py`: "NO augmentation,
+    both splits use the val transform"). Mirrors ``In1kConfig.augment``.
+
+    This has to be its own flag: neutralising ``aug_scale_range``/``aug_flip_prob`` does
+    NOT disable augmentation, because `make_segmentation_train_transforms` still applies
+    `RandomCropWithLabel` and an unconditional `PhotoMetricDistortion` (colour jitter),
+    neither of which has a knob. Setting the two to identity gets you a DIFFERENTLY
+    augmented pipeline, not an unaugmented one.
+
+    Default ``True``: every ADE20K probe/finetune number, including the specialize
+    reference the harness was gated against, was measured with augmentation on."""
     aug_scale_range: tuple[float, float] = (0.5, 2.0)
     aug_flip_prob: float = 0.5
+    """Both ignored when ``augment=False``."""
 
     # Validation resize
     resize_mode: ResizeMode = "center_crop"

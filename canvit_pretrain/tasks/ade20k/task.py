@@ -93,13 +93,22 @@ class Ade20kRunTask:
     """
 
     name = "ade20k"
-    best_metric = "miou_final"
-    """Eval key the harness maximizes for `best.pt` — the last-timestep mIoU, which is
-    what `ade20k/train.py` selects its best probe checkpoint on (`probe.best_last_miou`)."""
 
     def __init__(self, cfg, *, rl=None):
         self.cfg = cfg
         self.rl = rl  # JointPolicyConfig | None; only needed for train_policy runs
+
+    @property
+    def best_metric(self):
+        """Eval key the harness MAXIMIZES for `best.pt`, and it follows the eval policy.
+
+        Probe runs: last-timestep mIoU, what `ade20k/train.py` selects on
+        (`probe.best_last_miou`). Policy-deploy runs: ``neg_ce_mean`` = -mean(t1..tH)
+        val CE, because that is the rule the CanViT-PyTorch-RL qband band is defined by
+        (`docs/qband_results.md`) — selecting a policy on mIoU instead would put our
+        checkpoints on a different axis from the reference band we are trying to match.
+        Negated because the harness loop only maximizes."""
+        return "neg_ce_mean" if self.cfg.eval_policy == "policy" else "miou_final"
 
     # --- capabilities & defaults ------------------------------------------
     def caps(self):
@@ -139,11 +148,20 @@ class Ade20kRunTask:
     def build_model(self, device, prior_model_config=None):
         # prior_model_config is unused: the backbone arch comes from the HF repo the probe
         # was built on, so a resume rebuilds the same model from cfg.model_repo already.
-        if self.cfg.mode == "finetune" and self.cfg.probe_repo:
+        if self.cfg.probe_repo:
             # Finetune from a PUBLISHED probe (specialize's `init_probe_repo`). A
             # finetune from a random head at the finetune LR crawls — the in1k twin of
             # this was a real, costly bug (8f780ba).
-            log.info("FINETUNE: initialising head from published probe %s", self.cfg.probe_repo)
+            #
+            # Honoured in FROZEN mode too (was: finetune-only). POLICY training needs it:
+            # the reward is the fraction of the PROBE's CE a glimpse removes, so a random
+            # head makes the reward pure noise — and `--preset policy_only` runs in frozen
+            # mode, where this used to fall through to a fresh head silently. `rl_train.py`
+            # always loads a trained probe (`from_pretrained_with_probe`), so this is what
+            # reproducing its recipe requires. Probe TRAINING leaves probe_repo unset and
+            # is unaffected.
+            log.info("Initialising head from published probe %s (mode=%s)",
+                     self.cfg.probe_repo, self.cfg.mode)
             seg = CanViTForSemanticSegmentation.from_pretrained_with_probe(
                 pretrained_repo=self.cfg.model_repo, probe_repo=self.cfg.probe_repo,
             ).to(device)
@@ -211,6 +229,16 @@ class Ade20kRunTask:
     def build_policy(self, model, *, device, canvas_grid, generator):
         from canvit_pretrain.harness.policy import build_policy
         from canvit_pretrain.train.config import JointPolicyConfig
+        # Only reached on a policy run. The reward is the fraction of the PROBE's CE a
+        # glimpse removes, so an untrained head makes it noise — and nothing downstream
+        # would fail, the scorer would just learn from garbage.
+        if self.cfg.mode == "frozen" and not self.cfg.probe_repo:
+            log.warning(
+                "POLICY training with a FRESH RANDOM segmentation head (no --cfg.probe-repo). "
+                "The scorer's reward is the fraction of the probe's CE each glimpse removes, "
+                "so with an untrained probe that reward is noise and the run will look "
+                "healthy while learning nothing. Pass --cfg.probe-repo (rl_train.py's default "
+                "is probe-ade20k-40k-s512-c%d-in21k).", canvas_grid)
         rl = self.rl or JointPolicyConfig(use_rl=True, feature_groups=POLICY_FEATURE_GROUPS)
         return build_policy(
             canvit=model.canvit, rl=rl, feature_groups=POLICY_FEATURE_GROUPS, device=device,
@@ -288,9 +316,36 @@ class Ade20kRunTask:
         except Exception:
             log.exception("ade20k val viz failed at step %d (validation continues)", step)
 
+    def _policy_rollout(self, *, model, images, joint, T, canvas_grid, amp):
+        """Closed-loop deploy rollout: the scorer picks each glimpse by argmax from the
+        live canvas. Returns canvas_hidden per timestep, exactly like the open-loop
+        ``rollout_canvas_hidden`` it mirrors, so all the metric code below is shared."""
+        from canvit_pretrain.harness.eval_viewpoints import deploy_rollout_viewpoints
+
+        B = images.shape[0]
+        full_image = consumes_full_image(model)
+        px = None if full_image else derive_glimpse_px(model, self.cfg.glimpse_px)
+        hidden: list[Tensor] = []
+
+        def advance(vp, state, t):
+            if state is None:  # t0: the rollout owns its own state init
+                state = model.init_state(batch_size=B, canvas_grid_size=canvas_grid)
+            model_input = images if full_image else sample_at_viewpoint(
+                spatial=images, viewpoint=vp, glimpse_size_px=px)
+            with amp:
+                out = model.canvit(image=model_input, state=state, viewpoint=vp)
+                hidden.append(model.canvit.get_spatial(out.state.canvas)
+                              .view(B, canvas_grid, canvas_grid, -1))
+            return out.state
+
+        deploy_rollout_viewpoints(joint=joint, advance=advance, t0_type=ViewpointType.FULL,
+                                  batch_size=B, device=images.device, n=T)
+        return hidden
+
     # --- eval & checkpoint -------------------------------------------------
     @torch.no_grad()
-    def evaluate(self, *, model, head, val_loader, device, step, tracker=None, run_dir=None):
+    def evaluate(self, *, model, head, val_loader, device, step, tracker=None, run_dir=None,
+                 joint=None):
         # tracker unused: this task returns its scalars for the caller to log. run_dir is
         # the sink for the segmentation figure (specialize's `viz_val`), rendered from the
         # FIRST val batch on cfg.viz_every — the rollout it already runs, no recomputation.
@@ -298,13 +353,21 @@ class Ade20kRunTask:
         tested rollout + probe-eval helpers. Returns t0 / final / mean mIoU."""
         from canvit_pretrain.ade20k.data import IGNORE_LABEL, NUM_CLASSES
         from canvit_pretrain.ade20k.metrics import eval_probe_on_batch, mIoUAccumulator
-        from canvit_pretrain.ade20k.rollout import make_random_viewpoints, rollout_canvas_hidden
+        from canvit_pretrain.ade20k.rollout import rollout_canvas_hidden
+        from canvit_pretrain.harness.eval_viewpoints import open_loop_viewpoints, resolve
         T = self.cfg.n_timesteps
         cg = self.canvas_grid(model)
         is_fov = consumes_full_image(model)
+        eval_policy = resolve(self.cfg.eval_policy, task="ade20k", is_foveated=is_fov)
         was_training = model.head.training
         model.head.eval()
         ious = [mIoUAccumulator(NUM_CLASSES, IGNORE_LABEL, device) for _ in range(T)]
+        # CE is accumulated ONLY for a deployed policy: it is the qband selection metric
+        # (see best_metric), and it needs full-resolution logits, which for B x 150 x 512
+        # x 512 is a multi-GB tensor the mIoU path never materializes (it upsamples the
+        # argmax instead). Probe runs keep paying nothing for it.
+        ce_sums = [0.0] * T
+        n_images = 0
         amp = torch.autocast("cuda", dtype=torch.bfloat16) if device.type == "cuda" else nullcontext()
         do_viz = (run_dir is not None and self.cfg.viz_every
                   and step % self.cfg.viz_every == 0)
@@ -312,14 +375,25 @@ class Ade20kRunTask:
             if self.cfg.limit_val_batches is not None and vb >= self.cfg.limit_val_batches:
                 break
             vi, vm = vi.to(device), vm.to(device)
-            vps = make_random_viewpoints(vi.shape[0], device, T, min_scale=self.cfg.min_vp_scale,
-                                         max_scale=self.cfg.max_vp_scale, start_with_full_scene=True,
-                                         is_foveated=is_fov, foveated_scale=self.cfg.foveated_scale)
-            with amp:
-                hidden = rollout_canvas_hidden(seg=model, images=vi, viewpoints=vps,
-                                               canvas_grid=cg, glimpse_px=self.cfg.glimpse_px)
+            if eval_policy == "policy":
+                hidden = self._policy_rollout(model=model, images=vi, joint=joint, T=T,
+                                              canvas_grid=cg, amp=amp)
+            else:
+                vps = open_loop_viewpoints(
+                    eval_policy, batch_size=vi.shape[0], device=device, n=T, is_foveated=is_fov,
+                    foveated_scale=self.cfg.foveated_scale, min_scale=self.cfg.min_vp_scale,
+                    max_scale=self.cfg.max_vp_scale,
+                    foveated_eval_scale=getattr(self.cfg.foveated_scale, "fixed_scale", 1.0),
+                )
+                with amp:
+                    hidden = rollout_canvas_hidden(seg=model, images=vi, viewpoints=vps,
+                                                   canvas_grid=cg, glimpse_px=self.cfg.glimpse_px)
             for t in range(T):
                 eval_probe_on_batch(model.head, hidden[t], vm, ious[t])
+                if eval_policy == "policy":
+                    ce_sums[t] += self._full_res_ce(model.head, hidden[t], vm).sum().item()
+            if eval_policy == "policy":
+                n_images += vi.shape[0]
             if do_viz:  # first batch only
                 do_viz = False
                 self._render_val_viz(model.head, hidden, vi, vm, run_dir, step)
@@ -331,9 +405,29 @@ class Ade20kRunTask:
         # FALLING as glimpses accumulate). ade20k/train.py:179 logs val_miou_t{t} for
         # all t; the caller namespaces these as eval/miou_t{t}.
         out = {f"miou_t{t}": v for t, v in enumerate(mious)}
-        out["miou_final"] = mious[-1]   # the best-checkpoint key (see best_metric)
+        out["miou_final"] = mious[-1]   # the best-checkpoint key for probe runs
         out["miou_mean"] = sum(mious) / T
+        if eval_policy == "policy":
+            # t indices follow the reference: t0 is the full-scene anchor, so the band is
+            # the mean over t1..t{T-1} — the glimpses the policy actually chose.
+            ces = [s / max(n_images, 1) for s in ce_sums]
+            out.update({f"ce_t{t}": v for t, v in enumerate(ces)})
+            ce_mean = sum(ces[1:]) / max(len(ces) - 1, 1)
+            out["ce_mean"] = ce_mean
+            out["neg_ce_mean"] = -ce_mean   # the best-checkpoint key (loop maximizes)
         return out
+
+    @staticmethod
+    def _full_res_ce(head, hidden, masks):
+        """Per-image CE at the MASK resolution — the reference's deploy metric
+        (`ade20k/rl_train.py::ce_from_logits` with score_res=None). Logits are upsampled
+        to the mask rather than the mask downsampled to the logits, so this is the
+        paper-protocol number and not the coarse training-grid one."""
+        logits = head(hidden.float())
+        logits = F.interpolate(logits, size=masks.shape[1:], mode="bilinear", align_corners=False)
+        per_px = F.cross_entropy(logits, masks, ignore_index=IGNORE_LABEL, reduction="none")
+        valid = (masks != IGNORE_LABEL).float()
+        return (per_px * valid).flatten(1).sum(1) / valid.flatten(1).sum(1).clamp_min(1.0)
 
     def model_config(self, model):
         return {"task": "ade20k", "num_classes": self._num_classes(),

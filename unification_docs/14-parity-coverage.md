@@ -232,6 +232,9 @@ capabilities the old loop never had. Those rest on unit + smoke tests only:
 | `teacher_dim` fix | only fires on a ViT-L teacher; no harness run has used one |
 | ade20k `finetune` mode + `probe_repo` head init | added 2026-07-27, unit-tested, never production-run |
 | joint task+policy on ade20k/in1k | the flagship new capability; 10-step integration smokes only |
+| policy-DEPLOY validation (`eval_policy="policy"`) | added 2026-07-28 for all three tasks; unit + real-tiny-model tests only, never production-run. Before it, a `policy_only` run validated on RANDOM glimpses and selected `best.pt` on that — so this is a prerequisite for reading any RL result, not a nicety |
+| harness RL **recipe** parity vs `rl_train.py` | the harness now has the CAPABILITY but NOT the recipe — 4 knobs still differ (Adam betas, LR ramp, train-data augmentation, step budget) + the deferred reward `score_res`. Do not call the harness a reproduction of the RL flagship until closed. Table + fix per knob: [[15-rl-recipe-parity-and-open-items.md]] §A |
+| eval ROLLOUT unification ("layer 2") | `eval_policy` unified WHICH viewpoints; the four eval rollout loops are still separate. Deferred until after the ADE20K policy gate, on purpose. Why it is non-trivial (fold-vs-list memory, `run_rollout` carries the digest, `forward_reduce` is a core API): [[15-rl-recipe-parity-and-open-items.md]] §B |
 | in1k finetune head-init (`8f780ba`) | exp25 arrays still in flight, not read out |
 
 The first three are reproduction-adjacent and low risk. The last three are new function —

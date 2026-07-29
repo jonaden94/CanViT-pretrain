@@ -34,16 +34,16 @@ Other presets are built generically by `harness/cli.py::resolve_spec`.
 - `--preset default` → trains=[head] task->bb=False pol->bb=False bptt=none/horizon=10/chunk=1 | head(lr=0.0003, wd=0.001, sched=warmup_onecycle/warmup=1500)
 - `--preset probe` → trains=[head] task->bb=False pol->bb=False bptt=none/horizon=10/chunk=1 | head(lr=0.0003, wd=0.001, sched=warmup_onecycle/warmup=1500)
 - `--preset finetune` → trains=[backbone,head] task->bb=True pol->bb=False bptt=full/horizon=10/chunk=1 | backbone(lr=0.0003, wd=0.001, sched=warmup_onecycle/warmup=1500), head(lr=0.0003, wd=0.001, sched=warmup_onecycle/warmup=1500)
-- `--preset policy_only` → trains=[policy] task->bb=False pol->bb=False bptt=none/horizon=10/chunk=1 | policy(lr=0.0002, wd=0.01, sched=warmup_constant)
-- `--preset joint` → trains=[backbone,head,policy] task->bb=True pol->bb=False bptt=chunked/continue_prob=0.5/chunk=2 | backbone(lr=0.0003, wd=0.001, sched=warmup_onecycle/warmup=1500), head(lr=0.0003, wd=0.001, sched=warmup_onecycle/warmup=1500), policy(lr=0.0002, wd=0.01, sched=warmup_constant)
+- `--preset policy_only` → trains=[policy] task->bb=False pol->bb=False bptt=none/horizon=10/chunk=1 | policy(lr=0.0002, wd=0.01, sched=warmup_constant/warmup=5000)
+- `--preset joint` → trains=[backbone,head,policy] task->bb=True pol->bb=False bptt=chunked/continue_prob=0.5/chunk=2 | backbone(lr=0.0003, wd=0.001, sched=warmup_onecycle/warmup=1500), head(lr=0.0003, wd=0.001, sched=warmup_onecycle/warmup=1500), policy(lr=0.0002, wd=0.01, sched=warmup_constant/warmup=5000)
 
 ### in1k
 
 - `--preset default` → trains=[head] task->bb=False pol->bb=False bptt=none/horizon=10/chunk=1 | head(lr=0.0003, wd=0.001, sched=warmup_cosine/warmup=10000)
 - `--preset probe` → trains=[head] task->bb=False pol->bb=False bptt=none/horizon=10/chunk=1 | head(lr=0.0003, wd=0.001, sched=warmup_cosine/warmup=10000)
 - `--preset finetune` → trains=[backbone,head] task->bb=True pol->bb=False bptt=full/horizon=10/chunk=1 | backbone(lr=0.0003, wd=0.001, sched=warmup_cosine/warmup=10000), head(lr=0.0003, wd=0.001, sched=warmup_cosine/warmup=10000)
-- `--preset policy_only` → trains=[policy] task->bb=False pol->bb=False bptt=none/horizon=10/chunk=1 | policy(lr=0.0002, wd=0.01, sched=warmup_constant)
-- `--preset joint` → trains=[backbone,head,policy] task->bb=True pol->bb=False bptt=chunked/continue_prob=0.5/chunk=2 | backbone(lr=0.0003, wd=0.001, sched=warmup_cosine/warmup=10000), head(lr=0.0003, wd=0.001, sched=warmup_cosine/warmup=10000), policy(lr=0.0002, wd=0.01, sched=warmup_constant)
+- `--preset policy_only` → trains=[policy] task->bb=False pol->bb=False bptt=none/horizon=10/chunk=1 | policy(lr=0.0002, wd=0.01, sched=warmup_constant/warmup=25000)
+- `--preset joint` → trains=[backbone,head,policy] task->bb=True pol->bb=False bptt=chunked/continue_prob=0.5/chunk=2 | backbone(lr=0.0003, wd=0.001, sched=warmup_cosine/warmup=10000), head(lr=0.0003, wd=0.001, sched=warmup_cosine/warmup=10000), policy(lr=0.0002, wd=0.01, sched=warmup_constant/warmup=25000)
 
 ## Config knobs that change the spec (auto-discovered)
 

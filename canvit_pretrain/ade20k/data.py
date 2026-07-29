@@ -38,21 +38,30 @@ def make_ade20k_loaders(cfg: Ade20kConfig) -> tuple[DataLoader, DataLoader]:
             f"ADE20K root not found: {cfg.ade20k_root}. Set ADE20K_ROOT or pass --ade20k-root."
         )
 
-    _train_aug = make_segmentation_train_transforms(
-        img_size=cfg.scene_size,
-        random_img_size_ratio_range=list(cfg.aug_scale_range),
-        # Upstream annotation is Tuple[int] but implementation expects (H, W).
-        crop_size=(cfg.scene_size, cfg.scene_size),  # pyright: ignore[reportArgumentType]
-        flip_prob=cfg.aug_flip_prob,
-        reduce_zero_label=True,
-    )
-
-    def train_transform(img: Image.Image, mask: Image.Image) -> tuple[Tensor, Tensor]:
-        img_t, mask_t = _train_aug(img, mask)
-        return img_t, mask_t.squeeze(0)
-
-    train_ds = ADE20kDataset(root=cfg.ade20k_root, split="training", joint_transform=train_transform)
     val_img_tf, val_mask_tf = make_val_transforms(cfg.scene_size, cfg.resize_mode)
+
+    if cfg.augment:
+        _train_aug = make_segmentation_train_transforms(
+            img_size=cfg.scene_size,
+            random_img_size_ratio_range=list(cfg.aug_scale_range),
+            # Upstream annotation is Tuple[int] but implementation expects (H, W).
+            crop_size=(cfg.scene_size, cfg.scene_size),  # pyright: ignore[reportArgumentType]
+            flip_prob=cfg.aug_flip_prob,
+            reduce_zero_label=True,
+        )
+
+        def train_transform(img: Image.Image, mask: Image.Image) -> tuple[Tensor, Tensor]:
+            img_t, mask_t = _train_aug(img, mask)
+            return img_t, mask_t.squeeze(0)
+
+        train_ds = ADE20kDataset(root=cfg.ade20k_root, split="training",
+                                 joint_transform=train_transform)
+    else:
+        # The RL protocol: the TRAIN split goes through the val transform, exactly as
+        # ade20k/rl_train.py does. Not the same as identity-valued aug knobs — see
+        # Ade20kConfig.augment for why (RandomCrop + PhotoMetricDistortion have no knob).
+        train_ds = ADE20kDataset(root=cfg.ade20k_root, split="training",
+                                 img_transform=val_img_tf, mask_transform=val_mask_tf)
     val_ds = ADE20kDataset(root=cfg.ade20k_root, split="validation",
                            img_transform=val_img_tf, mask_transform=val_mask_tf)
 

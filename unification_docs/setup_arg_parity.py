@@ -204,6 +204,16 @@ ADE_ALIASES = {
     "self._logits(readout)": "logits", "self.masks": "masks",
 }
 ADE_KNOWN_ABSENT = {
+    "make_random_viewpoints":
+        "By design: the harness's validation trajectory now comes from the SHARED "
+        "dispatcher harness/eval_viewpoints.py::open_loop_viewpoints, so 'which "
+        "viewpoints does validation take' is one knob across distill/ade20k/in1k instead "
+        "of three inherited habits. For this task's default ('auto' -> 'random') that "
+        "dispatcher calls THIS function with these arguments; the two paths are pinned to "
+        "identical tensors under the same seed by harness/tests/test_eval_viewpoints.py::"
+        "test_ade20k_random_is_bit_identical_to_the_old_generator. (train.py also uses it "
+        "for TRAINING viewpoints, where the harness uses RandomSelector via "
+        "build_selector — a separate, pre-existing P1 decision.)",
     "make_optimizer_and_scheduler":
         "By design: the harness builds optimizers from TrainSpec (harness/optim.py). "
         "Numerical equivalence to specialize's WarmupOneCycleLR is proven separately by "

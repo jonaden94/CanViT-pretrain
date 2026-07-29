@@ -266,16 +266,20 @@ class In1kRunTask:
         )
 
     @torch.no_grad()
-    def evaluate(self, *, model, head, val_loader, device, step, tracker=None, run_dir=None):
+    def evaluate(self, *, model, head, val_loader, device, step, tracker=None, run_dir=None,
+                 joint=None):
         # tracker/run_dir unused: this task returns its scalars for the caller to log
         # and renders no validation figures (owner: distill viz only).
         """Top-1/5 over the eval policy (reuses in1k/train.py::evaluate)."""
         if val_loader is None:
             return {}
+        from canvit_pretrain.harness.eval_viewpoints import resolve
         from canvit_pretrain.in1k.train import evaluate as _eval
         amp = torch.autocast("cuda", dtype=torch.bfloat16) if device.type == "cuda" else nullcontext()
+        is_fov = consumes_full_image(model)
+        eval_policy = resolve(self.cfg.eval_policy, task="in1k", is_foveated=is_fov)
         accs = _eval(model, self.cfg, val_loader, device=device, canvas_grid=self.canvas_grid(model),
-                     amp_ctx=amp, is_foveated=consumes_full_image(model))
+                     amp_ctx=amp, is_foveated=is_fov, eval_policy=eval_policy, joint=joint)
         return {"top1": accs[1], "top5": accs[5]}
 
     def model_config(self, model):
