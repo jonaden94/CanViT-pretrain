@@ -76,7 +76,7 @@ EXTRA_ARGS="--preset policy_only --cfg.no-augment"
 # cea4dee: shared eval-viewpoint knob (so a policy run is validated by DEPLOYING the
 # policy instead of on random glimpses) + the recipe knobs (betas, LR ramp, augment,
 # probe head in frozen mode). 4db7c3f: the squish protocol fix above.
-PRETRAIN_COMMIT=4db7c3f
+PRETRAIN_COMMIT=bc5e00e
 PYTORCH_COMMIT=017ce9b
 FOVI_COMMIT=c399d3b
 
