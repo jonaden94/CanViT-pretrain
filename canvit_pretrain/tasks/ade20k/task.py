@@ -239,6 +239,19 @@ class Ade20kRunTask:
                 "so with an untrained probe that reward is noise and the run will look "
                 "healthy while learning nothing. Pass --cfg.probe-repo (rl_train.py's default "
                 "is probe-ade20k-40k-s512-c%d-in21k).", canvas_grid)
+        # The published qband band / EG-C2F numbers were measured under SQUISH — it is
+        # CanViT-PyTorch-RL's whole measurement contract. center_crop is a valid protocol
+        # and the right default for new work, but it shifts CE by ~0.016 (exp27 arm A),
+        # which silently dwarfs the band's 0.0007 seed spread. Warn rather than force:
+        # the mode stays the user's choice.
+        if self.cfg.resize_mode != "squish":
+            log.warning(
+                "POLICY training with resize_mode=%r. The CanViT-PyTorch-RL qband band "
+                "(0.6853 +- 0.0007 mean t1-t4 CE) and the EG-C2F baselines were measured "
+                "under SQUISH; under %r the numbers are internally consistent but NOT "
+                "comparable to them (center_crop measured ~0.016 CE lower in exp27). Pass "
+                "--cfg.resize-mode squish for band-comparable results.",
+                self.cfg.resize_mode, self.cfg.resize_mode)
         rl = self.rl or JointPolicyConfig(use_rl=True, feature_groups=POLICY_FEATURE_GROUPS)
         return build_policy(
             canvit=model.canvit, rl=rl, feature_groups=POLICY_FEATURE_GROUPS, device=device,

@@ -76,9 +76,40 @@ against the band exactly as the P3 gate was.
 Horizon mapping, for whoever wires this: `rl_train`'s `train_horizon=4` means t0-full + 4
 policy glimpses (the docs' "T=5", band reported over t1–t4) → harness `n_timesteps=5`.
 
-**Also note:** `rl_train` itself defaults to `resize_mode=center_crop` and documents that
-`--resize-mode squish` is needed to reproduce the published qband / EG-C2F numbers. So the
-band's exact setting is not the default of *either* path.
+### Gap #7 — RESIZE PROTOCOL (found 2026-07-29 by a run, after this doc had already warned about it)
+
+`rl_train` defaulted to `resize_mode=center_crop` while the band is **squish**. An earlier
+revision of this section noted that and was then ignored when exp27 was configured — the
+first attempt ran center_crop on both arms and arm A came out at **0.6693**, 0.016 *better*
+than the band and ~20× its 0.0007 seed spread. Not a better policy; a different measurement.
+
+Squish is CanViT-PyTorch-RL's *measurement contract*, not a preference: `config.py`'s
+docstring ("images and masks squish-resized to `scene_size`"), `CLAUDE.md:30`
+("Measurement = the paper's (squish) protocol, **always**"), and a dataset class named
+`Ade20kSquish`. At the P3 gate commit `7e5afac`, `rl_train.py:329` hardcoded `"squish"`;
+commit `1a0b452` lifted it to a knob defaulting to `center_crop`.
+
+Fix: `PolicyTrainConfig.resize_mode` pinned back to `squish` (it is the frozen reference);
+`Ade20kConfig` **deliberately keeps `center_crop`** — aspect-preserving, matches
+pretraining, the right default for new work, and the exp24 probe/finetune runs used it.
+A policy run under any non-squish mode now logs a not-band-comparable warning.
+
+**Lesson, and it is the same one as gap #6 one day later:** writing the discrepancy into a
+doc does not protect a run. Gap #6 was caught by constructing the command end to end; #7
+was caught only by *executing* it and disbelieving a good number. A config difference that
+moves the metric needs an assertion or a warning at the point of use, not a paragraph.
+
+### Everything else: audited clean against the original repo (2026-07-29)
+
+Read end to end against `canvit_pytorch_rl/{config.py,training/{config,train,eval_loops}.py,data.py}`:
+same `model_repo` (`DEFAULT_PRETRAINED_REPO`) and probe rule; the same
+`make_val_transforms` function (core's copy is equivalence-tested against specialize's for
+**both** modes, `specialize_equivalence.py:133`); full val split (`stride=1, limit=None`);
+eval CE at full 512² (`ce_from_logits(...)` with no `score_res` — "full 512^2, sharing the
+mIoU logits"); objective = mean CE over t1..t4; and every recipe hyperparameter matching
+`TrainConfig`. `rl_train.py`'s only other drift since the gate is additive (per-timestep
+mIoU, richer ckpt). Immaterial diffs: eval batch 32 vs 16, workers 4 vs 8 — neither touches
+the metric (eval-mode BN, dataset-level mIoU, per-image CE mean).
 
 ### Recommended sequence
 

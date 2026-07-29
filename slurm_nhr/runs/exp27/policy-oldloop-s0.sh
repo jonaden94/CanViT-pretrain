@@ -45,6 +45,14 @@ export PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
 # train_horizon 4, score_res 128, NO augmentation, c64 probe). Only the run
 # identity and seed are passed; everything else must come from the defaults, or
 # this stops being the reference.
+#
+# --resize-mode squish is passed EXPLICITLY even though it is now the default
+# again. It is the measurement contract the qband band is defined by, and it has
+# already silently regressed once: commit 1a0b452 lifted rl_train's hardcoded
+# "squish" into a knob defaulting to center_crop, and the first exp27 arm A
+# (job 15093707) landed at 0.6693 -- 0.016 "better" than the band, ~20x its
+# 0.0007 seed spread -- purely from the protocol change. Pin it here so the
+# reference cannot drift out from under this launcher again.
 sbatch \
     --job-name="$RUN_NAME" \
     --time=$TIME \
@@ -55,4 +63,5 @@ sbatch \
     slurm_nhr/ade20k/train_policy.sbatch \
     --run-name "$RUN_NAME" \
     --seed "$SEED" \
+    --resize-mode squish \
     --wandb-project exp27

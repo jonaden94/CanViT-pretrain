@@ -60,6 +60,36 @@ All 2026-07-28/29, committed in `cea4dee`, detailed in
    probe's CE reduction, so the scorer would have trained on pure noise with nothing
    failing and every log looking healthy.
 
+## The first attempt was voided by the resize protocol (2026-07-29)
+
+Jobs 15093707 / 15093712 / 15093767 / 15093768 ran **center_crop on both arms** and were
+cancelled. Arm A s0 completed at mean t1–t4 CE **0.6693** — 0.016 *better* than the band,
+~20× its own 0.0007 seed spread. That was not a better policy, it was a different
+measurement.
+
+CanViT-PyTorch-RL squish-resizes image **and** mask to `scene_size` everywhere — its
+`config.py` docstring calls this "the measurement contract every entry point builds on",
+and its dataset class is literally `Ade20kSquish`. The qband band and the EG-C2F
+baselines exist only under squish. At the P3 gate commit `7e5afac`, `rl_train.py:329`
+hardcoded it. Commit **`1a0b452`** ("Lift val resize_mode into ADE/policy configs, default
+center_crop") turned it into a knob and defaulted it to `center_crop`, silently
+decoupling the reference from its band; neither launcher set it.
+
+Fixed three ways: `PolicyTrainConfig.resize_mode` is pinned back to `squish` (it is the
+frozen reference — `Ade20kConfig` deliberately keeps `center_crop` for new work), both
+launchers now set it explicitly, and a policy run under any other mode logs a loud
+not-band-comparable warning. Pinned by `test_rl_train_defaults_to_the_bands_squish_protocol`
+and `test_harness_policy_run_warns_when_not_band_comparable`.
+
+**Everything else audited clean** against the original repo (2026-07-29): same
+`model_repo` and probe rule, same `make_val_transforms` function (equivalence-tested for
+both modes in `unification_docs/specialize_equivalence.py`), full val split with no
+limit/stride, eval CE at full 512², objective mean over t1–t4, and every recipe
+hyperparameter matching `TrainConfig` (lr 2e-4, wd 1e-2, betas .9/.95, clip 1.0,
+score_res 128, 640k forwards, batch 16, horizon 4, warmup 0.125, target_momentum 0.997,
+scales (0.5,0.25), centers 16, width 128, blocks 3, prime_on_policy 0.5, dueling). The
+only remaining diffs are immaterial to the metric: eval batch 32 vs 16, workers 4 vs 8.
+
 ## Gotcha for anyone editing arm B
 
 `--cfg.no-augment` lives in `EXTRA_ARGS`, **not** as `CFG_AUGMENT=False`. tyro renders

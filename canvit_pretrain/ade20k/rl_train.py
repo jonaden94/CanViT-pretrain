@@ -63,12 +63,21 @@ class PolicyTrainConfig:
     scene_size: int = 512
     canvas_grid: int = 64
     glimpse_px: int | None = 128
-    resize_mode: ResizeMode = "center_crop"
-    """Val/eval image resize (train and eval use the same protocol here). Default
-    ``center_crop`` preserves geometry (matches pretraining); pass ``--resize-mode squish``
-    for the CanViT-PyTorch-RL qband band / EG-C2F numbers, which were measured under
-    aspect-distorting squish. Both are valid for every patcher — see
-    ``Ade20kConfig.resize_mode`` for which to prefer when."""
+    resize_mode: ResizeMode = "squish"
+    """Image+mask resize, applied to BOTH splits (train and eval share the protocol).
+
+    Default ``squish`` because THIS MODULE IS THE FROZEN REFERENCE for
+    CanViT-PyTorch-RL: its measurement contract is squish everywhere
+    (``canvit_pytorch_rl/config.py`` docstring; the dataset class is literally
+    named ``Ade20kSquish``), and the published qband band / EG-C2F numbers are
+    only reproducible under it. Changing this default silently decouples the
+    reference from its band — it happened once already (commit 1a0b452 defaulted
+    it to ``center_crop``, and exp27 arm A came out 0.016 CE "better" than the
+    band because of it). Change it per-run with ``--resize-mode``, not here.
+
+    ``center_crop`` preserves aspect ratio and is the sensible default for NEW
+    work (it matches pretraining); that is why ``Ade20kConfig`` defaults to it.
+    Both are valid for every patcher."""
 
     # Action space / net (uniform models: safebox grid; foveated/square: fixation grid)
     scales: tuple[float, ...] = (0.5, 0.25)
@@ -346,9 +355,9 @@ def train(cfg: PolicyTrainConfig) -> None:
     gen = torch.Generator(device=device)
     gen.manual_seed(cfg.seed)
 
-    # Data: the RL repo's protocol — NO augmentation, both splits use the val
-    # transform. resize_mode defaults to center_crop (aspect-preserving); pass
-    # --resize-mode squish to reproduce the documented qband/EG-C2F numbers.
+    # Data: the RL repo's protocol — squish resize, NO augmentation, both splits.
+    # Byte-identical to CanViT-PyTorch-RL's Ade20kSquish, which wraps this same
+    # upstream ADE20kDataset + make_val_transforms(scene_size, "squish").
     img_tf, mask_tf = make_val_transforms(cfg.scene_size, cfg.resize_mode)
     train_ds = ADE20kDataset(root=cfg.ade20k_root, split="training", img_transform=img_tf, mask_transform=mask_tf)
     val_ds = ADE20kDataset(root=cfg.ade20k_root, split="validation", img_transform=img_tf, mask_transform=mask_tf)

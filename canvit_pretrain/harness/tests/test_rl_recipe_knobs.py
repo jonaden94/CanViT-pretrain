@@ -233,3 +233,50 @@ def test_policy_without_a_probe_warns(caplog):
         except Exception:
             pass  # model stub is not buildable; the warning fires before that
     assert "reward is noise" in caplog.text
+
+
+def test_rl_train_defaults_to_the_bands_squish_protocol():
+    """`rl_train` is the FROZEN REFERENCE for CanViT-PyTorch-RL, whose measurement
+    contract is squish everywhere (its dataset class is named `Ade20kSquish`). This
+    default already regressed once — commit 1a0b452 lifted the hardcoded "squish"
+    into a knob defaulting to center_crop, and exp27 arm A then scored 0.016 CE
+    "better" than the band, ~20x its 0.0007 seed spread, purely from the protocol.
+    `Ade20kConfig` deliberately keeps center_crop; only the reference is pinned."""
+    from canvit_pretrain.ade20k.config import Ade20kConfig
+    from canvit_pretrain.ade20k.rl_train import PolicyTrainConfig
+
+    assert PolicyTrainConfig.resize_mode == "squish"
+    assert Ade20kConfig().resize_mode == "center_crop"  # new work keeps aspect ratio
+
+
+def test_harness_policy_run_warns_when_not_band_comparable(caplog):
+    """center_crop is a legitimate choice, so this warns rather than forbids — but a
+    0.016 CE shift must never be silent when the band is quoted to 0.0007."""
+    import logging
+    from dataclasses import replace
+
+    import torch
+
+    from canvit_pretrain.ade20k.config import Ade20kConfig
+    from canvit_pretrain.tasks.ade20k.task import Ade20kRunTask
+
+    cfg = replace(Ade20kConfig(), mode="frozen", probe_repo="canvit/probe-x",
+                  canvas_grid=8, resize_mode="center_crop")
+    with caplog.at_level(logging.WARNING):
+        try:
+            Ade20kRunTask(cfg).build_policy(
+                SimpleNamespace(cfg=SimpleNamespace(canvas_dim=8, patcher_name="uniform")),
+                device=torch.device("cpu"), canvas_grid=8, generator=torch.Generator())
+        except Exception:
+            pass  # model stub is not buildable; the warning fires before that
+    assert "NOT" in caplog.text and "squish" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        try:
+            Ade20kRunTask(replace(cfg, resize_mode="squish")).build_policy(
+                SimpleNamespace(cfg=SimpleNamespace(canvas_dim=8, patcher_name="uniform")),
+                device=torch.device("cpu"), canvas_grid=8, generator=torch.Generator())
+        except Exception:
+            pass
+    assert "resize_mode" not in caplog.text  # silent when it IS band-comparable

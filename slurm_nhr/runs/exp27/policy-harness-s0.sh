@@ -23,6 +23,16 @@
 #   rl_train probe      = probe-ade20k-40k-s512-c{canvas_grid}-in21k
 #   rl_train NO augment ->  --cfg.no-augment
 #   deploy eval + CE-based best.pt  ->  --cfg.eval-policy policy
+#   squish resize       ->  CFG_RESIZE_MODE=squish   (see below — NOT the harness default)
+#
+# RESIZE MODE IS THE MEASUREMENT CONTRACT, not a tuning knob. CanViT-PyTorch-RL
+# squish-resizes image AND mask to scene_size everywhere (its dataset class is named
+# Ade20kSquish; config.py's docstring calls it "the measurement contract every entry
+# point builds on"), and the qband band + EG-C2F baselines exist ONLY under squish.
+# `Ade20kConfig.resize_mode` defaults to center_crop — the right default for NEW work
+# (aspect-preserving, matches pretraining) but NOT band-comparable: the first exp27
+# attempt ran center_crop on both arms and came out 0.016 CE "better" than the band,
+# ~20x the band's own 0.0007 seed spread. Set it explicitly here, forever.
 #
 # THE ONE KNOWN REMAINING DIFFERENCE (doc 15 SS A gap #5, owner-deferred): the
 # reward is scored at the probe's native 64x64 grid here, vs score_res=128 in
@@ -56,6 +66,7 @@ CFG_BATCH_SIZE=16
 CFG_CANVAS_GRID=64
 CFG_PROBE_REPO=canvit/probe-ade20k-40k-s512-c64-in21k
 CFG_EVAL_POLICY=policy
+CFG_RESIZE_MODE=squish       # THE MEASUREMENT CONTRACT — see the note below. Not optional.
 CFG_VAL_EVERY=1000           # rl_train evaluates on the same cadence (9 evals/run)
 CFG_LOG_EVERY=50
 CFG_NUM_WORKERS=4
