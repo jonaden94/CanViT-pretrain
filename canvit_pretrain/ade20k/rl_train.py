@@ -101,6 +101,21 @@ class PolicyTrainConfig:
     glimpses. Costs one extra scorer forward per depth (5.7M params, small next to a
     backbone glimpse forward). Under investigation as the cause of the residual ~0.15
     mIoU gap to the qband band at matched CE — see `unification_docs/17`."""
+    pooled_policy_loss: bool = False
+    """Reproduce the RL repo's rollout ARCHITECTURE: the rollout only collects features
+    under ``no_grad``, and the loss comes from ONE grad-bearing scorer forward over all
+    depths pooled (``rollout.py`` `feats=torch.cat(feats)` -> ``train.py:222``
+    `net(roll.feats)`). The in-graph rollout (p3-notes delta #1) instead makes each
+    depth's selecting forward its own loss forward.
+
+    This is the LAST untested item on the p3-notes deviation list, and unlike
+    ``select_bn_eval`` it changes the GRADIENTS: pooling normalizes ``frontend.bn`` over
+    horizon*B samples spanning t0..t{H-1}, where the in-graph rollout normalizes each
+    depth's B alone. Implies detached selection (the loss forward is separate).
+
+    Under investigation as the cause of the residual mIoU-at-matched-CE deficit: 4 seeds
+    give 44.795 +- 0.093 mIoU t4 vs the band's 44.94 +- 0.09 (~2.6 sigma), and
+    ``select_bn_eval`` moved it by only +0.01."""
     prime_on_policy: float = 0.5
     dueling: bool = True
     entropy_bonus: float = 0.01
@@ -222,13 +237,24 @@ def rollout_and_loss(
 
     pred_rows: list[Tensor] = []  # per-depth [B, A] scorer outputs (grad)
     crit_rows: list[Tensor] = []
+    feat_rows: list[Tensor] = []  # pooled_policy_loss: per-depth features, ONE loss forward
     idxs: list[Tensor] = []
     fracs: list[Tensor] = []
+    detach_select = cfg.select_bn_eval or cfg.pooled_policy_loss
     for _ in range(cfg.train_horizon):
         with torch.no_grad():
             f = encoder(st, logits=logits).float()
-        flat = net(f).reshape(B, -1)  # train-mode forward: carries the graph, feeds the loss
-        if cfg.select_bn_eval:
+        if cfg.pooled_policy_loss:
+            # The RL repo's architecture: the rollout only COLLECTS features (no_grad),
+            # and the loss comes from ONE grad-bearing forward over all depths pooled
+            # (rollout.py `feats=torch.cat(feats)` -> train.py:222 `net(roll.feats)`).
+            # That pools frontend.bn's batch statistics over horizon*B samples spanning
+            # t0..t{H-1}, where the in-graph rollout normalizes each depth's B alone.
+            feat_rows.append(f)
+            flat = None
+        else:
+            flat = net(f).reshape(B, -1)  # train-mode forward: selects AND feeds the loss
+        if detach_select:
             # Mode (b): the glimpse is CHOSEN under EVAL-mode BN (running stats), as the
             # RL repo does. It got that for free from its separate detached collect pass;
             # the in-graph rollout merged selection into the training forward, forcing
@@ -250,7 +276,8 @@ def rollout_and_loss(
             rand_idx = torch.randint(A, (B,), device=device, generator=gen)
             on_pol = torch.rand(B, device=device, generator=gen) < obj.prime_on_policy
             idx = torch.where(on_pol, greedy, rand_idx)
-        pred_rows.append(flat)
+        if flat is not None:
+            pred_rows.append(flat)
         idxs.append(idx)
 
         with torch.no_grad(), amp_ctx:
@@ -265,7 +292,14 @@ def rollout_and_loss(
     target = torch.cat(
         [running[d].normalize(fracs[d], subtract_only=sub) for d in range(cfg.train_horizon)]
     ).detach()
-    pred_all = torch.cat(pred_rows)  # [horizon*B, A]
+    if cfg.pooled_policy_loss:
+        # ONE forward over cat(feats) — depth-major, matching `target`/`flat_idx` order.
+        feats_all = torch.cat(feat_rows)
+        pred_all = net(feats_all).reshape(feats_all.shape[0], -1)
+        if isinstance(obj, PG) and critic is not None:
+            crit_rows = [critic(feats_all).reshape(feats_all.shape[0], -1)]
+    else:
+        pred_all = torch.cat(pred_rows)  # [horizon*B, A]
     flat_idx = torch.cat(idxs)
 
     if isinstance(obj, PG):
