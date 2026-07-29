@@ -153,36 +153,49 @@ did **not** close it, so at least one more difference remains.
 | config | wandb config confirms resize_mode=squish, scene_size 512, canvas_grid 64, n_timesteps 5, augment False, probe loaded ("Initialising head from published probe … mode=frozen") |
 | mIoU reduction | pin includes `68b635f`, so both use the paper order |
 
-### LOCALIZED (2026-07-29): it is `deploy_rollout_viewpoints`, not the task
+### RETRACTED: it is NOT `deploy_rollout_viewpoints`
 
-Full ADE20K val, same model, same loader, same accumulator, same modes via
-`apply_requires_grad`. The ONLY difference is how t0's viewpoint is obtained:
+An earlier revision claimed the bug was localized there, on the strength of 38.948 (via
+`_policy_rollout`) vs 39.579 (via `Viewpoint.full_scene`). **That comparison was invalid — the
+two numbers came from two separate processes.** Run in ONE process, accumulating both t0 paths
+in the same loop over the full val split, they are IDENTICAL. Do not re-chase
+`deploy_rollout_viewpoints` on the basis of that number.
 
-| t0 path | full-val t0 mIoU |
-|---|---|
-| `Viewpoint.full_scene` direct, fed through `eval_probe_on_batch` | **39.579** (= the reference) |
-| the real `Ade20kRunTask._policy_rollout` → `deploy_rollout_viewpoints` | **38.948** |
+**Methodological note, because this cost hours:** a cross-process A/B of two numbers is not a
+comparison. Every isolation here must accumulate both arms in the same loop, in the same
+process, over the same batches. The first measurement that actually did so showed "no
+difference" where two processes had shown 0.63.
 
-So every *component* is right — the harness's own pieces reproduce 39.579 — and the defect is
-in `harness/eval_viewpoints.py::deploy_rollout_viewpoints`.
+### What IS established (from the runs, not a reconstruction)
 
-**Second, damning symptom:** t0 varies with the scorer's random init across runs — 38.948,
-38.969, 39.030, 39.033. t0 is the full-scene anchor and cannot depend on the scorer at all.
-A batch-0 spy DID print the t0 viewpoint as centers=(0,0), scales=1.0 and gave logits
-bit-identical to the reference, so the t0 viewpoint is right at least on the first batch —
-meaning the leak is intermittent or batch-dependent, not a constant wrong viewpoint.
+| | harness's own eval | validated eval, SAME checkpoint |
+|---|---|---|
+| arm B s0 mean(t1-t4) CE | 0.7113 | **0.6865** |
+| arm B s1 mean(t1-t4) CE | 0.7095 | **0.6869** |
+| t0 mIoU (policy-independent) | 38.95 - 39.03 | **39.579** |
 
-Also eliminated in this round: `model_repo` (identical strings), amp placement of
-`sample_at_viewpoint` (grid_sample stays fp32 under autocast — no difference),
-`model.init_state` vs `model.canvit.init_state` (bit-identical), bf16 forward determinism
-(repeat runs bit-identical), and `evaluate`'s aggregation/naming (`miou_t{t}` from `ious[t]`,
-`ce_mean` over t1..t{T-1} — correct).
+So **arm B's TRAINING is essentially fine** (0.6865/0.6869 vs the band's 0.6855 +- 0.0007), and
+the ~0.024 CE deficit was entirely an artifact of the harness's own eval path. The eval bug is
+real; its location is NOT yet known.
 
-**Next step:** in one process, run both t0 paths over MULTIPLE batches and diff `hidden[0]`
-per batch, logging the selector's t0 viewpoint for the whole batch (not just the first two
-rows). Suspect the selector's per-rollout context (`sel.start_rollout` / `ctx`) leaking a
-sampled scale or center into the FULL branch for some batches.
+### Eliminated by measurement — all of these reproduce 39.579, do not re-check
 
+`model_repo`; the two model constructions (`task.build_model` vs `from_pretrained_with_probe`
+— 0 of 234 parameters differ); `build_policy` (mutates nothing — t0 identical before and
+after); amp placement of `sample_at_viewpoint` (grid_sample stays fp32 under autocast);
+`model.init_state` vs `model.canvit.init_state`; bf16 forward determinism (repeats
+bit-identical); eval batch size 16 vs 32; `make_ade20k_loaders`' val loader vs a hand-built
+one (both 39.579, same valid-pixel fraction); `head_logits` vs `eval_probe_on_batch`;
+`derive_glimpse_px(None)` vs `(128)` (both 128); train/eval mode (only the ROOT module's flag
+differs under `apply_requires_grad` — no leaf module); `head.bn` drift during a rollout (none);
+`evaluate`'s aggregation and metric naming.
+
+### Next step
+
+The gap reproduces in the RUNS but in no isolated reconstruction, so stop reconstructing:
+instrument `Ade20kRunTask.evaluate` itself inside a real short harness run
+(`--cfg.max-steps 1 --cfg.val-every 1` reproduces t0 = 39.03) and dump its t0 logits and
+viewpoint from INSIDE it, next to a reference computed in the same process.
 ---
 
 ## B. DEFERRED: unify the eval ROLLOUT (the "layer 2" unification)

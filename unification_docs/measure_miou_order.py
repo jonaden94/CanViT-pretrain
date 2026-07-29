@@ -40,12 +40,18 @@ p.add_argument("--policy-repo", default="",
                     "ckpt, e.g. canvit/qpolicy-ade20k-c64-t5-qband-2026-07-04-s2. Their "
                     "per-seed numbers are in CanViT-PyTorch-RL/docs/qband_results.md, so "
                     "this measures OUR eval against THEIR reference weights.")
+p.add_argument("--harness-ckpt", default="",
+               help="path to a HARNESS `*.policy.pt` (scorer under key 'scorer'). Lets an "
+                    "arm-B run be scored by THIS eval, which is validated against the 8 "
+                    "published qband policies — decomposing 'its training is worse' from "
+                    "'its own eval is wrong'.")
 p.add_argument("--ckpt", default="best.pt")
 p.add_argument("--limit", type=int, default=0, help="0 = full val split")
 p.add_argument("--batch-size", type=int, default=16)
 p.add_argument("--no-amp", action="store_true", help="fp32 control (isolates bf16)")
 args = p.parse_args()
-assert bool(args.run_dir) != bool(args.policy_repo), "pass exactly one of run_dir / --policy-repo"
+assert sum(map(bool, (args.run_dir, args.policy_repo, args.harness_ckpt))) == 1, (
+    "pass exactly one of run_dir / --policy-repo / --harness-ckpt")
 
 device = torch.device("cuda")
 cfg = PolicyTrainConfig(run_name="measure", amp=not args.no_amp)  # canonical recipe defaults
@@ -56,8 +62,10 @@ if args.run_dir:
     ck = torch.load(args.run_dir / args.ckpt, map_location="cpu", weights_only=False)
     print(f"LOCAL ckpt step={ck['step']}  logged val_ce={ck['val_ce']:.4f}  "
           f"logged miou_per_t={[round(m, 4) for m in ck.get('val_miou_per_t', [])]}")
-else:
+elif args.policy_repo:
     print(f"PUBLISHED policy: {args.policy_repo}")
+else:
+    print(f"HARNESS policy ckpt: {args.harness_ckpt}")
 print(f"amp={cfg.amp}")
 
 seg = CanViTForSemanticSegmentation.from_pretrained_with_probe(
@@ -75,7 +83,13 @@ else:
         scales=(1.0,) if fixation else cfg.scales, centers_per_axis=cfg.centers_per_axis,
         block_layers=cfg.block_layers, groups=cfg.feature_groups, dueling=True,
         action_space="fixation" if fixation else "safebox").to(device)
-    net.load_state_dict(ck["net_state"])
+    if args.harness_ckpt:
+        hck = torch.load(args.harness_ckpt, map_location="cpu", weights_only=False)
+        missing, unexpected = net.load_state_dict(hck["scorer"], strict=False)
+        print(f"harness scorer loaded: missing={len(missing)} unexpected={len(unexpected)}")
+        assert not missing, f"missing scorer keys: {missing[:6]}"
+    else:
+        net.load_state_dict(ck["net_state"])
 net.eval()
 encoder = StateEncoder(seg, canvas_grid=cfg.canvas_grid, feature_groups=cfg.feature_groups)
 

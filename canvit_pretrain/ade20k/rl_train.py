@@ -8,8 +8,9 @@ QReg (ε-greedy DAgger, MSE on the standardized fractional-CE reward) or PG
 Deltas vs the RL repo (recorded in unification_docs/p3-notes.md):
 - IN-GRAPH rollout (master plan §4.3): the scorer forward that selects the action
   IS the training forward — one forward per state instead of collect-then-reforward.
-  BatchNorm mode (a) [user 2026-07-22]: that forward runs in train mode, so the
-  strict eval-mode DAgger selection is knowingly approximated.
+  BatchNorm mode (b) is now the DEFAULT (--no-select-bn-eval for the old mode (a)):
+  the glimpse is CHOSEN by a separate eval-mode forward, as the RL repo does. Mode (a)
+  costs 0.19 mIoU t4 at matched CE (exp27 arm A vs arm C, 2026-07-29).
 - Patcher-aware glimpse routing (foveated/square models consume the full image);
   the RL repo was uniform-only. The fixation action space pairs with foveated.
 - Entry: python -m canvit_pretrain.ade20k.rl_train (tyro); wandb tracker.
@@ -88,19 +89,25 @@ class PolicyTrainConfig:
 
     # Objective (flat knobs; `objective` selects the sum-type member)
     objective: Literal["qreg", "pg"] = "qreg"
-    select_bn_eval: bool = False
+    select_bn_eval: bool = True
     """Choose the training glimpse under EVAL-mode BN (running stats) instead of the
     train-mode forward that also carries the loss.
+
+    **DEFAULT since 2026-07-29 (owner-approved): this is what reproduces the band.**
+    exp27 arm C vs arm A, last-step (no best-checkpoint selection noise), measured with
+    the eval validated against all 8 published qband policies:
+
+        mode (b), this default : CE 0.6863   mIoU t4 44.90
+        mode (a), the old one  : CE 0.6874   mIoU t4 44.72
+        band, last step        : CE 0.6863   mIoU t4 44.91
 
     ``False`` is "BN mode (a)" (p3-notes, a recorded user decision): the in-graph rollout
     merged selection into the training forward, so ``frontend.bn`` selects on BATCH stats.
     ``True`` is mode (b) — what CanViT-PyTorch-RL does, which it got for free from its
     separate detached collect pass.
 
-    Not cosmetic: measured 2026-07-29, the two modes disagree on **45.7%** of chosen
-    glimpses. Costs one extra scorer forward per depth (5.7M params, small next to a
-    backbone glimpse forward). Under investigation as the cause of the residual ~0.15
-    mIoU gap to the qband band at matched CE — see `unification_docs/17`."""
+    Not cosmetic: the two modes disagree on **45.7%** of chosen glimpses. Costs one extra
+    scorer forward per depth (~9% step time, measured; the backbone path is untouched)."""
     pooled_policy_loss: bool = False
     """Reproduce the RL repo's rollout ARCHITECTURE: the rollout only collects features
     under ``no_grad``, and the loss comes from ONE grad-bearing scorer forward over all
@@ -113,9 +120,9 @@ class PolicyTrainConfig:
     horizon*B samples spanning t0..t{H-1}, where the in-graph rollout normalizes each
     depth's B alone. Implies detached selection (the loss forward is separate).
 
-    Under investigation as the cause of the residual mIoU-at-matched-CE deficit: 4 seeds
-    give 44.795 +- 0.093 mIoU t4 vs the band's 44.94 +- 0.09 (~2.6 sigma), and
-    ``select_bn_eval`` moved it by only +0.01."""
+    NOT validated by a training run, and no longer needed for band parity: ``select_bn_eval``
+    alone reproduces the band's last-step CE and mIoU. Kept because it completes the
+    p3-notes deviation list and is the obvious next lever if a residual reappears."""
     prime_on_policy: float = 0.5
     dueling: bool = True
     entropy_bonus: float = 0.01
