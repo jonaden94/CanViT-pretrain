@@ -39,7 +39,8 @@ set -euo pipefail
 
 # === ESSENTIALS ===
 RUN_GROUP=exp27
-RUN_NAME=exp27-policy-harness-s0
+SEED="${SEED:-0}"            # SEED=1 bash <this> for a second seed
+RUN_NAME=exp27-policy-harness-s$SEED
 ARRAY=0-0%1                  # single job: 8000 steps fits well inside the walltime
 TIME=0-04:00:00
 MEM=64G
@@ -48,7 +49,7 @@ TASK=ade20k
 
 # === config ===
 CFG_WANDB_PROJECT=exp27
-CFG_SEED=0
+CFG_SEED=$SEED
 CFG_MAX_STEPS=8000
 CFG_N_TIMESTEPS=5
 CFG_BATCH_SIZE=16

@@ -21,7 +21,8 @@ set -euo pipefail
 
 # === ESSENTIALS ===
 RUN_GROUP=exp27
-RUN_NAME=exp27-policy-oldloop-s0
+SEED="${SEED:-0}"            # SEED=1 bash <this> for a second seed
+RUN_NAME=exp27-policy-oldloop-s$SEED
 TIME=0-03:00:00
 MEM=64G
 
@@ -53,5 +54,5 @@ sbatch \
     --export=ALL \
     slurm_nhr/ade20k/train_policy.sbatch \
     --run-name "$RUN_NAME" \
-    --seed 0 \
+    --seed "$SEED" \
     --wandb-project exp27
