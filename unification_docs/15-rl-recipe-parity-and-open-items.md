@@ -286,3 +286,37 @@ not reachable from this module today.
 Plot everything with `unification_docs/plot_policy_curves.py`, which computes all curves
 in ONE process at ONE eval batch size — required, since absolute mIoU shifts ~0.06 with
 eval batch size (§A2).
+
+### A4 results — the Figure-4B comparison (2026-07-30, 5 harness-trained seeds)
+
+Full ADE20K val, c64, squish-512, ONE process at eval batch 32. Produced by
+`plot_policy_curves.py`; artifacts `band_harness_5seed.{png,json}` in the repo root
+(PNG is gitignored, so the numbers live here).
+
+| policy | t0 | t1 | t2 | t3 | t4 |
+|---|---|---|---|---|---|
+| **Viewpoint-Q trained** (n=5, mean) | 39.58 | **42.58** | **43.85** | **44.41** | **44.77** |
+| &nbsp;&nbsp;min…max over seeds | 39.58 | 42.45…42.66 | 43.76…43.94 | 44.31…44.62 | 44.66…45.00 |
+| Viewpoint-Q **untrained** | 39.58 | 40.79 | 41.33 | 41.81 | 42.19 |
+| EG-C2F | 39.58 | 42.22 | 43.31 | 44.05 | 44.67 |
+| C2F | 39.58 | 41.23 | 42.54 | 43.54 | 44.71 |
+| Random (safe-box IID, NOT F-IID) | 39.58 | 41.37 | 42.18 | 42.84 | 43.42 |
+| *paper Table 4 — EG-C2F* | *39.6* | *42.2* | *43.3* | *44.1* | *44.7* |
+| *paper Table 4 — C2F* | *39.6* | *41.3* | *42.5* | *43.6* | *44.7* |
+
+Three things worth reading off it:
+
+1. **The learned policy dominates at every t, by the most EARLY** — +0.36 over EG-C2F at
+   t1, +0.54 at t2, converging to +0.10 by t4. Same shape as the reference figure: the
+   policy's value is getting to a good canvas *fast*, not a higher ceiling.
+2. **t0 = 39.58 for EVERY policy.** That is the check that the full-scene anchor is shared
+   and the probe is clean; before the probe-BN fix (canvit_pytorch `1f5121b`) it read 39.03
+   and varied per seed.
+3. **An UNTRAINED scorer is WORSE than random glimpses** (42.19 vs 43.42 at t4). A
+   random-init conv net's argmax picks consistently badly rather than diversely, so the
+   trained band is measuring a real learned policy and not "any scorer helps".
+
+Trained t4 = 44.77 ± 0.13 (sd over 5 seeds) against the band's last-step 44.91 — about 1σ
+low, and worth a look if the next run has budget. CE is the band's defining metric and it
+matches: mean best CE 0.6859 ± 0.0004 vs 0.6853 ± 0.0007, with 4/5 seeds inside the band's
+own per-seed spread.
