@@ -311,7 +311,24 @@ def run_rollout(
                 reward = (prev_pi_loss - cur_pi) / prev_pi_loss.clamp_min(1e-4)
                 prev_pi_loss = cur_pi
                 ploss = joint.glimpse_loss(depth=t, scores=aux["scores"], flat_idx=aux["flat_idx"], reward=reward)
-                chunk_loss = chunk_loss + ploss
+                # chunk_loss is divided by n_glimpses below, but there are only
+                # n_glimpses-1 POLICY glimpses (t0 is the anchor and carries no policy
+                # loss). Undo that division and re-normalize by the policy count, so the
+                # policy term is the MEAN over depths -- which is what the reference does:
+                # `rl_train.rollout_and_loss` cats all depths into one [horizon*B, A]
+                # tensor and takes a single `F.mse_loss`, i.e. one mean over horizon*B.
+                #
+                # Without this the harness's scorer gradient was exactly
+                # (n_glimpses-1)/n_glimpses = 0.8x the reference's at horizon 4 -- a 20%
+                # smaller effective policy LR at the same nominal `policy_lr`, so the
+                # scorer was systematically under-trained at a fixed step budget. VPG
+                # already compensated for the same division (see the `* n_glimpses` in the
+                # deferred-credit branch below); the inline QReg/PG path did not.
+                #
+                # Only the GRAPH term is rescaled; `pol_acc["loss"]` keeps the raw
+                # per-depth loss so the logged `policy_loss` series stays on the same scale
+                # as earlier harness runs and as rl_train's logged `train_loss`.
+                chunk_loss = chunk_loss + ploss * (n_glimpses / (n_glimpses - 1))
                 pol_acc["loss"] = pol_acc["loss"] + ploss.detach()
                 pol_acc["reward"] = pol_acc["reward"] + reward.mean().detach()
                 pol_acc["n"] += 1

@@ -1,19 +1,33 @@
 # exp27 — does the UNIFIED HARNESS reproduce the CanViT-PyTorch-RL policy recipe?
 
-## VERDICT (2026-07-30): YES
+## VERDICT (2026-07-30): QUALIFIED YES — close, with a small unresolved residual
 
-Measured at the LAST step by the eval validated against all 8 published qband policies
-(`unification_docs/measure_miou_order.py`, +0.0002 CE / -0.04 mIoU vs their published rows):
+Measured at the LAST step, all 7 checkpoints through the SAME eval in ONE process at eval
+batch 32 (both arms log `eval_batch_size=32`, so there is no batch-size confound):
 
-| | mean(t1-t4) CE | mIoU t4 |
-|---|---|---|
-| band, last step (published) | 0.6863 | 44.91 |
-| `rl_train`, BN mode (b) | 0.6863 | 44.90 |
-| **harness, BN mode (b)** | **0.6876 / 0.6865** | **44.80 / 44.90** |
+| | n | mean(t1-t4) CE | mIoU t4 |
+|---|---|---|---|
+| band, last step (published) | 8 | 0.6863 | 44.91 |
+| `rl_train`, BN mode (b) — ported | 2 | **0.6864 +- 0.0008** | **44.91 +- 0.03** |
+| harness, BN mode (b) — unified | 5 | 0.6880 +- 0.0010 | 44.77 +- 0.13 |
 
-Final 5-seed confirmation run: **15100922-15100926** (`PRETRAIN=4428e34`,
-`PYTORCH=1f5121b`). The harness eval is now bit-identical to the validated eval — 0.0000 on
-every metric, two checkpoints (`unification_docs/eval_equivalence.py`).
+The harness reproduces the recipe to within ~0.0016 CE / ~0.14 mIoU, but **the ported
+trainer lands dead on the band and the harness does not** (0.0016 CE = ~2.3x the band's own
+0.0007 seed spread). Both metrics move together, so this is probably real rather than noise —
+yet an exact permutation test gives **p = 0.095**, and with n=2 vs n=5 that is the FLOOR
+(2/21): significance is unreachable by design. **A third `rl_train` seed** takes the floor to
+0.018 and settles it (~65 min, one A100). See `unification_docs/15-…md` §A5.
+
+An earlier version of this table read "harness 0.6876/0.6865, 44.80/44.90" from the 2-seed
+precursor and called the verdict an unqualified YES, partly on *best-checkpoint* CE (where
+the harness IS inside the band). Best-ckpt is a max over 8 noisy evals and so flatters the
+noisier arm — the harness is noisier (t4 sd 0.133 vs 0.031). **Compare arms at the last step.**
+
+The gap is training-side, not measurement-side: the harness eval is bit-identical (0.0000 on
+t0..t4 + ce_mean) to the validated eval on **all three model sources** — published HF qband,
+`rl_train`, and harness (`unification_docs/eval_equivalence.py`).
+
+Final 5-seed run: **15100922-15100926** (`PRETRAIN=4428e34`, `PYTORCH=1f5121b`).
 
 **FOUR defects had to be fixed, and every one of them was silent:**
 

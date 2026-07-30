@@ -131,8 +131,26 @@ the metric (eval-mode BN, dataset-level mIoU, per-image CE mean).
 ## A2. RESOLVED 2026-07-30: the harness eval was wrong, and the cause was a corrupted probe
 
 **The harness eval is now bit-identical to the validated eval** — 0.0000 on every metric
-(mIoU t0..t4 and mean CE), on two independently trained checkpoints, at matched eval batch
-size. Runnable check: `unification_docs/eval_equivalence.py`.
+(mIoU t0..t4 and mean CE), at matched eval batch size. Runnable check:
+`unification_docs/eval_equivalence.py`.
+
+Coverage extended 2026-07-30 to **all three model sources**, because "two harness
+checkpoints" left open the possibility that the two evals agreed only on models the harness
+itself produced. All three sources share an identical 452-key scorer `state_dict`, so a
+published or `rl_train` checkpoint loads into the harness scorer unchanged:
+
+| source | ckpt | delta HARNESS vs VALIDATED |
+|---|---|---|
+| published HF qband | `qpolicy-…-s0` | **0.0000** on t0..t4 + ce_mean |
+| ported trainer (`rl_train`) | bneval s0 `last.pt` | **0.0000** |
+| unified harness | `step-8000.policy.pt` | **0.0000** |
+
+Independent cross-check on the ported source: the harness eval reproduces `rl_train`'s OWN
+logged per-timestep mIoU on its own checkpoints to <=0.01 (s0 42.86/43.84/44.44/44.89 vs its
+logged 42.86/43.85/44.44/44.88; s1 identical to 2dp). Note what this does and does not
+establish: we never executed CanViT-PyTorch-RL's eval code. The chain is *our validated eval
+reproduces their published per-seed numbers to +0.0002 CE / -0.04 mIoU*, and the harness eval
+is bit-identical to that. Agreement-with-published-numbers, not code-level identity.
 
 ### Root cause: StateEncoder construction polluted the probe's BatchNorm
 
@@ -323,7 +341,97 @@ Three things worth reading off it:
    random-init conv net's argmax picks consistently badly rather than diversely, so the
    trained band is measuring a real learned policy and not "any scorer helps".
 
-Trained t4 = 44.77 ± 0.13 (sd over 5 seeds) against the band's last-step 44.91 — about 1σ
-low, and worth a look if the next run has budget. CE is the band's defining metric and it
-matches: mean best CE 0.6859 ± 0.0004 vs 0.6853 ± 0.0007, with 4/5 seeds inside the band's
-own per-seed spread.
+## A5. The residual arm gap: the ported trainer beats the harness by a little (2026-07-30)
+
+Earlier text here called the t4 shortfall "about 1σ low, worth a look", and rested the
+verdict on *best-checkpoint* CE (0.6859 ± 0.0004 vs 0.6853 ± 0.0007, 4/5 seeds inside the
+band). That was too generous a reading. Measured **at the last step, both arms through the
+SAME eval in ONE process at eval batch 32** (`unification_docs/compare_arms.py`; all 7
+checkpoints, full val):
+
+| arm | n | mean(t1–t4) CE | mIoU t4 | t4 per seed |
+|---|---|---|---|---|
+| band, last step (published) | 8 | 0.6863 | 44.91 | — |
+| `rl_train` mode (b) — ported | 2 | **0.6864 ± 0.0008** | **44.91 ± 0.03** | 44.89, 44.93 |
+| harness mode (b) — unified | 5 | 0.6880 ± 0.0010 | 44.77 ± 0.13 | 45.00, 44.76, 44.73, 44.70, 44.66 |
+
+**The ported trainer lands exactly on the band; the harness sits 0.0016 CE above it** — about
+2.3× the band's own 0.0007 per-seed spread. Both metrics point the same way, which is what
+makes it worth taking seriously: a fluke would not move CE and mIoU together.
+
+**But it is not yet statistically established, and cannot be with these group sizes.** Exact
+one-sided permutation test over all C(7,2)=21 splits gives **p = 0.095** for both CE and t4 —
+and 2/21 is the *floor*: with n=2 vs n=5, even perfect separation cannot reach p < 0.05. A
+**third `rl_train` seed** drops the floor to 1/C(8,3) = 0.018 and makes the question
+decidable. That is the single cheapest next measurement (~65 min on one A100).
+
+The gap is **training-side, not measurement-side** — §A2's table has both arms' checkpoints
+scoring 0.0000 apart under the two evals, and the numbers above come from one process with
+one model instance and one loader.
+
+### A5.1 CAUSE FOUND: the harness's policy gradient was exactly 0.8x the reference's
+
+**`rl_train` and the harness are NOT the same training code** — they are two independent
+implementations of the same recipe, so a divergence needs no exotic explanation. Reading
+both paths end to end turned one up immediately.
+
+`harness/rollout.py` accumulates each glimpse's QReg loss into `chunk_loss`, and the branch
+backward divides that by **`n_glimpses`**. But only **`n_glimpses-1`** glimpses are POLICY
+glimpses — t0 is the full-scene anchor and carries no policy loss. The reference instead cats
+every depth into one `[horizon*B, A]` tensor and takes a single `F.mse_loss`, i.e. **one mean
+over `horizon*B`**. So at horizon 4:
+
+```
+loss_harness = (1/5) * sum_{t=1..4} mse_t     vs     loss_rl = (1/4) * sum_{t=1..4} mse_t
+```
+
+**The harness's scorer gradient was exactly 0.8x the reference's** — measured, not inferred:
+ratio `0.800000` on both loss and gradient norm. That is a **20% smaller effective policy LR**
+at the same nominal `policy_lr=2e-4`, so the scorer was systematically **under-trained** at a
+fixed 8000-step budget. Under-training is the right *direction* for the observed deficit,
+which is what makes it the leading candidate.
+
+Nothing compensated: `rl_weight=1.0`, and `policy_lr` equals `rl_train`'s `lr` exactly.
+The **VPG path already compensated for this same division** (`* n_glimpses` in the
+deferred-credit branch, with a comment explaining why) — only the inline QReg/PG path did not.
+
+Fixed by rescaling the graph term to `ploss * n_glimpses/(n_glimpses-1)`, leaving
+`pol_acc["loss"]` on its raw scale so the logged `policy_loss` series stays comparable to
+earlier runs and to `rl_train`'s `train_loss`. Pinned by
+`harness/tests/test_policy_loss_scale.py`: the fixed gradient is **bit-identical** (atol=0) to
+the reference's, and the unfixed one is pinned at exactly 0.8x so a refactor cannot silently
+reintroduce it. The `run_rollout` parity digest `9a0100a1a3de3acd` is untouched (it is measured
+with no policy attached). Full suite 339 passed.
+
+**This affects every harness QReg/PG policy run, not just ade20k** — including joint distill
+policy runs.
+
+**Not yet confirmed as THE cause.** A mechanism being real does not make it the explanation —
+see `mechanism-tests-dont-predict-outcomes`. Arm D (`policy-lossfix-s0.sh`, 5 seeds) tests it.
+
+### A5.2 Two further divergences found, NOT yet fixed
+
+Both concern `PolicySelector.select`, and both are numerical rather than systematic, so they
+would act like a seed change rather than a bias:
+
+1. **The selector runs OUTSIDE `amp_ctx` for t>=1.** `run_rollout` wraps the t0 select in
+   `with amp_ctx:` (rollout.py:258) but calls the t>=1 select *before* entering the context
+   (rollout.py:285-287). So every policy glimpse's encoder + scorer forward runs in **fp32**.
+2. **The encoder recomputes the probe logits.** `rl_train` passes the bf16 logits it already
+   computed for the CE reward (`encoder(st, logits=logits)`); the harness calls
+   `encoder(state)`, and `StateEncoder.__call__` recomputes `head_logits` itself when
+   `logits is None`. So the harness's entropy features derive from **fp32** logits where the
+   reference's derive from **bf16** ones — and it pays an extra probe-head forward per glimpse
+   for the privilege.
+
+Fixing (2) by threading the reward logits through would both match the reference and remove
+the redundant forward. Deferred until arm D reports, so that one change is under test at a
+time.
+
+Also worth keeping straight: **best-ckpt and last-step tell different stories here.** The
+harness is inside the band on best-ckpt CE and outside it on last-step CE. Best-ckpt
+selection over 8 evals is a max over noise, so it flatters whichever arm is noisier — and the
+harness is (sd 0.133 vs 0.031 on t4). Quote last-step for arm comparisons.
+
+Two earlier observations that still hold: t0 = 39.58 for every policy (the clean-probe
+check), and an untrained scorer is worse than random glimpses (42.19 vs 43.42 at t4).
