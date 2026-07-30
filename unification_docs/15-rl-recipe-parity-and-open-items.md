@@ -122,80 +122,63 @@ the metric (eval-mode BN, dataset-level mIoU, per-image CE mean).
 
 ---
 
-## A2. OPEN (2026-07-29): the harness's t0 does not match, and t0 is POLICY-INDEPENDENT
+## A2. RESOLVED 2026-07-30: the harness eval was wrong, and the cause was a corrupted probe
 
-**Use t0 as the first check on any policy implementation.** It is the full-scene anchor —
-same frozen backbone, same probe, no policy involved — so every implementation must produce
-the same number. The reference, measured with `measure_miou_order.py`:
+**The harness eval is now bit-identical to the validated eval** — 0.0000 on every metric
+(mIoU t0..t4 and mean CE), on two independently trained checkpoints, at matched eval batch
+size. Runnable check: `unification_docs/eval_equivalence.py`.
 
-```
-t0:  CE 0.7651    mIoU 39.57   (paper Table 4 says 39.6 for c64 — match)
-```
+### Root cause: StateEncoder construction polluted the probe's BatchNorm
 
-The harness reports **t0 mIoU 39.03, CE 0.7886** — off by −0.54 mIoU / +0.024 CE. It is
-reproducible locally, identical at step 0 (so not BN drift), and identical under both
-`--cfg.eval-policy policy` and `--cfg.eval-policy full` (so not the selector).
+`StateEncoder.__init__` builds an image-independent template by running the segmentation
+probe on a blank canvas (`init_reference`). `harness/run.py` builds the policy at line 277
+but freezes the model at line 280 — so that forward ran with the head in **train mode**, on
+a batch of **one** synthetic canvas. Two effects, both measured:
 
-This is how the frozen-head BN bug was caught (t0 was 38.50 vs 38.75 across seeds, and a
-policy-independent quantity cannot be seed-dependent). Fixing that moved t0 to 39.03 but
-did **not** close it, so at least one more difference remains.
+1. It **polluted `head.bn.running_mean` by 1.074**. `apply_requires_grad` then froze BN at
+   those corrupted values for the entire run, degrading EVERY timestep including t0
+   (39.030 instead of 39.579) — and corrupting the policy REWARD, which is that probe's CE
+   reduction.
+2. The template itself came out **1.621288** off, and that exact number propagated into
+   every `ent_delta`/`cos_init` feature, shifting **14/32** of a trained policy's chosen
+   glimpses and costing ~0.1 mIoU at each policy step (0.117/0.110/0.101/0.090 at t1..t4,
+   reproducible on two checkpoints).
 
-### Eliminated, by direct measurement — do not re-check these
+Fixed in **canvit_pytorch `1f5121b`**: `init_reference` forces eval mode for that forward
+and restores the caller's mode. Fixed in core rather than by reordering `run.py` because no
+caller should have to know that constructing a feature encoder depends on module mode, and
+an init template is by definition a property of the weights. Pinned by
+`canvit_pytorch/policy/test_init_reference_mode.py` (4 tests).
 
-| candidate | verdict |
-|---|---|
-| t0 forward code path (`full_scene_state`+`head_logits` vs `_policy_rollout`+`eval_probe_on_batch`) | **bit-identical**: max\|Δlogits\| = 0.000000, 100% argmax agreement, same canvas |
-| the selector's FULL branch | t0 identical via the open-loop `full` generator (0.39030 both) |
-| `glimpse_px` None vs 128 | equivalent — `derive_glimpse_px` computes (8−1)·16+16 = 128 for None |
-| `NUM_CLASSES` / `IGNORE_LABEL` | both paths import them from `canvit_pretrain.ade20k.data` |
-| val loader / transforms | same `make_val_transforms(512,"squish")`, same `ADE20kDataset`, no shuffle/drop_last |
-| eval batch size (16 vs 32) | t0 = 39.57 / 39.58 — not batch-size dependent, so head BN is genuinely frozen |
-| config | wandb config confirms resize_mode=squish, scene_size 512, canvas_grid 64, n_timesteps 5, augment False, probe loaded ("Initialising head from published probe … mode=frozen") |
-| mIoU reduction | pin includes `68b635f`, so both use the paper order |
+`ade20k/rl_train.py` was never affected: it calls `seg.eval()` before constructing its
+encoder.
 
-### RETRACTED: it is NOT `deploy_rollout_viewpoints`
+### Eval batch size shifts absolute mIoU by ~0.06 — fix it before comparing
 
-An earlier revision claimed the bug was localized there, on the strength of 38.948 (via
-`_policy_rollout`) vs 39.579 (via `Viewpoint.full_scene`). **That comparison was invalid — the
-two numbers came from two separate processes.** Run in ONE process, accumulating both t0 paths
-in the same loop over the full val split, they are IDENTICAL. Do not re-chase
-`deploy_rollout_viewpoints` on the basis of that number.
+Not a bug, but it invalidates careless comparisons. Same checkpoint, same code:
 
-**Methodological note, because this cost hours:** a cross-process A/B of two numbers is not a
-comparison. Every isolation here must accumulate both arms in the same loop, in the same
-process, over the same batches. The first measurement that actually did so showed "no
-difference" where two processes had shown 0.63.
-
-### What IS established (from the runs, not a reconstruction)
-
-| | harness's own eval | validated eval, SAME checkpoint |
+| eval batch | t0 mIoU | t4 mIoU |
 |---|---|---|
-| arm B s0 mean(t1-t4) CE | 0.7113 | **0.6865** |
-| arm B s1 mean(t1-t4) CE | 0.7095 | **0.6869** |
-| t0 mIoU (policy-independent) | 38.95 - 39.03 | **39.579** |
+| 16 (`measure_miou_order` default) | 39.57 | 44.90 |
+| 32 (`Ade20kConfig.eval_batch_size`) | 39.58 | 44.84 |
 
-So **arm B's TRAINING is essentially fine** (0.6865/0.6869 vs the band's 0.6855 +- 0.0007), and
-the ~0.024 CE deficit was entirely an artifact of the harness's own eval path. The eval bug is
-real; its location is NOT yet known.
+bf16 kernels differ with batch shape, and near-tied candidate scores then flip some
+glimpses. **Quote absolute mIoU only with the eval batch size stated, and compute curves
+that are meant to be compared against each other in ONE process at ONE batch size.**
 
-### Eliminated by measurement — all of these reproduce 39.579, do not re-check
+### How this was nearly missed — read before debugging anything similar
 
-`model_repo`; the two model constructions (`task.build_model` vs `from_pretrained_with_probe`
-— 0 of 234 parameters differ); `build_policy` (mutates nothing — t0 identical before and
-after); amp placement of `sample_at_viewpoint` (grid_sample stays fp32 under autocast);
-`model.init_state` vs `model.canvit.init_state`; bf16 forward determinism (repeats
-bit-identical); eval batch size 16 vs 32; `make_ade20k_loaders`' val loader vs a hand-built
-one (both 39.579, same valid-pixel fraction); `head_logits` vs `eval_probe_on_batch`;
-`derive_glimpse_px(None)` vs `(128)` (both 128); train/eval mode (only the ROOT module's flag
-differs under `apply_requires_grad` — no leaf module); `head.bn` drift during a rollout (none);
-`evaluate`'s aggregation and metric naming.
+Two wrong conclusions were published to this doc en route, both from bad methodology:
 
-### Next step
+1. "Localized to `deploy_rollout_viewpoints`" — from comparing 38.948 and 39.579 measured
+   in **separate processes**. In one process they were identical.
+2. "There is no bug; the harness eval is fine" — from same-process t0 comparisons that
+   agreed. They agreed because **both sides shared the corrupted probe**. t0 is also the
+   one timestep that cannot expose a glimpse-SELECTION difference.
 
-The gap reproduces in the RUNS but in no isolated reconstruction, so stop reconstructing:
-instrument `Ade20kRunTask.evaluate` itself inside a real short harness run
-(`--cfg.max-steps 1 --cfg.val-every 1` reproduces t0 = 39.03) and dump its t0 logits and
-viewpoint from INSIDE it, next to a reference computed in the same process.
+**Rule: when two implementations agree with each other but neither matches an external
+reference, suspect shared upstream state — not the comparison.** And always compare at
+t>=1, not just t0, when the suspect is anything policy-driven.
 ---
 
 ## B. DEFERRED: unify the eval ROLLOUT (the "layer 2" unification)
