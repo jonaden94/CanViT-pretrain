@@ -113,6 +113,15 @@ class Ade20kConfig:
 
     # EVAL viewpoint policy — the SHARED option set (harness/eval_viewpoints.py), the
     # same one distill and in1k take.
+    reward_score_res: int | None = 128
+    """Resolution at which the POLICY REWARD's probe CE is scored (`per_image_loss`).
+    Reward-only — nothing else reads it (`harness/rollout.py:268/310/327`).
+
+    128 is CanViT-PyTorch-RL's value, validated there against full 512 at Spearman 0.999
+    for candidate ranking. The harness previously scored at the probe's native 64 — cheaper
+    but never validated, and it was the last known config difference from the reference
+    (doc 15 §A gap #5, closed 2026-07-30). None = the masks' own resolution.
+    """
     eval_policy: EvalPolicy = "auto"
     """Validation trajectory. ``"auto"`` = this task's historical one, IID random from a
     full-scene anchor — inherited from the specialize probe, which TRAINED on random

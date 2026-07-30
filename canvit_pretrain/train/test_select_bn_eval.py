@@ -40,8 +40,14 @@ def _pick(sel, feats):
     return sel.last_aux["flat_idx"].clone()
 
 
-def test_off_by_default_so_the_parity_digest_is_untouched():
+def test_selector_primitive_stays_off_by_default():
+    """`PolicySelector` is the low-level seam and keeps mode (a) as ITS default, so any
+    caller that does not opt in is byte-identical to the pre-mode-(b) behaviour (the
+    `run_rollout` parity digest is measured that way). The USER-FACING default lives in
+    `JointPolicyConfig.select_bn_eval`, which is True."""
+    from canvit_pretrain.train.config import JointPolicyConfig
     assert PolicySelector.select_bn_eval is False
+    assert JointPolicyConfig().select_bn_eval is True, "band-reproducing config is the default"
 
 
 def test_mode_b_changes_the_chosen_glimpse():

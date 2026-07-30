@@ -3,17 +3,22 @@
 Port of canvit_specialize's loss.py / metrics.py / state.py / eval_utils.py
 (unchanged math; the P2 gate compares numbers against specialize runs)."""
 
+import logging
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import torch.nn as nn
 import torch.nn.functional as F
 from canvit_pytorch.metrics import mIoUAccumulator  # noqa: F401  (re-exported for this repo's consumers)
+from canvit_pytorch.policy import per_image_ce
 from canvit_pytorch.probes import SegmentationProbe
 from torch import Tensor
 from torch.optim import AdamW
 
 from .data import IGNORE_LABEL
+
+log = logging.getLogger(__name__)
 
 
 def ce_loss(logits: Tensor, masks: Tensor) -> Tensor:
@@ -47,6 +52,44 @@ def preds_from_logits(logits: Tensor, H: int, W: int) -> Tensor:
     if logits.shape[-2:] != (H, W):
         logits = F.interpolate(logits.float(), size=(H, W), mode="bilinear", align_corners=False)
     return logits.argmax(1)
+
+
+@lru_cache(maxsize=8)
+def _warn_score_res(res: int, full: int) -> None:
+    """Once per (res, full) pair — this sits inside the per-glimpse reward path."""
+    log.warning(
+        "reward_score_res=%d does not divide the mask resolution %d, so the reward is "
+        "scored at FULL %d instead (more accurate, ~2x slower). The reference value 128 "
+        "assumes scene_size=512; set --cfg.reward-score-res to a divisor of %d to silence.",
+        res, full, full, full)
+
+
+def reward_ce(logits: Tensor, masks: Tensor, *, score_res: int | None) -> Tensor:
+    """Per-image probe CE — the policy reward's raw material — scored at ``score_res``.
+
+    ONE implementation for both policy entry points (`ade20k/rl_train.py::ce_from_logits`
+    and `tasks/ade20k/task.py::BoundAde20kTask.per_image_loss`), because the reward must
+    not depend on which trainer computes it. The RL repo's rule: bilinear-upsample the
+    logits to ``score_res`` and STRIDE-subsample the masks down to it. ``score_res=None``
+    means the masks' own resolution (full res).
+
+    128 is the reference value, validated there against full 512 at Spearman 0.999 for
+    candidate ranking at ~2x lower cost. The harness previously scored at the probe's
+    native 64 instead — cheaper still, but never validated, and it is the last known
+    config difference from the reference (doc 15 §A gap #5).
+    """
+    full = masks.shape[-1]
+    res = score_res or full
+    if full % res != 0:
+        # Subsampling is a stride, so it needs divisibility. Fall back to FULL resolution
+        # rather than assert: full res is strictly more accurate (it is what score_res
+        # approximates for speed), so a wrong-but-plausible reward is impossible here —
+        # only a slower one. 128 divides the reference's 512; other scene sizes land here.
+        _warn_score_res(res, full)
+        res = full
+    m = masks if res == full else masks[:, :: full // res, :: full // res].contiguous()
+    up = F.interpolate(logits.float(), size=(res, res), mode="bilinear", align_corners=False)
+    return per_image_ce(up, m, ignore_label=IGNORE_LABEL).float()
 
 
 def eval_probe_on_batch(probe: nn.Module, features: Tensor, masks: Tensor, iou: mIoUAccumulator) -> None:

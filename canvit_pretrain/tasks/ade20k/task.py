@@ -44,11 +44,12 @@ class BoundAde20kTask:
 
     def __init__(
         self, *, seg: CanViTForSemanticSegmentation, masks: Tensor, canvas_grid: int,
-        glimpse_px: int | None = None,
+        glimpse_px: int | None = None, reward_score_res: int | None = 128,
     ):
         self.seg = seg
         self.masks = masks  # [B, H, W] long
         self.canvas_grid = canvas_grid
+        self.reward_score_res = reward_score_res
         self.full_image = consumes_full_image(seg)
         self.glimpse_px = None if self.full_image else derive_glimpse_px(seg, glimpse_px)
 
@@ -74,13 +75,11 @@ class BoundAde20kTask:
         return TaskLoss(combined=ce_loss(self._logits(readout), self.masks))
 
     def per_image_loss(self, readout: Any) -> Tensor:
-        logits = self._logits(readout)
-        masks = self.masks
-        if masks.shape[1:] != logits.shape[2:]:
-            masks = F.interpolate(masks.unsqueeze(1).float(), logits.shape[2:], mode="nearest").squeeze(1).long()
-        per_px = F.cross_entropy(logits, masks, ignore_index=IGNORE_LABEL, reduction="none")  # [B, G, G]
-        valid = (masks != IGNORE_LABEL).float()
-        return (per_px * valid).flatten(1).sum(1) / valid.flatten(1).sum(1).clamp_min(1.0)
+        """The POLICY REWARD's raw material (rollout.py:268/310/327) — nothing else reads
+        it. Shared with `rl_train.ce_from_logits` via `reward_ce`, so the reward cannot
+        depend on which trainer computes it (doc 15 §A gap #5, closed 2026-07-30)."""
+        from canvit_pretrain.ade20k.metrics import reward_ce
+        return reward_ce(self._logits(readout), self.masks, score_res=self.reward_score_res)
 
 
 class Ade20kRunTask:
@@ -286,7 +285,8 @@ class Ade20kRunTask:
     def bind(self, batch, device, *, model, head):
         _, masks = batch
         return BoundAde20kTask(seg=model, masks=masks.to(device),
-                               canvas_grid=self.canvas_grid(model), glimpse_px=self.cfg.glimpse_px)
+                               canvas_grid=self.canvas_grid(model), glimpse_px=self.cfg.glimpse_px,
+                               reward_score_res=self.cfg.reward_score_res)
 
     # --- visualization (specialize's segmentation overlay, restored) -------
     def viz_frame(self, *, model, images, gout, viewpoint, loss):

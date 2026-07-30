@@ -69,15 +69,25 @@ class JointPolicyConfig:
     ONLY the scorer (backbone/head shaped purely by the distill loss). False couples
     them: the policy loss also reshapes the backbone ('glimpse-plannable' features),
     more ambitious and more memory (backbone activations enter the policy graph)."""
-    select_bn_eval: bool = False
-    """Pick the glimpse with a separate EVAL-mode forward of the scorer ("BN mode (b)",
-    the default in `ade20k/rl_train.py`). The scorer's one BatchNorm makes train-mode
-    selection normalize on batch statistics where the RL reference uses running stats:
-    45.7% of chosen glimpses differ, and mode (a) measured 0.19 mIoU t4 worse at matched
-    CE (exp27 arm A vs arm C). ~9% step time.
+    select_bn_eval: bool = True
+    """Pick the glimpse with a separate EVAL-mode forward of the scorer ("BN mode (b)").
 
-    False by default so the `run_rollout` parity digest is untouched — flipping this
-    default is a separate decision from making it available."""
+    **DEFAULT since 2026-07-30 (owner-approved): this is the configuration that reproduces
+    the published qband checkpoints.** Measured on full ADE20K val at the last step, scored
+    by the eval validated against all 8 published policies:
+
+        harness mode (b) : CE 0.6876 / 0.6865   mIoU t4 44.80 / 44.90
+        harness mode (a) : CE 0.6865 / 0.6869   mIoU t4 44.81 / 44.61
+        band, last step  : CE 0.6863             mIoU t4 44.91
+
+    The scorer's one BatchNorm makes train-mode selection normalize on batch statistics
+    where the reference uses running statistics — 45.7% of chosen glimpses differ. It is
+    also the train/deploy-consistent choice: deployment always selects under eval-mode BN,
+    so mode (a) trained on a state distribution the deployed policy never visits.
+
+    Costs one extra scorer forward per glimpse (~9% step time, backbone path untouched).
+    `--rl.no-select-bn-eval` restores mode (a). The `run_rollout` parity digest is
+    unaffected either way: it is measured with no policy attached (`use_rl=False`)."""
     keep_random_branch: bool = False
     """False (default): every branch is a policy branch (all t>=1 glimpses are the
     policy's grid picks; the distill loss trains on exactly those states). True:

@@ -48,7 +48,7 @@ from canvit_pretrain.train.tracker import make_tracker
 
 from .config import ResizeMode, _default_ade20k_root, _default_wandb_dir, _default_wandb_entity, _default_wandb_project
 from .data import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset, make_val_transforms
-from .metrics import mIoUAccumulator, preds_from_logits
+from .metrics import mIoUAccumulator, preds_from_logits, reward_ce
 from .rollout import consumes_full_image, derive_glimpse_px
 
 log = logging.getLogger(__name__)
@@ -174,13 +174,12 @@ class PolicyTrainConfig:
 
 def ce_from_logits(logits: Tensor, masks: Tensor, *, score_res: int | None = None) -> Tensor:
     """Per-image CE from probe logits; score_res subsamples the mask + upsample target
-    (~2x cheaper, candidate ranking preserved to Spearman 0.999 at 128). None = full res."""
-    full = masks.shape[-1]
-    res = score_res or full
-    assert full % res == 0, f"score_res {res} must divide mask res {full}"
-    m = masks if res == full else masks[:, :: full // res, :: full // res].contiguous()
-    up = F.interpolate(logits, size=(res, res), mode="bilinear", align_corners=False)
-    return per_image_ce(up, m, ignore_label=IGNORE_LABEL).float()
+    (~2x cheaper, candidate ranking preserved to Spearman 0.999 at 128). None = full res.
+
+    Delegates to `ade20k/metrics.py::reward_ce` so this reference trainer and the harness
+    task compute the reward through ONE implementation — pinned byte-identical by
+    `test_reward_ce_shared.py`."""
+    return reward_ce(logits, masks, score_res=score_res)
 
 
 def _glimpse_input(seg, images: Tensor, vp: Viewpoint, glimpse_px: int | None) -> Tensor:
