@@ -70,13 +70,13 @@ CFG_RESIZE_MODE=squish       # THE MEASUREMENT CONTRACT — see the note below. 
 CFG_VAL_EVERY=1000           # rl_train evaluates on the same cadence (9 evals/run)
 CFG_LOG_EVERY=50
 CFG_NUM_WORKERS=4
-EXTRA_ARGS="--preset policy_only --cfg.no-augment --rl.select-bn-eval"
+EXTRA_ARGS="--preset policy_only --cfg.no-augment"   # mode (b) + score_res 128 are DEFAULTS as of 4428e34
 # =================
 
 # cea4dee: shared eval-viewpoint knob (so a policy run is validated by DEPLOYING the
 # policy instead of on random glimpses) + the recipe knobs (betas, LR ramp, augment,
 # probe head in frozen mode). 4db7c3f: the squish protocol fix above.
-PRETRAIN_COMMIT=f7fc6f7
+PRETRAIN_COMMIT=4428e34
 PYTORCH_COMMIT=017ce9b
 FOVI_COMMIT=c399d3b
 
