@@ -409,6 +409,68 @@ policy runs.
 **Not yet confirmed as THE cause.** A mechanism being real does not make it the explanation —
 see `mechanism-tests-dont-predict-outcomes`. Arm D (`policy-lossfix-s0.sh`, 5 seeds) tests it.
 
+### A5.1b RESULT (2026-07-30): the difference is REAL; the fix explains at most part of it
+
+All 15 checkpoints re-scored at the last step through ONE eval in ONE process at eval batch
+32 (`unification_docs/compare_arms.py`, which also runs the exact permutation tests):
+
+| arm | n | mean(t1–t4) CE | mIoU t4 |
+|---|---|---|---|
+| band, last step | 8 | 0.6863 | 44.91 |
+| **arm C** `rl_train` (ported reference) | 5 | **0.6866 ± 0.0008** | **44.854 ± 0.057** |
+| arm B harness (0.8× gradient) | 5 | 0.6880 ± 0.0010 | 44.770 ± 0.133 |
+| arm D harness + scale fix | 5 | 0.6871 ± 0.0015 | 44.755 ± 0.136 |
+
+Exact one-sided permutation tests (n=5 vs n=5 → 252 splits, attainable floor 0.0040):
+
+| comparison | ΔCE | p | Δt4 | p |
+|---|---|---|---|---|
+| arm B vs arm C | +0.0014 | **0.0278** | −0.084 | 0.123 |
+| arm D vs arm C | +0.0005 | 0.262 | −0.100 | 0.103 |
+| arm D vs arm B (improvement) | −0.0009 | 0.151 | −0.016 | 0.583 |
+
+**1. The harness/reference difference is REAL.** Arm B vs arm C on the band's defining metric:
+p = 0.0278. This is what n=2 could not establish (its floor was 0.095) and is the answer to
+"are they actually different". They are.
+
+**2. Going to n=5 shrank the apparent gap.** Arm C's first two seeds (0.6870, 0.6859) were on
+the lucky side of its own distribution; seeds 2–4 came in 0.6857/0.6870/0.6876, moving arm C
+from 0.6864 ± 0.0008 to 0.6866 ± 0.0008 and widening its t4 spread. **Do not read an arm's
+level off two seeds** — that is what made the first pass of this comparison look cleaner than
+the data supported.
+
+**3. The scale fix moved the mean the right way but is NOT individually significant.** Arm D
+cuts the CE gap from +0.0014 to +0.0005 (about two thirds), and arm D vs arm C is no longer
+detectable (p = 0.26). But arm D vs arm B is only p = 0.151, and **t4 did not improve at all**
+(−0.016, p = 0.58). So: "the harness is no longer distinguishable from the reference on CE" is
+supported; "the 0.8× was the cause" is **not**. The defect is proven arithmetic; its outcome
+effect is at the edge of what 5 seeds can see.
+
+**4. The t4 mIoU shortfall survives in BOTH harness arms and did not respond to the fix.**
+Pooling them (they do not differ on t4, p = 0.58) gives n=10 vs n=5: **−0.092, p = 0.078**.
+Consistent in direction, never significant, unmoved by the policy-LR change.
+
+**5. The harness is ~2.4× NOISIER on t4** — sd 0.133 / 0.136 vs arm C's 0.057, across both
+arms independently. Variance at n=5 is weak evidence, but it is the more distinctive signal
+here than the level, and it points at glimpse SELECTION rather than at the optimizer: the
+remaining §A5.2 divergence (fp32 vs bf16 logits into the entropy features) flips near-tied
+candidates, which is exactly a variance mechanism. **This, not the loss scale, is where I
+would look next.**
+
+### A5.3 Why §A5.2 was NOT "fixed" while here
+
+The obvious-looking fix — wrap the t≥1 `sel.select` in `amp_ctx` so the recomputed logits are
+bf16 like the reference's — is **wrong**: it would also put the SCORER forward under autocast,
+where `rl_train` runs it in fp32. Reference = bf16 logits + fp32 scorer; harness = fp32 logits
++ fp32 scorer; amp-wrapped = bf16 logits + bf16 scorer. That trades one divergence for
+another.
+
+The faithful fix is to thread the logits the task already has into `encoder(state, logits=…)`,
+matching `rl_train` and removing the redundant probe-head forward. That needs an extra
+argument on the `Selector.select` protocol (and so touches `RandomSelector` /
+`MixtureSelector`), which is a design change rather than a bug fix — left for the owner rather
+than guessed at, especially to chase a p = 0.078 effect.
+
 ### A5.2 Two further divergences found, NOT yet fixed
 
 Both concern `PolicySelector.select`, and both are numerical rather than systematic, so they

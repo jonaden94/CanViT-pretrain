@@ -1,33 +1,48 @@
 # exp27 — does the UNIFIED HARNESS reproduce the CanViT-PyTorch-RL policy recipe?
 
-## VERDICT (2026-07-30): QUALIFIED YES — close, with a small unresolved residual
+## VERDICT (2026-07-30): the harness reproduces the recipe, with a real but small residual
 
-Measured at the LAST step, all 7 checkpoints through the SAME eval in ONE process at eval
-batch 32 (both arms log `eval_batch_size=32`, so there is no batch-size confound):
+15 checkpoints, all re-scored at the LAST step through ONE eval in ONE process at eval batch
+32 (every arm logs `eval_batch_size=32`, so no batch-size confound).
+`unification_docs/compare_arms.py` produces this table and the tests.
 
-| | n | mean(t1-t4) CE | mIoU t4 |
-|---|---|---|---|
-| band, last step (published) | 8 | 0.6863 | 44.91 |
-| `rl_train`, BN mode (b) — ported | 2 | **0.6864 +- 0.0008** | **44.91 +- 0.03** |
-| harness, BN mode (b) — unified | 5 | 0.6880 +- 0.0010 | 44.77 +- 0.13 |
+| arm | n | mean(t1-t4) CE | mIoU t4 | jobs |
+|---|---|---|---|---|
+| band, last step (published) | 8 | 0.6863 | 44.91 | — |
+| **C** `rl_train` (ported reference) | 5 | **0.6866 +- 0.0008** | **44.854 +- 0.057** | 15098292/93, 15103016-18 |
+| **B** harness (0.8x policy gradient) | 5 | 0.6880 +- 0.0010 | 44.770 +- 0.133 | 15100922-26 |
+| **D** harness + scale fix | 5 | 0.6871 +- 0.0015 | 44.755 +- 0.136 | 15103388-92 |
 
-The harness reproduces the recipe to within ~0.0016 CE / ~0.14 mIoU, but **the ported
-trainer lands dead on the band and the harness does not** (0.0016 CE = ~2.3x the band's own
-0.0007 seed spread). Both metrics move together, so this is probably real rather than noise —
-yet an exact permutation test gives **p = 0.095**, and with n=2 vs n=5 that is the FLOOR
-(2/21): significance is unreachable by design. **A third `rl_train` seed** takes the floor to
-0.018 and settles it (~65 min, one A100). See `unification_docs/15-…md` §A5.
+Exact one-sided permutation tests (252 splits; attainable floor 0.0040):
 
-An earlier version of this table read "harness 0.6876/0.6865, 44.80/44.90" from the 2-seed
-precursor and called the verdict an unqualified YES, partly on *best-checkpoint* CE (where
-the harness IS inside the band). Best-ckpt is a max over 8 noisy evals and so flatters the
-noisier arm — the harness is noisier (t4 sd 0.133 vs 0.031). **Compare arms at the last step.**
+| comparison | dCE | p | dt4 | p |
+|---|---|---|---|---|
+| B vs C | +0.0014 | **0.0278** | -0.084 | 0.123 |
+| D vs C | +0.0005 | 0.262 | -0.100 | 0.103 |
+| D vs B (improvement) | -0.0009 | 0.151 | -0.016 | 0.583 |
 
-The gap is training-side, not measurement-side: the harness eval is bit-identical (0.0000 on
-t0..t4 + ce_mean) to the validated eval on **all three model sources** — published HF qband,
-`rl_train`, and harness (`unification_docs/eval_equivalence.py`).
+**The harness/reference difference is REAL** (B vs C, p=0.0278 on the band's defining metric).
+**A concrete cause was found and fixed**: `run_rollout` divided the policy loss by
+`n_glimpses` when only `n_glimpses-1` glimpses carry one, making the harness's scorer gradient
+exactly **0.8x** the reference's — a 20% smaller effective policy LR (commit bc0b16b, doc 15
+§A5.1). **But the fix does not fully explain the gap:** it cuts CE +0.0014 -> +0.0005 (D vs C
+no longer detectable, p=0.26) yet D vs B is only p=0.151 and **t4 did not move at all**.
 
-Final 5-seed run: **15100922-15100926** (`PRETRAIN=4428e34`, `PYTORCH=1f5121b`).
+**Do not read an arm's level off two seeds.** Arm C's first two seeds were on the lucky side
+of its own distribution (0.6870/0.6859, then 0.6857/0.6870/0.6876); an earlier version of this
+table quoted arm C as 0.6864 +- 0.0008 / 44.91 +- 0.03 from n=2 and called the harness gap
+larger than it is. Also: compare at the LAST step, not best-ckpt — best-ckpt is a max over 8
+noisy evals and flatters the noisier arm.
+
+**The most distinctive residual is VARIANCE, not level.** The harness is ~2.4x noisier on t4
+(sd 0.133/0.136 vs 0.057) in both arms independently, and the pooled t4 shortfall is
+-0.092 (p=0.078, n=10 vs 5), unmoved by the LR fix. That points at glimpse SELECTION, i.e.
+the remaining divergence in doc 15 §A5.2 (fp32 vs bf16 logits into the entropy features,
+which flips near-tied candidates) — the next place to look, and NOT a one-line fix (§A5.3).
+
+Measurement is not the issue: the harness eval is bit-identical (0.0000 on t0..t4 + ce_mean)
+to the validated eval on **all three model sources** — published HF qband, `rl_train`, and
+harness (`unification_docs/eval_equivalence.py`).
 
 **FOUR defects had to be fixed, and every one of them was silent:**
 

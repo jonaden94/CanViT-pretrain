@@ -1,12 +1,23 @@
-"""Arm A (`rl_train`, the ported trainer) vs arm B (the unified harness) — every checkpoint
-through ONE eval, in ONE process, at ONE batch size. The two arms' scorer key sets are
-identical (452/452), so rl_train's `net_state` loads into the harness scorer unchanged.
+"""Every exp27 policy arm through ONE eval, in ONE process, at ONE batch size — plus an
+exact permutation test between any two arms.
 
-Answers exactly one question: is the ported trainer really better than the harness, or
-were the two numbers the owner compared measured differently?
+The arms' scorer key sets are identical (452/452), so `rl_train`'s `net_state` loads into
+the harness scorer unchanged and all three can be scored by the same code path.
+
+  arm C  `rl_train` + BN mode (b)  — the ported reference
+  arm B  harness, BN mode (b)      — BEFORE the policy-loss scale fix (0.8x gradient)
+  arm D  harness + the scale fix   — pin bc0b16b
+
+Answers two questions: is the ported trainer really better than the harness (rather than
+just measured differently), and does the scale fix close the gap? Statistics are an EXACT
+permutation test, because n=5 per arm makes the normal-approximation p-values meaningless —
+and because at n=2 vs n=5 the attainable floor was 0.095, which is how the first read of
+this comparison ended up inconclusive.
 """
+import itertools
 import json
 import statistics as st
+from glob import glob
 from pathlib import Path
 
 import torch
@@ -18,14 +29,34 @@ from canvit_pretrain.harness.spec import TrainSpec
 from canvit_pretrain.tasks.ade20k.task import Ade20kRunTask
 
 ROOT = Path("/mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-pretrain")
-BNEVAL = {
-    0: ROOT / "checkpoints/canvit-ade20k-policies/exp27-policy-bneval-s0_qreg_s0_20260729_175712/last.pt",
-    1: ROOT / "checkpoints/canvit-ade20k-policies/exp27-policy-bneval-s1_qreg_s1_20260729_175713/last.pt",
-}
-HARNESS = {
-    s: ROOT / f"logs/exp27/exp27-policy-harness-s{s}/checkpoints/step-8000.policy.pt"
-    for s in range(5)
-}
+
+
+def _rl_train_ckpts(tag: str) -> dict[int, Path]:
+    """rl_train run dirs carry a timestamp, so glob rather than hard-code."""
+    out: dict[int, Path] = {}
+    for d in sorted(glob(str(ROOT / f"checkpoints/canvit-ade20k-policies/{tag}-s*_qreg_s*"))):
+        seed = int(Path(d).name.split("_qreg_s")[1].split("_")[0])
+        p = Path(d) / "last.pt"
+        if p.exists():
+            out[seed] = p
+    return out
+
+
+def _harness_ckpts(tag: str) -> dict[int, Path]:
+    out: dict[int, Path] = {}
+    for s in range(8):
+        p = ROOT / f"logs/exp27/{tag}-s{s}/checkpoints/step-8000.policy.pt"
+        if p.exists():
+            out[s] = p
+    return out
+
+
+# (label, ckpts, state_dict key)
+ARMS = [
+    ("armC rl_train", _rl_train_ckpts("exp27-policy-bneval"), "net_state"),
+    ("armB harness", _harness_ckpts("exp27-policy-harness"), "scorer"),
+    ("armD harness+fix", _harness_ckpts("exp27-policy-lossfix"), "scorer"),
+]
 
 T, BS, dev = 5, 32, torch.device("cuda")
 torch.manual_seed(0)
@@ -49,11 +80,16 @@ apply_requires_grad(model=model, head=head, joint=joint,
                     spec=TrainSpec.policy_only(freeze_model=True))
 model.eval()
 
-print(f"one process, eval batch {BS}, full val, squish-512 c64\n")
-rows = {}
-for arm, table, key in (("rl_train (bneval)", BNEVAL, "net_state"),
-                        ("harness", HARNESS, "scorer")):
-    for seed, path in table.items():
+print(f"one process, eval batch {BS}, full val, squish-512 c64")
+print("band, last step: CE 0.6863  mIoU t4 44.91\n")
+rows: dict[str, dict] = {}
+per_arm: dict[str, dict[str, list[float]]] = {}
+for arm, table, key in ARMS:
+    if not table:
+        print(f"{arm:18s} -- no checkpoints yet, skipping")
+        continue
+    per_arm[arm] = {"ce": [], "t4": []}
+    for seed, path in sorted(table.items()):
         ck = torch.load(path, map_location="cpu", weights_only=False)
         missing, _ = joint.scorer.load_state_dict(ck[key], strict=False)
         assert not missing, f"missing scorer keys in {path}: {missing[:5]}"
@@ -63,18 +99,51 @@ for arm, table, key in (("rl_train (bneval)", BNEVAL, "net_state"),
         mi = [out[f"miou_t{t}"] * 100 for t in range(T)]
         rows[f"{arm} s{seed}"] = {"miou": mi, "ce_mean": out["ce_mean"],
                                   "ce_t": [out[f"ce_t{t}"] for t in range(T)]}
-        print(f"{arm:20s} s{seed}  CE {out['ce_mean']:.4f}  mIoU " +
+        per_arm[arm]["ce"].append(out["ce_mean"])
+        per_arm[arm]["t4"].append(mi[4])
+        print(f"{arm:18s} s{seed}  CE {out['ce_mean']:.4f}  mIoU " +
               " ".join(f"{v:6.2f}" for v in mi))
 
 print()
-for arm in ("rl_train (bneval)", "harness"):
-    ks = [k for k in rows if k.startswith(arm)]
-    t4 = [rows[k]["miou"][4] for k in ks]
-    ce = [rows[k]["ce_mean"] for k in ks]
-    sd4 = st.stdev(t4) if len(t4) > 1 else float("nan")
-    sdce = st.stdev(ce) if len(ce) > 1 else float("nan")
-    print(f"{arm:20s} n={len(ks)}  t4 {st.mean(t4):.3f} +- {sd4:.3f}  "
-          f"CE {st.mean(ce):.4f} +- {sdce:.4f}   t4 vals {[round(v, 2) for v in t4]}")
+for arm, v in per_arm.items():
+    n = len(v["ce"])
+    sce = st.stdev(v["ce"]) if n > 1 else float("nan")
+    st4 = st.stdev(v["t4"]) if n > 1 else float("nan")
+    print(f"{arm:18s} n={n}  CE {st.mean(v['ce']):.4f} +- {sce:.4f}  "
+          f"t4 {st.mean(v['t4']):.3f} +- {st4:.3f}")
+
+
+def perm_p(a: list[float], b: list[float], *, higher_is_worse: bool) -> tuple[float, float, int]:
+    """EXACT one-sided permutation test on the difference of means (b - a).
+
+    Exact, not a t-test: at n=5 per arm the normal approximation is not credible, and the
+    ATTAINABLE floor matters — with n=2 vs n=5 it is 2/21 = 0.095, so no result there could
+    ever have reached 0.05 however clean the separation looked.
+    """
+    pool = a + b
+    obs = st.mean(b) - st.mean(a)
+    cnt = tot = 0
+    for c in itertools.combinations(range(len(pool)), len(a)):
+        g1 = [pool[i] for i in c]
+        g2 = [pool[i] for i in range(len(pool)) if i not in c]
+        d = st.mean(g2) - st.mean(g1)
+        tot += 1
+        cnt += (d >= obs - 1e-12) if higher_is_worse else (d <= obs + 1e-12)
+    return obs, cnt / tot, tot
+
+
+print()
+names = list(per_arm)
+for i in range(len(names)):
+    for j in range(i + 1, len(names)):
+        x, y = names[i], names[j]
+        if min(len(per_arm[x]["ce"]), len(per_arm[y]["ce"])) < 2:
+            continue
+        dce, pce, tot = perm_p(per_arm[x]["ce"], per_arm[y]["ce"], higher_is_worse=True)
+        dt4, pt4, _ = perm_p(per_arm[x]["t4"], per_arm[y]["t4"], higher_is_worse=False)
+        print(f"{y} vs {x}:  dCE={dce:+.4f} p={pce:.4f}   dt4={dt4:+.3f} p={pt4:.4f}"
+              f"   ({tot} splits, floor {1 / tot:.4f})")
 
 Path(__file__).with_name("compare_arms_results.json").write_text(
-    json.dumps({"eval_batch_size": BS, "rows": rows}, indent=2))
+    json.dumps({"eval_batch_size": BS, "rows": rows,
+                "per_arm": per_arm}, indent=2))
