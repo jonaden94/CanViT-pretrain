@@ -30,17 +30,30 @@ New `[policy]` extra (timm). 5 CPU tests incl. hub round-trip + legacy config.
 
 ## Deliberate deltas vs the RL repo (all recorded decisions)
 
-1. **In-graph rollout replaces collect-detached-then-reforward** (master plan
-   §4.3). **BN mode (a)** [user]: selection under train-mode BN — strict eval-mode
-   DAgger selection knowingly approximated; fallback (b) documented in §4.3.
+1. **In-graph rollout replaces collect-detached-then-reforward** (master plan §4.3).
+   **BN mode (a) was RETIRED 2026-07-30 — mode (b) is now the default on both paths.**
+   The knowingly-approximated train-mode selection turned out to cost **0.19 mIoU t4 at
+   matched CE** (exp27 arm A vs arm C, measured at the last step): the scorer's one
+   BatchNorm normalized on batch statistics where the reference uses running statistics,
+   and the two modes disagree on 45.7% of chosen glimpses. `select_bn_eval=True` restores
+   the reference behaviour; `--no-select-bn-eval` / `--rl.no-select-bn-eval` gets mode (a)
+   back. The rest of the in-graph rollout (one forward per state) was shown to cost
+   nothing once selection was fixed — see doc 15 §A3. `pooled_policy_loss` implements the
+   other half of the original deviation and remains available and unvalidated.
 2. **`image=` API**: the RL repo called `seg.canvit(glimpse=…)` against the OLD
    core API (it pins upstream m2b3) — the port uses the current keyword and the
    patcher-aware glimpse routing (`consumes_full_image`), so foveated works.
 3. Not ported (deferred or dropped): MLflow/justfile/uv (D4), sweeps
    (`search/`, plateaued at seed noise), `unfreeze="probe"` ladder + Q-Prop
    *trainer-level* extras beyond the loss (P4 territory), `keep_every`
-   step-checkpoints, figure4b baselines + `policy.eval` episode runner (→
-   canvit_eval in P6), flow (out of scope).
+   step-checkpoints, `policy.eval` episode runner (→ canvit_eval in P6), flow (out of
+   scope).
+
+   **Update 2026-07-30: the figure4b BASELINES are no longer missing.** EG-C2F is ported
+   into `harness/eval_viewpoints.py` from `canvit_eval/policies.py` (the implementation the
+   published row came from) and validated to max|Δ| = 0.05 against paper Table 4;
+   `coarse_to_fine` matches to 0.07. Both are selectable as `--cfg.eval-policy`. Note that
+   our `random` is NOT the paper's F-IID (it runs +0.17..+0.42 above that row) — doc 15 §A4.
 4. Q-Prop critic: one optimizer over actor+critic params, critic non-dueling —
    simplification; treat qprop as experimental until validated.
 5. Data: squish transforms, no augmentation (the RL repo's protocol), its own

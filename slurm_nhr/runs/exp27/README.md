@@ -1,5 +1,40 @@
 # exp27 — does the UNIFIED HARNESS reproduce the CanViT-PyTorch-RL policy recipe?
 
+## VERDICT (2026-07-30): YES
+
+Measured at the LAST step by the eval validated against all 8 published qband policies
+(`unification_docs/measure_miou_order.py`, +0.0002 CE / -0.04 mIoU vs their published rows):
+
+| | mean(t1-t4) CE | mIoU t4 |
+|---|---|---|
+| band, last step (published) | 0.6863 | 44.91 |
+| `rl_train`, BN mode (b) | 0.6863 | 44.90 |
+| **harness, BN mode (b)** | **0.6876 / 0.6865** | **44.80 / 44.90** |
+
+Final 5-seed confirmation run: **15100922-15100926** (`PRETRAIN=4428e34`,
+`PYTORCH=1f5121b`). The harness eval is now bit-identical to the validated eval — 0.0000 on
+every metric, two checkpoints (`unification_docs/eval_equivalence.py`).
+
+**FOUR defects had to be fixed, and every one of them was silent:**
+
+1. **resize protocol** — center_crop vs the band's squish; made arm A look 0.016 CE *better*
+   than a band quoted to +-0.0007.
+2. **mIoU argmax/upsample order** — this repo was the only one in the stack argmaxing before
+   upsampling; worth 0.19 mIoU (commit 68b635f, re-bases all earlier ADE20K mIoU).
+3. **frozen head left in train mode** — `requires_grad_(False)` does not freeze BatchNorm, so
+   the probe drifted under the reward (commit bc5e00e).
+4. **probe BN polluted at startup** — `StateEncoder` construction ran the probe in train mode
+   on a batch of ONE blank canvas, shifting `head.bn.running_mean` by 1.074 and the init
+   template by 1.621288. This is the one that made the harness eval disagree with the
+   reference at all (canvit_pytorch 1f5121b).
+
+Plus BN mode (b) for glimpse SELECTION, which is what actually closed the remaining
+0.19 mIoU (doc 15 §A3).
+
+---
+
+## Original plan (kept for the reasoning)
+
 wandb project `exp27`. Two arms, seed 0, same GPU class, same pinned commits.
 
 | arm | script | entry point | status before this |
