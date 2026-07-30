@@ -135,8 +135,26 @@ class PolicySelector:
                 idx = torch.where(on_pol, idx, rand_idx)
         self.last_aux = {"feats": feats, "flat_idx": idx, "scores": scores}
         acts = self.vp_flat[idx]
+        scales = acts[:, 2].contiguous()
+        if self.fallback.is_foveated:
+            # FIXATION action space: the candidate table's scale column is a hardcoded 1.0
+            # (`fixation_candidates` has no scale dimension — the policy chooses WHERE to
+            # look, never how wide). Taking that 1.0 literally pinned every policy glimpse
+            # to full-field foveation regardless of `foveated_scale`, so on a model
+            # pretrained at another scale (e.g. exp24's fixed_scale=2.0) the t0 anchor and
+            # the random glimpses used 2.0 while the policy's used 1.0 — the out-of-
+            # distribution view scale `Ade20kConfig.foveated_scale` warns actively degrades
+            # the canvas. Ask the scale law instead, exactly as the random path does.
+            #
+            # No-op wherever it was already correct: `fixed` returns a constant and
+            # `per_rollout` reads the frozen ctx scale, so NO RNG is consumed and
+            # fixed_scale=1.0 (the default) reproduces the old value bit-for-bit. Only
+            # `per_glimpse` draws, and only in the configuration that was broken.
+            scales, _ = self.fallback.view_scales(
+                rollout_scales=ctx.rollout_scales, batch_size=batch_size, device=device
+            )
         return NamedViewpoint(
-            name="policy", centers=acts[:, :2].contiguous(), scales=acts[:, 2].contiguous()
+            name="policy", centers=acts[:, :2].contiguous(), scales=scales
         )
 
 
@@ -228,26 +246,45 @@ class RandomSelector:
                 )
         return RolloutCtx(rollout_scales=rollout_scales)
 
+    def view_scales(
+        self, *, rollout_scales: Tensor | None, batch_size: int, device: torch.device
+    ) -> tuple[Tensor, str]:
+        """The foveated/square VIEW SCALE ``[B]`` for one glimpse, plus the matching
+        ``center_mode`` — i.e. the ``foveated_scale`` law, on its own.
+
+        Split out of ``_foveated_random_vp`` so the POLICY can share it: the foveation
+        window is ``fix_size = scale * H``, and *what* scale to use is a property of how
+        the backbone was pretrained, not of who picked the centre. ``PolicySelector``
+        therefore takes its centre from the scorer and its scale from here, which is what
+        ``fixation_candidates`` already documents ("the view scale comes from
+        FoveatedScaleConfig at glimpse time, not from the policy").
+
+        The extraction is behaviour-preserving for the random path: ``sample_view_scales``
+        is still called at exactly the same point in the same branch, so the RNG stream —
+        and therefore the pinned random-viewpoint distributions — is unchanged.
+        """
+        fs = self.foveated_scale
+        if fs.mode == "fixed":
+            return torch.full((batch_size,), float(fs.fixed_scale), device=device), "full_field"
+        if fs.mode == "per_rollout":
+            assert rollout_scales is not None
+            scales = rollout_scales
+        else:  # per_glimpse
+            scales = sample_view_scales(
+                batch_size, device, distribution=fs.distribution,
+                min_scale=fs.min_scale, max_scale=fs.max_scale,
+            )
+        return scales, ("safebox" if fs.distribution == "safebox" else "full_field")
+
     def _foveated_random_vp(
         self, rollout_scales: Tensor | None, batch_size: int, device: torch.device
     ) -> NamedViewpoint:
         """RANDOM viewpoint for the foveated/square path, with the view scale
         drawn per ``foveated_scale`` (see :class:`FoveatedScaleConfig`).
         ``rollout_scales`` is the frozen [B] scale for ``mode='per_rollout'``."""
-        fs = self.foveated_scale
-        if fs.mode == "fixed":
-            scales = torch.full((batch_size,), float(fs.fixed_scale), device=device)
-            center_mode = "full_field"
-        else:
-            if fs.mode == "per_rollout":
-                assert rollout_scales is not None
-                scales = rollout_scales
-            else:  # per_glimpse
-                scales = sample_view_scales(
-                    batch_size, device, distribution=fs.distribution,
-                    min_scale=fs.min_scale, max_scale=fs.max_scale,
-                )
-            center_mode = "safebox" if fs.distribution == "safebox" else "full_field"
+        scales, center_mode = self.view_scales(
+            rollout_scales=rollout_scales, batch_size=batch_size, device=device
+        )
         return random_foveated_viewpoint(batch_size, device, scales=scales, center_mode=center_mode)
 
     def select(
