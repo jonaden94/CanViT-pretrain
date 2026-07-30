@@ -169,8 +169,15 @@ Not a bug, but it invalidates careless comparisons. Same checkpoint, same code:
 | 32 (`Ade20kConfig.eval_batch_size`) | 39.58 | 44.84 |
 
 bf16 kernels differ with batch shape, and near-tied candidate scores then flip some
-glimpses. **Quote absolute mIoU only with the eval batch size stated, and compute curves
-that are meant to be compared against each other in ONE process at ONE batch size.**
+glimpses. **Quote absolute mIoU only with the eval batch size stated.**
+
+Batch size is the ONLY remaining sensitivity. An earlier revision of this section also
+blamed cross-process "bf16 nondeterminism" for a ~0.5 mIoU swing — **that was wrong and is
+retracted.** After the `1f5121b` fix, two independent processes running
+`plot_policy_curves.py` on identical inputs produced BIT-IDENTICAL output: max|Δ| = 0.0000
+across 5 baseline curves and 25 policy-seed values. The swing was entirely this bug (whether
+a `StateEncoder` had been constructed in train mode before evaluating). An unexplained
+~0.5 mIoU difference is a defect, not arithmetic.
 
 ### How this was nearly missed — read before debugging anything similar
 
