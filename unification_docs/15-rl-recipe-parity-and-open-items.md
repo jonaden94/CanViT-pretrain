@@ -8,8 +8,10 @@ trainer and the harness path, and **one architectural unification deliberately d
 
 ## A. `rl_train.py` vs `harness.run ade20k --preset policy_only` — the recipe gap
 
-**Status: the harness has the CAPABILITY, not the RECIPE.** Do not describe the harness
-as reproducing the RL flagship until the table below is closed and a run confirms it.
+**Status (2026-07-30): CLOSED. The harness reproduces the recipe.** Every gap below is
+closed, the harness eval is bit-identical to the validated eval (§A2), and BN mode (b) —
+the last gap — is the default on both paths (§A3). Historical detail kept below because
+several of these were silent failures worth recognising again.
 
 `ade20k/rl_train.py` is gate-validated on this cluster (jobs 15025279 / 15025337,
 mean t1–t4 val CE 0.6855 / 0.6867 vs the qband band 0.6853 ± 0.0007 — see `p3-notes.md`).
@@ -21,7 +23,10 @@ Candidate grid (`scales=(0.5, 0.25)`, `centers_per_axis=16` → 512 candidates);
 (`width=128`, `block_layers=3`); `prime_on_policy=0.5`; policy LR 2e-4 / WD 1e-2; grad clip
 1.0 with the scorer clipped SEPARATELY from the model; the reward formula
 `(prev - cur)/prev.clamp_min(1e-4)` off a full-scene t0 anchor; per-depth `RunningNorm`;
-ε-greedy DAgger; BN mode (a).
+ε-greedy DAgger.
+
+**BN mode was NOT identical** and was the last real gap — see §A3. Mode (b) (a separate
+eval-mode forward chooses the glimpse) is now the default on both paths.
 
 ### CLOSED 2026-07-29 — the harness can now EXPRESS the recipe
 
@@ -31,7 +36,7 @@ Candidate grid (`scales=(0.5, 0.25)`, `centers_per_axis=16` → 512 candidates);
 | 2 | LR schedule | ramp over `warmup_frac=0.125`, then **hold** | policy group fell through to `ScheduleSpec()` = `warmup_steps=0` → **no ramp** | `cli.resolve_spec` now builds the policy group from `JointPolicyConfig` (`policy_warmup_frac=0.125`, `warmup_constant`) |
 | 3 | train data | **NO augmentation** — `make_val_transforms` on BOTH splits (rl_train.py:349-353) | `make_segmentation_train_transforms` unconditionally | **`Ade20kConfig.augment`** (+ the same-named `In1kConfig.augment`), default `True` |
 | 4 | step budget | 8000 = `640_000 // (batch * (1 + train_horizon))` | ade20k default 40000 | plain config value; no code needed |
-| 5 | reward resolution | `score_res=128` | probe grid (64) | **STILL OPEN — owner deferred 2026-07-28.** Add `reward_score_res` to `Ade20kConfig`, thread into `BoundAde20kTask.per_image_loss`. Revisit only if a run disagrees with the band |
+| 5 | reward resolution | `score_res=128` | probe grid (64) | **CLOSED 2026-07-30.** `Ade20kConfig.reward_score_res=128`, and BOTH entry points now compute the reward through ONE function (`ade20k/metrics.py::reward_ce`); `rl_train.ce_from_logits` delegates to it, pinned bit-identical. Falls back to full res with a warn-once when `score_res` does not divide the mask resolution |
 | 6 | **probe head** | trained probe via `from_pretrained_with_probe` (default `probe-ade20k-40k-s512-c{grid}-in21k`) | `build_model` gated `probe_repo` on `mode=="finetune"`, so a FROZEN (= policy) run built a **fresh RANDOM head** | `probe_repo` now honoured in both modes + `build_policy` WARNS when a policy run has none |
 
 **Gap #6 was the blocker, and it was silent.** The scorer's reward is the fraction of the
@@ -67,11 +72,12 @@ downstream tasks but the bodies differ (dinov3 segmentation transforms vs
 alike. #5 is genuinely ade20k-only — `score_res` is a segmentation-resolution concept;
 in1k's per-image loss is a scalar CE over classes and distill's an MSE over patches.
 
-**Still true after all this:** "can express the recipe" ≠ "reproduces the band". The
-harness policy path has still never run at scale. Configuration parity is necessary, not
-sufficient — the in-graph rollout and BN mode (a) remain deliberate deviations, and the
-harness seeds globally where `rl_train` does not, so the comparison stays statistical
-against the band exactly as the P3 gate was.
+**Superseded 2026-07-30.** This paragraph used to warn that "can express the recipe" ≠
+"reproduces the band" and that the harness path had never run at scale. Both are now
+settled: exp27 ran it (see §A3), and the remaining deliberate deviation — the in-graph
+rollout — was shown to cost nothing once glimpse SELECTION was fixed to eval-mode BN.
+`pooled_policy_loss` (the other half of the in-graph deviation) remains available and
+unvalidated, but is not needed for parity.
 
 Horizon mapping, for whoever wires this: `rl_train`'s `train_horizon=4` means t0-full + 4
 policy glimpses (the docs' "T=5", band reported over t1–t4) → harness `n_timesteps=5`.
@@ -225,3 +231,58 @@ ade20k/in1k pay nothing; their eval loops were converted to select-and-step.
 **Sequencing (owner, 2026-07-29): do this AFTER the ADE20K policy gate run**, so that a wrong
 RL result cannot be confounded between "the port is broken" and "the refactor is broken". The
 gate result then becomes the fixed reference to re-verify the refactor against.
+
+---
+
+## A3. BN mode (b) — the last gap, and what actually closed it (2026-07-29/30)
+
+`rl_train` and the harness both used to CHOOSE the training glimpse with the same
+train-mode scorer forward that carries the policy loss ("mode (a)"). The scorer holds one
+BatchNorm, so that normalizes on BATCH statistics where CanViT-PyTorch-RL uses running
+statistics — it could afford a separate eval-mode forward because it collected the rollout
+detached. The modes disagree on **45.7%** of chosen glimpses.
+
+Measured on full ADE20K val at the LAST step (best-checkpoint selection adds noise that
+hid the effect at n=2), scored by the validated eval:
+
+| | mean(t1–t4) CE | mIoU t4 |
+|---|---|---|
+| band, last step (published) | 0.6863 | 44.91 |
+| `rl_train` mode (b) | **0.6863** | **44.90** |
+| `rl_train` mode (a) | 0.6874 | 44.72 |
+
+Mode (b) is now the default on both paths (`PolicyTrainConfig.select_bn_eval`,
+`JointPolicyConfig.select_bn_eval`). The `PolicySelector` primitive keeps mode (a) as ITS
+default so non-opting callers stay byte-identical and the `run_rollout` parity digest
+`9a0100a1a3de3acd` is untouched — the digest is measured with no policy attached.
+
+It is also the train/deploy-consistent choice: deployment always selects under eval-mode
+BN, so mode (a) trained on a state distribution the deployed policy never visits.
+
+### Two methodology traps this cost us, worth reading before the next A/B
+
+1. **The first read of mode (b) was a false NULL.** Comparing at each seed's *best-CE*
+   checkpoint, one seed's best fell at step 6000 — a less-trained checkpoint — and the
+   selection noise swamped a real +0.18 mIoU. **When the effect is smaller than
+   checkpoint-selection variance, compare at a FIXED step.** The band publishes a
+   last-step row for exactly this reason.
+2. **A 45.7% action-flip rate proved the mechanism was ACTIVE, not that it MATTERED.**
+   Mechanism tests are for cheaply killing hypotheses (a 0.2% flip rate would have ended
+   it), never for confirming them.
+
+## A4. Baselines available for the Figure-4B axis (2026-07-30)
+
+`entropy_coarse_to_fine` (EG-C2F) is ported from `canvit_eval/policies.py` — the
+implementation the published row came from — and **validated to max|Δ| = 0.05** against
+paper Table 4 (it is deterministic there, so that is a real check). `coarse_to_fine`
+matches to 0.07 (a mean of n=10 in the paper, so within CI). Targets live in
+`harness/eval_viewpoints.py::PAPER_TABLE4_C64`.
+
+**`random` is NOT the paper's F-IID.** It measures +0.17…+0.42 above that row, growing
+with t: t0 matches (it does start full-scene) but the glimpses follow the safe-box AREA
+law rather than F-IID's fixed fovea scale. Do not label it F-IID. F-IID and R-IID are
+not reachable from this module today.
+
+Plot everything with `unification_docs/plot_policy_curves.py`, which computes all curves
+in ONE process at ONE eval batch size — required, since absolute mIoU shifts ~0.06 with
+eval batch size (§A2).
