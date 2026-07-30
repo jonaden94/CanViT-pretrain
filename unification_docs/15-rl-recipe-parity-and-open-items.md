@@ -114,7 +114,7 @@ same `model_repo` (`DEFAULT_PRETRAINED_REPO`) and probe rule; the same
 eval CE at full 512² (`ce_from_logits(...)` with no `score_res` — "full 512^2, sharing the
 mIoU logits"); objective = mean CE over t1..t4; and every recipe hyperparameter matching
 `TrainConfig`. `rl_train.py`'s only other drift since the gate is additive (per-timestep
-mIoU, richer ckpt). Immaterial diffs: eval batch 32 vs 16, workers 4 vs 8 — neither touches
+mIoU, richer ckpt). Immaterial diff: eval batch 32 vs 16 — does not touch
 the metric (eval-mode BN, dataset-level mIoU, per-image CE mean).
 
 ### Recommended sequence
@@ -554,6 +554,34 @@ scorer train/eval mode save-restore around eval.
 
 **Unresolved.** Either it is the 1-in-23 fluke, or it lives somewhere none of the above
 covers. Only more seeds can separate those — variance estimates at n=5 are very unstable.
+
+### A5.7 Pipeline coverage — what is MEASURED identical, stage by stage
+
+The owner asked the right question: the multi-step test fed both paths batches from ONE
+loader and drove ONE optimizer, so it proved the training step only. Everything else had been
+checked by READING, which in this investigation has a bad record. Each stage now has a
+measurement:
+
+| stage | check | result |
+|---|---|---|
+| **data — pixels** | decoded batches from identically-seeded loaders | **bit-exact** (max\|Δ\| = 0 on images and masks) |
+| **data — order** | sampler permutation over 3 epochs (60,630 indices) incl. the epoch-boundary reshuffle | **identical**; both reshuffle per epoch |
+| **data — workers** | `num_workers` 0 vs 4 | **no effect** on the data |
+| **training step** | gradient + BN buffers + per-depth standardizers, 20 steps, ε-greedy live | **5.8e-6** rel (self-check floor 6.3e-6); BN and standardizers **exactly 0** |
+| **update** | same synthetic gradient through each path's own AdamW + clip + LambdaLR, 12 steps | **9.1e-8** rel — the known 0.1% LR-ramp off-by-one |
+| **eval** | harness eval vs validated eval, 3 model sources | **0.0000** on mIoU t0..t4 + CE (§A2) |
+
+Runnable: `diff_data_pipeline.py`, `diff_training_multistep.py`, `diff_optimizer_path.py`,
+`eval_equivalence.py`.
+
+Correction while here: this doc and the exp27 README used to list "workers 4 vs 8" as a
+harmless difference. `PolicyTrainConfig.num_workers` is **4**, the same as the launcher — and
+worker count provably does not change the data anyway.
+
+**What remains genuinely different between two runs, therefore, is only:** the scorer's random
+init draw, the data order, and the ε-greedy stream — i.e. the seed. Same distributions, drawn
+at different points. That is consistent with a level difference of noise, and leaves §A5.6's
+variance observation with no mechanism anywhere in the measured pipeline.
 
 ### A5.3 Why §A5.2 was NOT "fixed" while here *(superseded by §A5.4 — the premise was wrong)*
 

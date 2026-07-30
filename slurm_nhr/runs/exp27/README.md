@@ -163,7 +163,7 @@ limit/stride, eval CE at full 512², objective mean over t1–t4, and every reci
 hyperparameter matching `TrainConfig` (lr 2e-4, wd 1e-2, betas .9/.95, clip 1.0,
 score_res 128, 640k forwards, batch 16, horizon 4, warmup 0.125, target_momentum 0.997,
 scales (0.5,0.25), centers 16, width 128, blocks 3, prime_on_policy 0.5, dueling). The
-only remaining diffs are immaterial to the metric: eval batch 32 vs 16, workers 4 vs 8.
+only remaining diffs are immaterial to the metric: eval batch 32 vs 16 (workers are 4 on BOTH — the old "4 vs 8" claim was wrong, and worker count provably does not change the data; doc 15 §A5.7).
 
 ## Gotcha for anyone editing arm B
 
