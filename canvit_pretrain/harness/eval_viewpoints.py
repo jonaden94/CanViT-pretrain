@@ -34,11 +34,42 @@ from canvit_pytorch.viewpoint import Viewpoint
 if TYPE_CHECKING:  # the task configs import EvalPolicy from here, so stay dependency-light
     from canvit_pretrain.train.config import FoveatedScaleConfig
 
-EvalPolicy = Literal["auto", "coarse_to_fine", "random", "full", "fixation_grid", "policy"]
+EvalPolicy = Literal["auto", "coarse_to_fine", "random", "full", "fixation_grid",
+                     "entropy_coarse_to_fine", "policy"]
 
 OPEN_LOOP: tuple[str, ...] = ("coarse_to_fine", "random", "full", "fixation_grid")
-"""Policies whose whole trajectory is known before the rollout starts. ``"policy"`` is
-the only closed-loop one — it needs the live canvas state to pick the next glimpse."""
+"""Policies whose whole trajectory is known before the rollout starts."""
+
+CLOSED_LOOP: tuple[str, ...] = ("policy", "entropy_coarse_to_fine")
+"""Policies that need the live canvas state to pick the next glimpse, so their
+trajectory cannot be precomputed. Both are driven by a ``(t, state) -> Viewpoint``
+chooser through the task's rollout."""
+
+PAPER_TABLE4_C64: dict[str, list[float]] = {
+    # arXiv:2603.22570 Table 4, canvas 64^2, ADE20K val, squish-512, t = 0..4.
+    # Mirrored from CanViT-PyTorch-RL/docs/paper-tables.md, which records them as
+    # "verbatim targets for harness verification". Use as the validation target for
+    # any baseline implemented here, and as dashed reference lines on Figure-4B plots.
+    "entropy_coarse_to_fine": [39.6, 42.2, 43.3, 44.1, 44.7],   # EG-C2F (deterministic)
+    "coarse_to_fine":         [39.6, 41.3, 42.5, 43.6, 44.7],   # C2F (paper: mean of n=10)
+}
+"""Paper row -> our policy name, for the rows we can actually reproduce.
+
+VERIFIED 2026-07-30 on full ADE20K val (squish-512, c64, eval batch 32):
+
+    EG-C2F  ours 39.58 42.22 43.31 44.05 44.67   vs paper  max|delta| = 0.05
+    C2F     ours 39.58 41.23 42.54 43.54 44.71   vs paper  max|delta| = 0.07
+
+EG-C2F is DETERMINISTIC in the paper, so that agreement is a real validation of the port,
+not a coincidence of averaging. C2F is stochastic there (mean of n=10), so 0.07 is within
+its CI.
+
+**``random`` is NOT the paper's F-IID — do not label it as such.** It measures
+39.58/41.37/42.18/42.84/43.42, i.e. +0.17..+0.42 ABOVE the F-IID row, growing with t.
+``open_loop_viewpoints`` does pass ``start_with_full_scene=True`` so t0 matches, but the
+glimpses then follow the safe-box AREA law (p(s) ~ 1-s over [min_scale, max_scale]) rather
+than F-IID's fixed fovea-sized scale — a different, measurably stronger random policy.
+The paper's F-IID and R-IID rows are both unreachable from this module today."""
 
 HISTORICAL_DEFAULTS: dict[str, tuple[str, str]] = {
     # task        (uniform patcher,   foveated/square patcher)
@@ -69,7 +100,7 @@ def resolve(policy: str, *, task: str, is_foveated: bool) -> str:
     if policy == "auto":
         uniform_default, foveated_default = HISTORICAL_DEFAULTS[task]
         return foveated_default if is_foveated else uniform_default
-    assert policy in OPEN_LOOP or policy == "policy", f"unknown eval policy {policy!r}"
+    assert policy in OPEN_LOOP or policy in CLOSED_LOOP, f"unknown eval policy {policy!r}"
     return policy
 
 
@@ -116,10 +147,11 @@ def open_loop_viewpoints(
             start_with_full_scene=True, is_foveated=is_foveated,
             foveated_scale=foveated_scale or FoveatedScaleConfig(),
         )
-    if policy == "policy":
+    if policy in CLOSED_LOOP:
         raise ValueError(
-            "eval_policy='policy' is closed-loop: the next viewpoint depends on the canvas "
-            "state, so it cannot be precomputed. Drive it with deploy_selector() instead."
+            f"eval_policy={policy!r} is closed-loop: the next viewpoint depends on the "
+            "canvas state, so it cannot be precomputed. Drive it through the task's "
+            "closed-loop rollout instead."
         )
     raise ValueError(f"unknown eval policy: {policy!r}")
 
@@ -190,10 +222,123 @@ def deploy_rollout_viewpoints(
 
 __all__ = [
     "HISTORICAL_DEFAULTS",
+    "CLOSED_LOOP",
+    "EntropyGuidedC2F",
     "OPEN_LOOP",
+    "PAPER_TABLE4_C64",
+    "closed_loop_rollout",
+    "entropy_c2f_chooser",
     "EvalPolicy",
     "deploy_rollout_viewpoints",
     "deploy_selector",
     "open_loop_viewpoints",
     "resolve",
 ]
+
+
+# --- EG-C2F: entropy-guided coarse-to-fine (the paper's strongest heuristic) ------
+
+
+def _tile_masks(crops: list[tuple[float, float, float]], canvas_grid: int,
+                device: Any) -> Any:
+    """[n_crops, G, G] bool: which canvas cells fall inside each crop.
+
+    Ported verbatim from ``canvit_eval/policies.py::_build_tile_masks`` — the
+    implementation the published EG-C2F numbers were produced with.
+    """
+    import torch
+
+    G = canvas_grid
+    assert G > 0 and (G & (G - 1)) == 0, f"canvas_grid must be a power of 2, got {G}"
+    coords = torch.linspace(-1 + 1 / G, 1 - 1 / G, G, device=device)
+    crops_t = torch.tensor(crops, device=device)
+    cy, cx, s = crops_t[:, 0], crops_t[:, 1], crops_t[:, 2]
+    row_in = (coords.unsqueeze(0) - cy.unsqueeze(1)).abs() <= s.unsqueeze(1)
+    col_in = (coords.unsqueeze(0) - cx.unsqueeze(1)).abs() <= s.unsqueeze(1)
+    return row_in.unsqueeze(2) & col_in.unsqueeze(1)
+
+
+class EntropyGuidedC2F:
+    """Coarse-to-fine quadtree levels, visited in order of DECREASING per-tile probe entropy.
+
+    A port of ``canvit_eval/policies.py::EntropyGuidedC2F``, which is what produced the
+    published EG-C2F row (paper Table 4 / `PAPER_TABLE4_C64`). Closed-loop: the pick needs
+    the live canvas, because the entropy map is read off the probe at each step.
+
+    Schedule: 3 quadtree levels — 1 full scene, then 4 half-quadrants, then 16 quarter-tiles
+    (21 timesteps total). At the harness default ``n_timesteps=5`` that is the full scene
+    plus the 4 half-quadrants ranked by entropy, which is exactly the paper's t0..t4 row.
+    """
+
+    def __init__(self, *, seg: Any, batch_size: int, device: Any, canvas_grid: int,
+                 n_levels: int = 3) -> None:
+        from canvit_pytorch.policies import level_viewpoints
+
+        self.seg, self.B, self.device, self.canvas_grid = seg, batch_size, device, canvas_grid
+        self.levels = [level_viewpoints(lvl) for lvl in range(n_levels)]
+        self.level_starts, t = [], 0
+        for lvl in self.levels:
+            self.level_starts.append(t)
+            t += len(lvl)
+        self.masks: list[Any] = [None] + [
+            _tile_masks(self.levels[lvl], canvas_grid, device) for lvl in range(1, n_levels)]
+        self.visited: list[Any] = [None] * n_levels
+
+    def _entropy(self, state: Any) -> Any:
+        """Per-cell probe entropy [B, G, G]. fp32 via ``head_logits`` (which disables
+        autocast), so the ranking does not depend on the caller's amp context."""
+        from canvit_pytorch.policy import entropy_from_logits, head_logits
+
+        return entropy_from_logits(
+            head_logits(self.seg, state.canvas, canvas_grid=self.canvas_grid)).float()
+
+    def __call__(self, t: int, state: Any) -> Viewpoint:
+        import torch
+
+        level_idx = sum(1 for s in self.level_starts[1:] if t >= s)
+        pos_in_level = t - self.level_starts[level_idx]
+        crops = self.levels[level_idx]
+
+        if level_idx == 0:                      # the full-scene anchor; no choice to make
+            cy, cx, s = crops[0]
+            return Viewpoint(
+                centers=torch.tensor([[cy, cx]], device=self.device).expand(self.B, -1).contiguous(),
+                scales=torch.full((self.B,), s, device=self.device))
+
+        if pos_in_level == 0:                   # entering a level: nothing visited yet
+            self.visited[level_idx] = torch.zeros(
+                self.B, len(crops), dtype=torch.bool, device=self.device)
+
+        ent, masks, visited = self._entropy(state), self.masks[level_idx], self.visited[level_idx]
+        n_cells = masks.sum(dim=(1, 2)).clamp(min=1).float()
+        # mean entropy per candidate tile, then take the highest UNVISITED one
+        scores = (ent.unsqueeze(1) * masks.unsqueeze(0).float()).sum(dim=(2, 3)) / n_cells
+        scores = scores.masked_fill(visited, float("-inf"))
+        chosen = scores.argmax(dim=1)
+        visited.scatter_(1, chosen.unsqueeze(1), True)
+
+        selected = torch.tensor(crops, device=self.device)[chosen]
+        return Viewpoint(centers=selected[:, :2].contiguous(), scales=selected[:, 2].contiguous())
+
+
+def closed_loop_rollout(*, chooser: Any, advance: Any, n: int) -> list[Viewpoint]:
+    """Drive a closed-loop eval policy: ``chooser(t, state) -> Viewpoint``, then
+    ``advance(vp, state, t) -> state`` (called with ``state=None`` at t0, so the task owns
+    its own state init). Shared by the learned policy and EG-C2F so both take exactly the
+    same path through the task's rollout, and no metric code has to branch on which."""
+    import torch
+
+    with torch.no_grad():
+        state, taken = None, []
+        for t in range(n):
+            vp = chooser(t, state)
+            taken.append(vp)
+            state = advance(vp, state, t)
+    return taken
+
+
+def entropy_c2f_chooser(*, seg: Any, batch_size: int, device: Any, canvas_grid: int) -> Any:
+    """A fresh :class:`EntropyGuidedC2F` — fresh because it carries per-rollout `visited`
+    state, so reusing one across batches would silently exclude already-picked tiles."""
+    return EntropyGuidedC2F(seg=seg, batch_size=batch_size, device=device,
+                            canvas_grid=canvas_grid)

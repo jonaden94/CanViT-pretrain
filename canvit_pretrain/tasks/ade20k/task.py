@@ -330,11 +330,32 @@ class Ade20kRunTask:
             log.exception("ade20k val viz failed at step %d (validation continues)", step)
 
     def _policy_rollout(self, *, model, images, joint, T, canvas_grid, amp):
-        """Closed-loop deploy rollout: the scorer picks each glimpse by argmax from the
-        live canvas. Returns canvas_hidden per timestep, exactly like the open-loop
-        ``rollout_canvas_hidden`` it mirrors, so all the metric code below is shared."""
+        """Closed-loop deploy rollout for the LEARNED policy: the scorer picks each glimpse
+        by argmax from the live canvas."""
         from canvit_pretrain.harness.eval_viewpoints import deploy_rollout_viewpoints
 
+        return self._closed_loop_rollout(
+            model=model, images=images, T=T, canvas_grid=canvas_grid, amp=amp,
+            drive=lambda advance: deploy_rollout_viewpoints(
+                joint=joint, advance=advance, t0_type=ViewpointType.FULL,
+                batch_size=images.shape[0], device=images.device, n=T))
+
+    def _entropy_c2f_rollout(self, *, model, images, T, canvas_grid, amp):
+        """Closed-loop rollout for EG-C2F — the paper's strongest heuristic baseline. A
+        fresh chooser per batch: it carries per-rollout `visited` state."""
+        from canvit_pretrain.harness.eval_viewpoints import closed_loop_rollout, entropy_c2f_chooser
+
+        chooser = entropy_c2f_chooser(seg=model, batch_size=images.shape[0],
+                                      device=images.device, canvas_grid=canvas_grid)
+        return self._closed_loop_rollout(
+            model=model, images=images, T=T, canvas_grid=canvas_grid, amp=amp,
+            drive=lambda advance: closed_loop_rollout(chooser=chooser, advance=advance, n=T))
+
+    def _closed_loop_rollout(self, *, model, images, T, canvas_grid, amp, drive):
+        """Shared glimpse-stepping for every closed-loop eval policy. Returns
+        canvas_hidden per timestep, exactly like the open-loop ``rollout_canvas_hidden``
+        it mirrors, so all the metric code below is shared and never branches on which
+        policy produced the trajectory. ``drive(advance)`` supplies the trajectory."""
         B = images.shape[0]
         full_image = consumes_full_image(model)
         px = None if full_image else derive_glimpse_px(model, self.cfg.glimpse_px)
@@ -351,8 +372,7 @@ class Ade20kRunTask:
                               .view(B, canvas_grid, canvas_grid, -1))
             return out.state
 
-        deploy_rollout_viewpoints(joint=joint, advance=advance, t0_type=ViewpointType.FULL,
-                                  batch_size=B, device=images.device, n=T)
+        drive(advance)
         return hidden
 
     # --- eval & checkpoint -------------------------------------------------
@@ -391,6 +411,9 @@ class Ade20kRunTask:
             if eval_policy == "policy":
                 hidden = self._policy_rollout(model=model, images=vi, joint=joint, T=T,
                                               canvas_grid=cg, amp=amp)
+            elif eval_policy == "entropy_coarse_to_fine":
+                hidden = self._entropy_c2f_rollout(model=model, images=vi, T=T,
+                                                   canvas_grid=cg, amp=amp)
             else:
                 vps = open_loop_viewpoints(
                     eval_policy, batch_size=vi.shape[0], device=device, n=T, is_foveated=is_fov,
