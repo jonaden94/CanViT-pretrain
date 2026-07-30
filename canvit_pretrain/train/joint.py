@@ -27,10 +27,11 @@ from canvit_pytorch.policy import (
     candidate_viewpoints,
     fixation_candidates,
 )
+from canvit_pytorch.policy.features import INTRINSIC_GROUPS
 from torch import Tensor
 
 from .config import FoveatedScaleConfig, JointPolicyConfig
-from .rl import PG, Objective, QReg, RunningNorm, entropy_floor_step, pg_loss, qreg_loss
+from .rl import PG, VPG, Objective, QReg, RunningNorm, entropy_floor_step, pg_loss, qreg_loss, vpg_loss
 from .selector import PolicySelector, RandomSelector
 from .viewpoint import ViewpointType
 
@@ -110,6 +111,42 @@ class JointPolicy:
             self.running[depth] = rn
         return rn
 
+    @property
+    def defers_credit(self) -> bool:
+        """True => the reward is TERMINAL, so ``run_rollout`` must buffer the per-step
+        policy aux and call :meth:`trajectory_loss` once at rollout end instead of
+        :meth:`glimpse_loss` inside the loop (VPG). False => the historical inline path."""
+        return isinstance(self.objective, VPG)
+
+    def state_value(self, feats: Tensor) -> Tensor:
+        """``V(s)`` [B] for the VPG baseline, read from the scorer's dueling value head.
+
+        Deliberately a SECOND (very cheap: pool -> 64 -> 1) forward of ``vhead`` rather
+        than recovering V from the score map's row mean: with ``dueling=True`` the map is
+        ``V(s) + mean-zero A(s,a)`` so the row mean IS V analytically, but only to float
+        error, and reading it that way would silently break if the dueling algebra ever
+        changed. This keeps the baseline exact and the coupling explicit."""
+        assert self.scorer.vhead is not None, (
+            "VPG needs a learned V(s): build the ViewpointScorer with dueling=True"
+        )
+        return self.scorer.vhead(feats.float().mean(dim=(2, 3))).squeeze(-1)
+
+    def trajectory_loss(self, *, scores: Tensor, flat_idx: Tensor, values: Tensor, reward: Tensor) -> Tensor:
+        """The weighted policy loss for a WHOLE trajectory (VPG only). ``scores``
+        [B, T, A] / ``values`` [B, T] carry grad; ``reward`` [B] is the detached terminal
+        reward. Unlike :meth:`glimpse_loss` this is NOT per-depth, so there is no
+        ``RunningNorm`` — VPG standardizes the ADVANTAGE per timestep over the batch
+        instead of the reward stream over time (see :class:`VPG`)."""
+        obj = self.objective
+        assert isinstance(obj, VPG)
+        loss, metrics = vpg_loss(
+            scores, flat_idx, values, reward,
+            entropy_bonus=obj.entropy_bonus, reinforce_weight=obj.reinforce_weight,
+            baseline_weight=obj.baseline_weight, normalize_advantage=obj.normalize_advantage,
+        )
+        self.last_step = metrics
+        return self.rl_weight * loss
+
     def glimpse_loss(self, *, depth: int, scores: Tensor, flat_idx: Tensor, reward: Tensor) -> Tensor:
         """The weighted policy loss for ONE glimpse. ``scores`` [B, A] carries grad
         (the train-mode scorer forward); ``flat_idx`` [B] is the taken candidate;
@@ -146,6 +183,15 @@ def build_joint_policy(
     objective and reward standardizers. PG here is score-function + entropy floor
     only — Q-Prop's control-variate critic (the standalone ADE trainer's `qprop`) is
     not wired into joint mode, so JointPolicyConfig deliberately exposes no knob."""
+    if rl.objective == "vpg":
+        # Deliberately NOT supported on this legacy path: VPG needs the rollout engine's
+        # deferred-credit branch (terminal reward), which only harness/rollout.py has. The
+        # old train/step.py rollout would silently drop the policy loss entirely.
+        raise NotImplementedError(
+            "objective='vpg' requires the unified harness rollout (terminal reward => "
+            "deferred credit). Run it via `python -m canvit_pretrain.harness.run <task>`, "
+            "not the legacy train/loop.py path."
+        )
     is_foveated = getattr(core_model.cfg, "patcher_name", "uniform") in ("foveated", "square")
     if is_foveated:
         cand = fixation_candidates(rl.centers_per_axis)
@@ -160,10 +206,16 @@ def build_joint_policy(
     else:
         obj = PG(entropy_bonus=rl.entropy_bonus, entropy_target=rl.entropy_target, alpha_lr=rl.alpha_lr)
 
+    # `rl.feature_groups` is None-by-default now ("use the task's own set"); this legacy path
+    # is distill-only, whose set is INTRINSIC_GROUPS — the value the field used to default to,
+    # so this is a no-op for every existing distill run.
+    groups = tuple(rl.feature_groups) if rl.feature_groups is not None else INTRINSIC_GROUPS
+
     scorer = ViewpointScorer(
         canvas_dim=core_model.cfg.canvas_dim, width=rl.width, n_scale=n_scale, scales=scales,
-        centers_per_axis=rl.centers_per_axis, block_layers=rl.block_layers, groups=rl.feature_groups,
+        centers_per_axis=rl.centers_per_axis, block_layers=rl.block_layers, groups=groups,
         dueling=isinstance(obj, QReg) and obj.dueling, action_space=action_space,
+        readout=rl.policy_readout,
     ).to(device)
     scorer.train()
 
@@ -171,7 +223,7 @@ def build_joint_policy(
     # only touches seg.canvit.get_spatial / .init_state, so a shim onto the core model
     # is all it needs (no probe -> no seg.head).
     encoder = StateEncoder(
-        SimpleNamespace(canvit=core_model), canvas_grid=canvas_grid, feature_groups=rl.feature_groups
+        SimpleNamespace(canvit=core_model), canvas_grid=canvas_grid, feature_groups=groups
     )
 
     random_sel = RandomSelector(

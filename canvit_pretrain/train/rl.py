@@ -40,7 +40,67 @@ class PG:
     credit: Literal["immediate", "return"] = "immediate"
 
 
-Objective = QReg | PG
+@dataclass(frozen=True)
+class VPG:
+    """Vanilla policy gradient with a LEARNED state-value baseline — the port of the
+    ``autoreg_tryout`` REINFORCE recipe (``jon_exp12_imagenet_rvm_fov_plus_rl_xareadout_nooverrides_bl``:
+    ``rl_loss_stepwise=False``, ``rl_base_reward=neg_ce``, ``rl_normalize_reward=False``,
+    ``rl_normalize_advantage=True``, ``rl_grad_mode=heads_only``).
+
+    **Targets the FOVEATED/SQUARE patcher.** ``autoreg_tryout`` only ever ran a foveated
+    model, and the foveated action space is the faithful one: ``fixation_candidates`` gives
+    ``centers_per_axis**2`` fixation centres over the full field with NO scale dimension,
+    and (per ``policy/net.py``) those cell centres align with the scorer's score-map pixels,
+    so the readout degenerates to reading a heatmap over grid cells — exactly autoreg's
+    ``heatmap_head``. The forced t0 anchor is likewise a CENTRED fixation, as it is there.
+    ``centers_per_axis=14`` reproduces autoreg's 14x14 splatting grid exactly (default 16).
+
+    VPG runs on the uniform patcher too and is internally consistent there, but the action
+    space becomes ``n_scale * centers_per_axis**2`` centre-AND-scale pairs and t0 becomes a
+    full-scene view — a different problem from the one this recipe was tuned on, so
+    ``build_policy`` warns.
+
+    Differs from :class:`PG` in all four of the things that make it "the textbook
+    algorithm" rather than the CanViT-PyTorch-RL recipe:
+
+    ==================  ==========================  ==============================
+    aspect              PG (the RL-repo recipe)     VPG (this)
+    ==================  ==========================  ==============================
+    reward              per-glimpse FRACTIONAL      TERMINAL ``-per_image_loss`` of
+                        loss reduction at t         the LAST glimpse, broadcast to
+                                                    every action step
+    baseline            ``RunningNorm`` EMA of      LEARNED ``V(s_t)`` (the scorer's
+                        the reward stream           dueling ``vhead``), MSE-regressed
+                                                    on the return
+    advantage scale     EMA std of the reward       per-timestep mean/std over the
+                                                    BATCH
+    entropy             dual-ascent alpha holding   FIXED weight (no floor, no dual)
+                        a mean-entropy floor
+    ==================  ==========================  ==============================
+
+    Because the reward is terminal, credit cannot be assigned inside the glimpse loop:
+    ``run_rollout`` buffers ``(scores, flat_idx, value)`` per step and applies
+    :func:`vpg_loss` ONCE at rollout end. See ``JointPolicy.defers_credit``.
+
+    Requires ``dueling=True`` on the scorer: that is what gives ``V(s)`` its own
+    parameters (``ViewpointScorer.vhead``). Softmax is shift-invariant, so the ``+V(s)``
+    term provably cannot perturb the action distribution and the score-function term
+    provably cannot reach ``vhead`` — the two losses stay on disjoint parameters.
+    """
+
+    entropy_bonus: float = 5e-3  # FIXED entropy weight (autoreg's rl_entropy_weight)
+    reinforce_weight: float = 1.0  # autoreg's rl_reinforce_weight
+    baseline_weight: float = 1.0  # autoreg's rl_baseline_weight
+    normalize_advantage: bool = True  # autoreg's rl_normalize_advantage (exp12: True)
+    value_bias_init: float | None = None
+    """Warm-start for ``vhead``'s output bias = the expected return at init, so the
+    baseline MSE does not open with a large spike. autoreg uses ``-log(num_classes)``
+    (chance CE on ImageNet, ~-6.9); that is WRONG here — a CanViT policy run starts from
+    a PRETRAINED probe whose CE is ~0.8, not ~5.0. None (default) leaves torch's init and
+    lets advantage normalization absorb the level."""
+
+
+Objective = QReg | PG | VPG
 
 
 @torch.no_grad()
@@ -106,3 +166,48 @@ def pg_loss(
     else:
         loss = -(target * pred_sel).mean() - alpha * entropy
     return loss, entropy, metrics
+
+
+def vpg_loss(
+    scores: Tensor,
+    flat_idx: Tensor,
+    values: Tensor,
+    reward: Tensor,
+    *,
+    entropy_bonus: float,
+    reinforce_weight: float,
+    baseline_weight: float,
+    normalize_advantage: bool,
+) -> tuple[Tensor, dict[str, Tensor]]:
+    """REINFORCE + baseline MSE + entropy, over a WHOLE trajectory.
+
+    A transcription of ``autoreg_tryout/utils/train.py::_reinforce_loss`` (the
+    ``rl_loss_stepwise=False`` branch) onto the harness's tensors, with the same
+    reductions: MSE meaned over (B, T), the score-function term SUMMED over T and
+    meaned over B, entropy meaned over (B, T).
+
+    ``scores`` [B, T, A] and ``values`` [B, T] carry grad; ``flat_idx`` [B, T] is the
+    sampled candidate; ``reward`` [B] is the detached TERMINAL reward, broadcast over T.
+    T is the number of *sampled* glimpses (t0 is the forced anchor and takes no action).
+    """
+    logp_all = F.log_softmax(scores, dim=2)
+    logp = logp_all.gather(2, flat_idx[..., None]).squeeze(2)  # [B, T]
+    entropy = -(logp_all.exp() * logp_all).sum(dim=2).mean()
+
+    ret = reward[:, None].expand_as(values)  # [B, T] — terminal reward, broadcast
+    loss_baseline = F.mse_loss(values, ret) * baseline_weight
+    adv = ret - values.detach()
+    if normalize_advantage:  # per timestep (column) across the batch
+        adv = (adv - adv.mean(dim=0, keepdim=True)) / (adv.std(dim=0, keepdim=True) + 1e-8)
+    loss_reinforce = -(logp * adv).sum(dim=1).mean() * reinforce_weight
+    loss_entropy = -entropy_bonus * entropy
+
+    loss = loss_baseline + loss_reinforce + loss_entropy
+    return loss, {
+        "policy_entropy": entropy.detach(),
+        "loss_reinforce": loss_reinforce.detach(),
+        "loss_baseline": loss_baseline.detach(),
+        "value_mean": values.detach().mean(),
+        "adv_std": adv.detach().std(),
+        "taken_logp": logp.detach().mean(),
+    }

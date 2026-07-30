@@ -230,6 +230,10 @@ def run_rollout(
         else:
             sel, is_policy = selector, False
         prev_pi_loss: Tensor | None = None
+        # VPG (terminal reward): the per-step policy aux, buffered until rollout end.
+        # Empty for the historical inline-credit objectives (QReg/PG).
+        defer = is_policy and joint is not None and joint.defers_credit
+        traj: list[dict[str, Tensor]] = []
 
         # Optional per-glimpse task metrics (distill's scene/cls sub-losses), summed
         # here and averaged over the branch below. Absent hook => untouched fast path.
@@ -260,7 +264,7 @@ def run_rollout(
             L = task.step_loss(gout.readout)
         _viz_capture(branch_idx, gout, vp0_named, vp0, L)
         _acc(L)
-        if is_policy:  # seed the reward denominator with the FULL-anchor loss (no policy loss at t0)
+        if is_policy and not defer:  # seed the reward denominator with the FULL-anchor loss (no policy loss at t0)
             prev_pi_loss = task.per_image_loss(gout.readout).detach()
 
         chunk_loss = _tw_loss(L)
@@ -291,16 +295,49 @@ def run_rollout(
             _acc(L)
 
             if is_policy:
-                assert joint is not None and prev_pi_loss is not None
+                assert joint is not None
+                aux = sel.last_aux  # type: ignore[attr-defined]
+                assert aux is not None, "policy selector produced no aux for a RANDOM glimpse"
+            if is_policy and defer:
+                # VPG: buffer this action's logits + V(s_t); the reward is only known at
+                # the LAST glimpse, so the loss is built below (still inside the loop, so
+                # it joins the FINAL chunk's backward — see the `t == n_glimpses - 1` block).
+                assert joint is not None and aux is not None
+                traj.append({"scores": aux["scores"], "flat_idx": aux["flat_idx"],
+                             "value": joint.state_value(aux["feats"])})
+            elif is_policy:
+                assert joint is not None and prev_pi_loss is not None and aux is not None
                 cur_pi = task.per_image_loss(gout.readout).detach()
                 reward = (prev_pi_loss - cur_pi) / prev_pi_loss.clamp_min(1e-4)
                 prev_pi_loss = cur_pi
-                aux = sel.last_aux  # type: ignore[attr-defined]
-                assert aux is not None, "policy selector produced no aux for a RANDOM glimpse"
                 ploss = joint.glimpse_loss(depth=t, scores=aux["scores"], flat_idx=aux["flat_idx"], reward=reward)
                 chunk_loss = chunk_loss + ploss
                 pol_acc["loss"] = pol_acc["loss"] + ploss.detach()
                 pol_acc["reward"] = pol_acc["reward"] + reward.mean().detach()
+                pol_acc["n"] += 1
+
+            if defer and traj and t == n_glimpses - 1:
+                # Terminal reward: R = -(per-image task loss of the LAST glimpse), the
+                # analogue of autoreg's R = -CE(final logits). Built HERE, before the
+                # chunk backward, rather than after the loop: with
+                # policy_grad_to_backbone=True the scorer's graph hangs off backbone
+                # activations that the task backward frees, so a separate later backward
+                # would raise. Folding it into chunk_loss keeps ONE backward per chunk.
+                assert joint is not None
+                reward = -task.per_image_loss(gout.readout).detach()
+                # chunk_loss is divided by n_glimpses below, but vpg_loss already sums over
+                # T and means over B (autoreg does NOT divide its RL loss by T). Pre-multiply
+                # so the division cancels and `policy_weight` means the same thing at any
+                # horizon.
+                ploss = joint.trajectory_loss(
+                    scores=torch.stack([a["scores"] for a in traj], dim=1),
+                    flat_idx=torch.stack([a["flat_idx"] for a in traj], dim=1),
+                    values=torch.stack([a["value"] for a in traj], dim=1),
+                    reward=reward,
+                ) * n_glimpses
+                chunk_loss = chunk_loss + ploss
+                pol_acc["loss"] = pol_acc["loss"] + ploss.detach() / n_glimpses
+                pol_acc["reward"] = pol_acc["reward"] + reward.mean()
                 pol_acc["n"] += 1
 
             total_detached = total_detached + L.combined.detach().float()
@@ -350,6 +387,12 @@ def run_rollout(
             "reward_frac": pol_acc["reward"] / n,
             "prime_on_policy": joint.policy_selector.prime_on_policy,
         }
+        # The objective's own detached diagnostics (VPG: entropy / value / adv_std / the
+        # two loss terms). Empty for QReg/PG, which do not populate `last_step`.
+        # NB `reward_frac` is a genuine FRACTION only for the inline objectives; under VPG
+        # the reward is the raw terminal `-per_image_loss`, so the series is on a different
+        # scale (~-0.7 for the ade20k probe, not ~+0.03).
+        policy_metrics.update(joint.last_step)
 
     return RolloutResult(
         total_loss=total_loss, branches=results, n_glimpses=n_glimpses,

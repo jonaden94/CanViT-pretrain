@@ -275,6 +275,9 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
     if spec.train_policy or spec.policy_loss_active:
         gen = torch.Generator(device=device).manual_seed(settings.seed + rank)
         joint = task.build_policy(model, device=device, canvas_grid=canvas_grid, generator=gen)
+        # A terminal-reward objective cannot honor every spec cell; fail before training.
+        from canvit_pretrain.harness.policy import check_credit_regime
+        check_credit_regime(joint=joint, spec=spec)
 
     # The harness — not the task — decides what trains (design §3.1).
     apply_requires_grad(model=model, head=head, joint=joint, spec=spec)

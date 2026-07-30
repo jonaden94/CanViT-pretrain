@@ -133,8 +133,31 @@ class JointPolicyConfig:
     """Uniform-patcher candidate scales; ignored for foveated/square (fixation grid)."""
     width: int = 128
     block_layers: int = 3
-    feature_groups: tuple[str, ...] = ("cos_prev", "cos_init", "ln_feat", "feat_delta")
-    """= policy.features.INTRINSIC_GROUPS — the probe-free groups (distill has no probe)."""
+    policy_readout: Literal["unet", "local"] = "unet"
+    """Scorer body — how much of the scene ONE candidate's score sees.
+
+    ``unet`` (default, historical): a ConvNeXt-V2 U-Net pooling 32->1, so every score is
+    conditioned on a global bottleneck. ``local``: score each candidate straight off the
+    (purely per-token) Frontend map with a 1x1 conv, so a candidate's score depends only on
+    its own canvas cell — the ``autoreg_tryout`` policy head (``Linear(D,1)`` per state
+    token). ``block_layers`` is unused under ``local``.
+
+    Exact one-cell-per-score alignment needs ``centers_per_axis=32`` (the POLICY_GRID the
+    features arrive on); coarser grids interpolate a 2x2 neighbourhood. autoreg's heatmap
+    was defined ON its state grid, so 32 is the faithful setting."""
+    feature_groups: tuple[str, ...] | None = None
+    """What the scorer LOOKS AT, overriding the task's own set. ``None`` (default) = the
+    task's default: the full probe-entropy set for ade20k, ``INTRINSIC_GROUPS`` (probe-free)
+    for in1k/distill. This field used to default to ``INTRINSIC_GROUPS`` and was then
+    SILENTLY IGNORED — every task passed its own module constant to ``build_policy`` — so
+    the knob existed and did nothing. ``None`` keeps each task's default intact (no run
+    changes) while making the override real.
+
+    ``("ln_feat",)`` is the "just the raw canvas" setting: ``ln_feat`` is the canvas spatial
+    features with a per-token channel LayerNorm and no other derivation. The remaining
+    groups (``cos_prev``/``cos_init``/``feat_delta``/``ent``/``ent_delta``) are the engineered
+    ones. The LayerNorm is load-bearing — raw backbone features have std ~186, which is why
+    the scorer body uses LayerNorm2d rather than BatchNorm."""
 
     # Target standardizer + policy optimizer. These are the CanViT-PyTorch-RL canonical
     # values and they apply to a policy group on ANY task (distill / ade20k / in1k) —

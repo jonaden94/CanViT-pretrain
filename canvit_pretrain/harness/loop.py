@@ -330,9 +330,12 @@ def run_training_loop(
             last["data_pct"] = 100.0 * t_data_total / tot
             last["gpu_pct"] = 100.0 * t_gpu_total / tot
         if result.policy_metrics is not None:
-            last["reward_frac"] = float(result.policy_metrics["reward_frac"])
-            last["policy_loss"] = float(result.policy_metrics["policy_loss"])
-            last["prime_on_policy"] = float(result.policy_metrics["prime_on_policy"])
+            # Pass every key through rather than the three fixed ones, so an objective can
+            # publish its own diagnostics (VPG: policy_entropy / value_mean / adv_std / the
+            # two loss terms) without editing the loop. reward_frac / policy_loss /
+            # prime_on_policy keep their names, so the existing wandb series are unchanged.
+            for k, v in result.policy_metrics.items():
+                last[k] = float(v)
         for k, v in gnorms.items():
             last[f"grad_norm/{k}"] = v
 
