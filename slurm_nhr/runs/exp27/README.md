@@ -68,9 +68,9 @@ arm B selects `best.pt` on (`neg_ce_mean`).
 
 - Arm B inside 0.6845…0.6865 → the harness reproduces the recipe. The policy path is
   production-gated and CanViT-RL work can proceed on it.
-- Arm B outside, arm A inside → a harness-specific problem. First suspect: the one known
-  remaining config difference, **reward `score_res` 128 (A) vs the probe's native 64 (B)**
-  — doc 15 §A gap #5, owner-deferred. The reward *formula* is already identical.
+- Arm B outside, arm A inside → a harness-specific problem. *(Historical: `score_res` was
+  the named suspect here and it was the WRONG one — the actual causes were BN mode (a) for
+  glimpse selection and the probe-BN pollution. score_res was closed anyway, doc 15 gap #5.)*
 - Both outside → not a harness question; look at the stack (pins, probe repo, data).
 
 Also worth watching, independent of the verdict: **mIoU at t1–t4** (band: 42.65 → 44.97)
@@ -138,9 +138,15 @@ launcher-only test would have passed the wrong thing silently.
 ## Submit
 
 ```bash
-bash slurm_nhr/runs/exp27/policy-oldloop-s0.sh    # ~65 min on one A100
-bash slurm_nhr/runs/exp27/policy-harness-s0.sh    # 8000 steps, same order
+bash slurm_nhr/runs/exp27/policy-oldloop-s0.sh              # ~65 min on one A100
+for s in 0 1 2 3 4; do SEED=$s bash slurm_nhr/runs/exp27/policy-harness-s0.sh; done  # ~75 min each
 ```
+
+`RUN_NAME` includes the seed, so seeds get distinct run dirs. That matters: an earlier
+re-run with a fixed `RUN_NAME` silently OVERWROTE the previous configuration's checkpoints.
+
+Curves for the Figure-4B comparison: `unification_docs/plot_policy_curves.py
+--policy-ckpts <each seed's step-8000.policy.pt>`.
 
 Pins: `PRETRAIN=cea4dee`, `PYTORCH=017ce9b`, `FOVI=c399d3b` on both arms. `rl_train.py`
 is untouched by `cea4dee` (the session changed the harness path), so arm A pins "today's
