@@ -73,7 +73,7 @@ EXTRA_ARGS="--preset policy_only --cfg.no-augment"   # mode (b) + score_res 128 
 # =================
 
 # THE ONLY DIFFERENCE FROM ARM B: this pin carries the policy-loss scale fix.
-PRETRAIN_COMMIT=__PRETRAIN_COMMIT__
+PRETRAIN_COMMIT=bc0b16b
 PYTORCH_COMMIT=1f5121b
 FOVI_COMMIT=c399d3b
 
