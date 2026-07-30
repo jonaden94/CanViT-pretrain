@@ -578,10 +578,58 @@ Correction while here: this doc and the exp27 README used to list "workers 4 vs 
 harmless difference. `PolicyTrainConfig.num_workers` is **4**, the same as the launcher — and
 worker count provably does not change the data anyway.
 
-**What remains genuinely different between two runs, therefore, is only:** the scorer's random
-init draw, the data order, and the ε-greedy stream — i.e. the seed. Same distributions, drawn
-at different points. That is consistent with a level difference of noise, and leaves §A5.6's
-variance observation with no mechanism anywhere in the measured pipeline.
+**What remains genuinely different between two runs, therefore, is** the scorer's random init
+draw, the data order, the ε-greedy stream — and, as §A5.8 shows, GPU nondeterminism, which is
+NOT a seed effect and cannot be removed by matching seeds.
+
+### A5.8 The periodic eval has no side effect — and training is not bit-reproducible
+
+The last untested stage (§A5.7) was whether the harness's periodic eval leaves state behind
+between training steps. Two channels are possible, and they are not equivalent: **(a)
+consuming RNG** shifts the data order / ε-greedy stream — a different trajectory from the same
+distribution, i.e. a seed change, which cannot bias the outcome; **(b) mutating state** —
+wrong train/eval mode, moved BatchNorm stats, a dirty `StateEncoder` — biases every later step.
+
+Snapshotting every mutable object around ONE eval (`scratchpad/eval_mutates.py` pattern):
+
+| state | after one eval |
+|---|---|
+| scorer params, scorer BN | **unchanged** |
+| `scorer.training`, `head.training`, `canvit.training` | **unchanged** |
+| probe head BN buffers | **unchanged** |
+| `PolicySelector.generator` (the ε-greedy stream) | **unchanged** |
+| per-depth `RunningNorm` | **unchanged** |
+| CUDA RNG | **unchanged** |
+| CPU RNG | **changed** — the val loader iterates it |
+| `StateEncoder.prev` | **dirtied** (left batch-32-shaped from eval vs batch-16 for train) |
+
+Neither survivor is a bias. `reset()` is `self.prev = self.init` and training calls it at every
+rollout start (`PolicySelector.start_rollout`), which fully restores the pre-eval encoder state
+(measured: 0.000e+00 on all three init tensors). The CPU-RNG shift is channel (a), and
+`rl_train`'s eval iterates a val loader too — symmetric, so it cannot explain an arm difference.
+
+**And the control run is the real finding.** `diff_eval_side_effects.py` runs 60 steps
+with-eval vs without-eval from one init on one pre-loaded batch stream, plus a CONTROL of
+without-eval against **itself**:
+
+```
+with-eval vs no-eval    relL2 6.02e-5   5/960 glimpse flips
+no-eval  vs no-eval     relL2 6.39e-5   6/960 glimpse flips   <- CONTROL, same code
+```
+
+The eval difference is **smaller than the floor**, so there is no eval side effect. But the
+control says something more important: **two runs of identical code, identical seed, identical
+data and identical init do NOT agree** — 6.4e-5 in weights and 6 flipped glimpses in 60 steps,
+from GPU kernel nondeterminism alone, amplifying because a flipped glimpse changes the next
+state.
+
+Consequences:
+
+- Part of the run-to-run spread is **irreducible** and has nothing to do with the seed. The
+  §A5.6 variance comparison at n=5 per arm was never going to be meaningful.
+- A **paired** design (same init + same data for both trainers) reduces the spread but cannot
+  eliminate it, because this component survives matching.
+- Any future "same seed, therefore same result" claim about this stack is false.
 
 ### A5.3 Why §A5.2 was NOT "fixed" while here *(superseded by §A5.4 — the premise was wrong)*
 
