@@ -51,7 +51,7 @@ RUN_GROUP=exp27
 SEED="${SEED:-0}"            # SEED=1 bash <this> for a second seed
 RUN_NAME=exp27-policy-lossfix-s$SEED
 ARRAY=0-0%1                  # single job: 8000 steps fits well inside the walltime
-TIME=0-04:00:00
+TIME="${TIME:-0-04:00:00}"    # override for slow nodes: TIME=0-06:00:00 SEED=8 bash <this>
 MEM=64G
 NGPU=1                       # ade20k has supports_ddp=False
 TASK=ade20k
