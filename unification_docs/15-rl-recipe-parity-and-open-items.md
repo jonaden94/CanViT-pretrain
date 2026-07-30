@@ -457,7 +457,54 @@ remaining §A5.2 divergence (fp32 vs bf16 logits into the entropy features) flip
 candidates, which is exactly a variance mechanism. **This, not the loss scale, is where I
 would look next.**
 
-### A5.3 Why §A5.2 was NOT "fixed" while here
+### A5.4 RETRACTION + RESOLUTION (2026-07-30): the two training paths are BIT-IDENTICAL
+
+**§A5.2 and §A5.3 below are WRONG and are kept only as a record of the reasoning.** There is
+no fp32-vs-bf16 feature divergence. Two things I got wrong:
+
+1. `head_logits`'s docstring says "always in fp32", and it does wrap the head in
+   `autocast(enabled=False)` — but `get_spatial` is called on the line *before* that guard, so
+   it obeys the caller's amp context. I first concluded from the call sites that this created a
+   real precision split. **Measured: it does not change the values.** Passing the task's
+   already-computed logits into the encoder instead of letting it recompute them is a
+   **bit-identical no-op** (measured before the change was reverted). I implemented that
+   "fix", measured it, found it changed nothing, and reverted it.
+2. Two diagnostic scripts of mine were themselves buggy and manufactured the divergence they
+   appeared to detect:
+   - the first trace omitted `rollout_and_loss`'s **train-mode scorer forward**, which is what
+     updates `frontend.bn`'s running stats before the eval-mode selection reads them. Path A
+     therefore selected on stale stats and path B on fresh ones → a fake 14/16 disagreement
+     at t1.
+   - `diff_training_step.py` (now deleted) reported a 0.36 relative gradient difference from a
+     confounded comparison.
+
+**With a correct trace, the paths agree exactly.** Same batch, same scorer, same encoder,
+`prime_on_policy=1.0` (no RNG anywhere), BN and reward standardizers restored between runs:
+
+| depth | CE `rl_train` | CE harness | ΔCE | chosen glimpses agreeing |
+|---|---|---|---|---|
+| t0 | 0.772283 | 0.772283 | +0.000000 | — |
+| t1 | 0.753898 | 0.753898 | **+0.000000** | **16/16** |
+| t2 | 0.732488 | 0.732488 | **+0.000000** | **16/16** |
+| t3 | 0.729524 | 0.729524 | **+0.000000** | **16/16** |
+| t4 | 0.725665 | 0.725665 | **+0.000000** | **16/16** |
+
+`reward_frac` matches to all printed digits (+0.015385, and per-depth). Combined with
+`test_policy_loss_scale.py` — which pins the loss composition bit-identical (atol=0) — the
+forward, the rewards, the targets and the loss are all identical, so the gradient is too.
+
+**Conclusion: after the §A5.1 scale fix there is no remaining code-level divergence in the
+training step.** The arm D vs arm C difference (ΔCE +0.0005, p=0.26; Δt4 −0.100, p=0.10) is
+seed/stream noise: the two trainers shuffle their data, initialise the scorer and draw
+ε-greedy from independent RNG streams, so identical code still gives different runs.
+
+The one thing still unexplained is arm C's *lower variance* (t4 sd 0.057 vs 0.133/0.136). At
+n=5 a variance ratio like that is weak evidence (F(4,4) is extremely wide), so it may be
+nothing. It cannot be a code difference in the rollout — that is now excluded.
+
+Runnable: `unification_docs/diff_training_trace.py`.
+
+### A5.3 Why §A5.2 was NOT "fixed" while here *(superseded by §A5.4 — the premise was wrong)*
 
 The obvious-looking fix — wrap the t≥1 `sel.select` in `amp_ctx` so the recomputed logits are
 bf16 like the reference's — is **wrong**: it would also put the SCORER forward under autocast,
@@ -471,7 +518,7 @@ argument on the `Selector.select` protocol (and so touches `RandomSelector` /
 `MixtureSelector`), which is a design change rather than a bug fix — left for the owner rather
 than guessed at, especially to chase a p = 0.078 effect.
 
-### A5.2 Two further divergences found, NOT yet fixed
+### A5.2 Two further divergences found, NOT yet fixed *(RETRACTED — see §A5.4: both are no-ops)*
 
 Both concern `PolicySelector.select`, and both are numerical rather than systematic, so they
 would act like a seed change rather than a bias:

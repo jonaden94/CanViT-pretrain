@@ -34,11 +34,22 @@ table quoted arm C as 0.6864 +- 0.0008 / 44.91 +- 0.03 from n=2 and called the h
 larger than it is. Also: compare at the LAST step, not best-ckpt — best-ckpt is a max over 8
 noisy evals and flatters the noisier arm.
 
-**The most distinctive residual is VARIANCE, not level.** The harness is ~2.4x noisier on t4
-(sd 0.133/0.136 vs 0.057) in both arms independently, and the pooled t4 shortfall is
--0.092 (p=0.078, n=10 vs 5), unmoved by the LR fix. That points at glimpse SELECTION, i.e.
-the remaining divergence in doc 15 §A5.2 (fp32 vs bf16 logits into the entropy features,
-which flips near-tied candidates) — the next place to look, and NOT a one-line fix (§A5.3).
+**NO CODE DIVERGENCE REMAINS** (doc 15 §A5.4). With `prime_on_policy=1.0` (no RNG), the same
+batch and the same scorer, the two training rollouts are **bit-identical at every depth** —
+ΔCE +0.000000 and 16/16 chosen glimpses agreeing at t1..t4, `reward_frac` equal to all printed
+digits. With the loss composition already pinned bit-identical by
+`harness/tests/test_policy_loss_scale.py`, the gradient is identical too. So arm D vs arm C
+(dCE +0.0005, p=0.26) is **seed/stream noise**: independent shuffling, scorer init and
+eps-greedy streams make identical code give different runs.
+
+An earlier version of this README blamed a "fp32 vs bf16 logits" divergence for the residual.
+That was wrong twice over — the recomputation is bit-identical, and the trace that appeared to
+show a divergence was my own script omitting `rollout_and_loss`'s train-mode scorer forward
+(the one that updates `frontend.bn` before the eval-mode selection reads it). Retracted in
+doc 15 §A5.4. Reproduce: `unification_docs/diff_training_trace.py`.
+
+Still unexplained, and possibly nothing: arm C's t4 sd is 0.057 vs the harness's 0.133/0.136.
+At n=5 that ratio is weak evidence (F(4,4) is very wide). It is not a rollout code difference.
 
 Measurement is not the issue: the harness eval is bit-identical (0.0000 on t0..t4 + ce_mean)
 to the validated eval on **all three model sources** — published HF qband, `rl_train`, and
