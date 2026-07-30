@@ -504,6 +504,57 @@ nothing. It cannot be a code difference in the rollout — that is now excluded.
 
 Runnable: `unification_docs/diff_training_trace.py`.
 
+### A5.5 MULTI-STEP identity (2026-07-30) — the single-step claim was not enough
+
+§A5.4 only tested ONE step from a fresh scorer, which cannot see anything that accumulates:
+evolving BatchNorm stats, the per-depth reward standardizers, the ε-greedy stream, weight
+drift. The owner pushed for a multi-step test, correctly — and pointed out that `rl_train`'s
+LOW variance is itself evidence something differs. `diff_training_multistep.py` does it: per
+step, from one canonical trajectory, both paths run from the same snapshot on the same batch
+with generators re-seeded identically; the gradient, the BN buffers and the standardizer state
+are all compared; then the trajectory advances through a real AdamW+LambdaLR.
+
+**20 steps, `prime_on_policy=0.5` (ε-greedy live): IDENTICAL.**
+
+| quantity | result |
+|---|---|
+| worst relative gradient difference | **5.8e-6** |
+| `--self-check` floor (rl_train vs itself, 20 steps) | **6.3e-6** — indistinguishable |
+| BN `running_mean` / `running_var` / `num_batches_tracked` | **exactly 0.00e+00, every step** |
+| per-depth `RunningNorm` (mean, sq, count) | **exactly 0.00e+00, every step** |
+| train-mode scorer forwards per step | asserted equal (4 vs 4) |
+
+The residual ~1e-5 is fp REDUCTION ORDER, not a difference in what is computed: the harness
+sums per-depth `mse_loss`es where `rl_train` takes one `mse_loss` over the concatenated
+depths. Mathematically identical (`test_policy_loss_scale.py`, atol=0); ~1e-5 on GPU.
+
+**A THIRD script bug of mine got caught here, and this time by the script itself.** The first
+multi-step run printed relL2 ≈ 0.5 at every step and `max|dBN|` = exactly 5.00 — because
+`TrainSpec.policy_only()` defaults to `BpttSpec(horizon=10)` and I took that default, so I
+compared `rl_train` at horizon 4 against the harness at horizon **9**. A BatchNorm
+forward-count hook showed 4 vs 9 immediately. The script now asserts equal train-mode scorer
+forward counts BEFORE any numeric comparison, and `--self-check` (rl_train as both paths) must
+be seen to pass first.
+
+### A5.6 The variance difference IS statistically real, and unexplained
+
+mIoU t4 spread, re-scored: `rl_train` sd **0.057** (n=5) vs the harness's **0.134** (pooled
+over arms B and D, n=10, df=8). F = 5.48, **exact permutation p = 0.0433**.
+
+Take it with two caveats: it is **post-hoc** (tested because it looked odd, which inflates the
+false-positive rate), and it rests on two outliers — arm B's 45.00 is the highest of all 15
+runs and arm D's 44.56 the lowest.
+
+It is also hard to reconcile with §A5.5: if the per-step computation is identical, the
+distribution over seeds should be too. So a real variance difference has to come from OUTSIDE
+the training step. Checked and matching: data cycling (`run._infinite` re-iterates the
+map loader, reshuffling per epoch from global RNG, exactly like `rl_train`'s re-`iter()`), the
+LR ramp, the optimizer and its param grouping, `drop_last`/`shuffle`, BN update counts, and
+scorer train/eval mode save-restore around eval.
+
+**Unresolved.** Either it is the 1-in-23 fluke, or it lives somewhere none of the above
+covers. Only more seeds can separate those — variance estimates at n=5 are very unstable.
+
 ### A5.3 Why §A5.2 was NOT "fixed" while here *(superseded by §A5.4 — the premise was wrong)*
 
 The obvious-looking fix — wrap the t≥1 `sel.select` in `amp_ctx` so the recomputed logits are
