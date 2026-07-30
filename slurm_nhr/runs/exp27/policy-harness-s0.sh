@@ -77,7 +77,7 @@ EXTRA_ARGS="--preset policy_only --cfg.no-augment"   # mode (b) + score_res 128 
 # policy instead of on random glimpses) + the recipe knobs (betas, LR ramp, augment,
 # probe head in frozen mode). 4db7c3f: the squish protocol fix above.
 PRETRAIN_COMMIT=4428e34
-PYTORCH_COMMIT=017ce9b
+PYTORCH_COMMIT=1f5121b
 FOVI_COMMIT=c399d3b
 
 # NOT in env.sh — every exp24 ade20k script exports it explicitly, and without it
