@@ -1,0 +1,26 @@
+# exp29 — ImageNet-1k full-model finetunes (harness, current code)
+
+Four full finetunes, one per exp22 pretrained source. Recipe copied value-for-value from
+**exp25**, which is the original `canvit_specialize` TPU in1k finetune batch-adapted for one
+A100 by the recipe's own sanctioned rule (batch 256->64, `peak_lr` 2.5e-5->6.25e-6, warmup
+25k->100k, 100,080@256 -> 401,408@64). Everything else byte-identical to the TPU recipe.
+
+| run | source checkpoint | eval policy |
+|---|---|---|
+| `in1k-uni16ti-803k` | exp22-uniform16-teacherinit-lrdrop2-803k `step-16384-hf` | coarse_to_fine |
+| `in1k-uni16-1516k` | exp22-uniform16-lrdrop-1516k `step-319488-hf` | coarse_to_fine |
+| `in1k-fovi-ti-1196k` | exp22-fovi-teacherinit-lrdrop-1196k `step-155648-hf` | random |
+| `in1k-fovi-1901k` | **exp22-fovi `step-1900544-hf` — NEW** | random |
+
+The first three are exactly the sources exp24/exp25 used. **The fourth is new**: exp22-fovi
+never had a downstream run. Its best `val/scene_cos_norm_t9` is 0.853339 at step 1,900,544
+(max over all 238 val points, wandb run `r64ck13l`), converted with `to_hf` on 2026-07-31.
+The pre-existing `step-516096-hf` export in that run is **not** the best checkpoint — do not
+use it.
+
+`EVAL_POLICY=random` for the foveated arms because coarse-to-fine is uniform-only and OOD for
+a fixed-scale foveated model; those arms also pass `--cfg.foveated-scale.fixed-scale 2.0` so
+the rollout views at the pretrain scale. Both choices follow exp25.
+
+Uses the pretrained probe (`CFG_PROBE_REPO`) fused into the head — a random head here was a
+real bug once (`8f780ba`), so this flag is load-bearing, not cosmetic.
