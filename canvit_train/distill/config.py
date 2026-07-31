@@ -61,7 +61,12 @@ class Config:
     steps_per_job: int = 4_992  # Steps this job does before exiting (for SLURM arrays)
     # Data
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
-    val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
+    val_dir: Path = Path("/user/henrich1/u25995/jonathan/datasets/imagenet1k-val")
+    """IN1k val ImageFolder (raw images) for distill validation — glimpse rollouts scored
+    by the frozen IN1k probes need actual pixels, so this is NOT the feature webdataset.
+    Every launcher passes `--cfg.val-dir "$VAL_DIR"` from `.envrc.grete`, so this default
+    only applies to ad-hoc local runs; `harness_train.sbatch` fails at launch if VAL_DIR
+    is unset. Was a Nibi path (`/datasets/ILSVRC/...`) that does not exist on Grete."""
     train_index_dir: Path | None = None  # Required for raw image training
     val_index_dir: Path | None = None  # Required for validation
     # Precomputed features (skips teacher inference on train images)

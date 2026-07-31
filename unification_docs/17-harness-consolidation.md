@@ -50,14 +50,20 @@ and reusing the class's own `save_pretrained` so the layout cannot drift from wh
 reconstruction for BOTH modes — finetune trained from a probe-fused head, but the
 architecture either constructor yields is identical and every weight is loaded over.
 
-**2. ADE20K train-mIoU logging — STILL OPEN, owner's call.** The standalone logged
+**2. ADE20K train-mIoU logging — WON'T DO (owner decision, 2026-07-31).** Accepted as a
+permanent, deliberate gap: `train_miou_mean` and `best_val_miou_t{t}` are simply **not
+logged** by the harness. Do not "fix" this as a bug or re-open it as an oversight; if it is
+ever wanted, the cost is the seam described below, not a hook call. The standalone logged
 `train_miou_mean` (accumulated over each `log_every` window) and a `best_val_miou_t{t}`
 series. The harness logs eval mIoU only. An earlier estimate of "~15 lines via the
 existing `glimpse_metrics` hook" was **wrong**: that hook receives only the scalar
 `TaskLoss.combined`, so it cannot see predictions, and mIoU is a ratio of *accumulated*
 counts — averaging per-batch mIoU is a different quantity. A faithful port needs a
-window-accumulator seam plus an on-log reset hook the engine does not have. Not done;
-train loss (every `log_every`) and per-timestep val mIoU (every `val_every`) are unaffected.
+window-accumulator seam plus an on-log reset hook the engine does not have. Not done, and
+not planned; train loss (every `log_every`) and per-timestep val mIoU (every `val_every`)
+are unaffected — so ADE20K runs are still fully monitorable, just without a train-mIoU
+curve. Consequence to remember when comparing to pre-2026-07-31 runs: old ADE20K wandb runs
+have `train_miou_mean` panels that new runs will not have.
 
 Verified safe to drop: the legacy probe checkpoint format
 (`canvas_hidden_best_t*_miou*.pt`, keys `probe_state_dict` / `best_mious_per_t`) has
