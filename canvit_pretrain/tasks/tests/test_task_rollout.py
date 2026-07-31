@@ -258,6 +258,11 @@ def test_in1k_joint_trains_head_and_scorer():
 def _vpg_joint(*, canvit, encode_model, groups, **rl_kw):
     gen = torch.Generator(device=_DEV)
     gen.manual_seed(0)
+    # select_bn_eval=False is REQUIRED for vpg (build_policy raises otherwise): sampling
+    # from an eval-mode BN forward while differentiating log pi from the train-mode scores
+    # is an off-policy, biased REINFORCE gradient. The knob's True default serves QReg/PG,
+    # which do not sample. Overridable so a test can assert the refusal.
+    rl_kw.setdefault("select_bn_eval", False)
     return build_policy(
         canvit=canvit, rl=JointPolicyConfig(use_rl=True, objective="vpg", **rl_kw),
         feature_groups=groups, device=_DEV, canvas_grid=_G, min_viewpoint_scale=0.05,
@@ -590,23 +595,23 @@ def test_autoreg_style_policy_trains_end_to_end():
     assert joint.policy_selector.vp_flat.shape == (32 * 32, 3)  # heatmap ON the state grid
 
 
-def test_vpg_warns_when_select_bn_eval_makes_it_off_policy(caplog):
-    """select_bn_eval defaults True (it reproduces the qband checkpoints for QReg/PG), but
-    for VPG it means sampling from one distribution and differentiating log pi of another."""
-    import logging
+def test_vpg_refuses_select_bn_eval_but_qreg_still_gets_it():
+    """`select_bn_eval` defaults True (it reproduces the qband checkpoints for QReg/PG), but
+    for VPG it means sampling from one distribution and differentiating log pi of another.
+
+    This REFUSES as of 2026-07-31 (owner's call); it used to warn and continue, which meant
+    a bare `--rl.objective vpg` trained on a biased off-policy gradient with only a log line
+    to say so. The third assertion is the one that matters most: the refusal must NOT leak
+    into QReg/PG, for which mode (b) IS the reference behaviour."""
+    import pytest
 
     seg = _seg()
-    with caplog.at_level(logging.WARNING, logger="canvit_pretrain.harness.policy"):
+    with pytest.raises(ValueError, match="no-select-bn-eval"):
         _vpg_joint(canvit=seg.canvit, encode_model=seg, groups=ADE_GROUPS, select_bn_eval=True)
-    assert any("off-policy" in r.getMessage() for r in caplog.records)
 
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="canvit_pretrain.harness.policy"):
-        _vpg_joint(canvit=seg.canvit, encode_model=seg, groups=ADE_GROUPS, select_bn_eval=False)
-    assert not any("off-policy" in r.getMessage() for r in caplog.records)
+    # VPG with the unbiased mode builds fine.
+    assert _vpg_joint(canvit=seg.canvit, encode_model=seg, groups=ADE_GROUPS,
+                      select_bn_eval=False).defers_credit
 
-    # QReg/PG must NOT be warned — for them mode (b) is the reference behaviour.
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="canvit_pretrain.harness.policy"):
-        _joint_for(canvit=seg.canvit, encode_model=seg, groups=ADE_GROUPS)
-    assert not any("off-policy" in r.getMessage() for r in caplog.records)
+    # QReg at the True DEFAULT must be untouched by the refusal.
+    assert _joint_for(canvit=seg.canvit, encode_model=seg, groups=ADE_GROUPS) is not None

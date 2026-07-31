@@ -138,9 +138,8 @@ class In1kRunTask:
     def build_model(self, device, prior_model_config=None):
         # prior_model_config is unused: the backbone arch comes from the HF repo the head
         # was built on, so a resume rebuilds the same model from cfg.model_repo already.
-        # mode-dependent head (fresh probe vs fused DINOv3 probe for finetune) — shared
-        # with the standalone via in1k.train.build_classifier so they can't diverge.
-        from canvit_pretrain.in1k.train import build_classifier
+        # mode-dependent head (fresh probe vs fused DINOv3 probe for finetune).
+        from canvit_pretrain.in1k.model import build_classifier
         clf = build_classifier(self.cfg, device)
         return clf, clf.head
 
@@ -270,11 +269,11 @@ class In1kRunTask:
                  joint=None):
         # tracker/run_dir unused: this task returns its scalars for the caller to log
         # and renders no validation figures (owner: distill viz only).
-        """Top-1/5 over the eval policy (reuses in1k/train.py::evaluate)."""
+        """Top-1/5 over the eval policy (reuses in1k/eval.py::evaluate)."""
         if val_loader is None:
             return {}
         from canvit_pretrain.harness.eval_viewpoints import resolve
-        from canvit_pretrain.in1k.train import evaluate as _eval
+        from canvit_pretrain.in1k.eval import evaluate as _eval
         amp = torch.autocast("cuda", dtype=torch.bfloat16) if device.type == "cuda" else nullcontext()
         is_fov = consumes_full_image(model)
         eval_policy = resolve(self.cfg.eval_policy, task="in1k", is_foveated=is_fov)

@@ -139,7 +139,35 @@ def test_harness_checkpoint_preserves_patch_stride():
 
 
 def test_harness_non_distill_checkpoint_rejected():
-    """An ade20k/in1k checkpoint is not a pretraining model — fail loudly, not silently."""
+    """An ade20k checkpoint is not a pretraining model — fail loudly, not silently.
+
+    in1k no longer lands here: it dispatches to the classifier layout instead (below)."""
     bad = {"model_state": {}, "model_config": {}, "metadata": {"task": "ade20k"}}
     with pytest.raises(KeyError, match="backbone_name"):
         normalize_schema(bad)
+
+
+# --- in1k classifier dispatch ------------------------------------------------
+# The standalone in1k trainer used to write the classifier HF layout itself
+# (`clf.save_pretrained(run_dir/"best-hf")`); deleting it in the consolidation left the
+# harness with no HF export at all, so an in1k finetune could not be handed to
+# CanViT-eval's in1k_clf task. These pin the dispatch that replaced it. The conversion
+# itself needs a real backbone repo, so only the routing is unit-tested here.
+def test_in1k_checkpoint_routes_to_the_classifier_layout():
+    from canvit_pretrain.checkpoint.to_hf import is_classifier_checkpoint
+
+    in1k = {"model_state": {}, "step": 401_408,
+            "model_config": {"task": "in1k", "n_classes": 1000, "canvas_grid": 32,
+                             "model_repo": "/some/hf/dir", "mode": "finetune"},
+            "metadata": {"task": "in1k"}}
+    assert is_classifier_checkpoint(in1k)
+
+
+def test_distill_and_ade20k_do_not_route_to_the_classifier_layout():
+    """Misrouting a distill checkpoint would try to build a 1000-class classifier from it."""
+    from canvit_pretrain.checkpoint.to_hf import is_classifier_checkpoint
+
+    assert not is_classifier_checkpoint(_harness_raw("uniform"))
+    assert not is_classifier_checkpoint(_raw("uniform", _history("fixed", 1.0)))
+    assert not is_classifier_checkpoint(
+        {"model_state": {}, "model_config": {"task": "ade20k"}, "metadata": {}})

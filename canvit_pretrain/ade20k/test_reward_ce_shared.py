@@ -1,16 +1,23 @@
-"""The policy reward comes from ONE implementation, at the reference's resolution.
+"""The policy reward matches CanViT-PyTorch-RL's, at the reference's resolution.
 
-`rl_train.ce_from_logits` and `BoundAde20kTask.per_image_loss` both compute the reward.
-They used to differ: rl_train scored at score_res=128 (bilinear-upsample logits,
-stride-subsample masks) while the harness scored at the probe's native 64 with
-nearest-downsampled masks. That was doc 15 §A gap #5 — the last known config difference
-from CanViT-PyTorch-RL. Both now call `reward_ce`.
+The harness used to score the reward at the probe's native 64 with nearest-downsampled
+masks, while the reference scored at score_res=128 (bilinear-upsample logits,
+stride-subsample masks). That was doc 15 §A gap #5 — the last known config difference
+from CanViT-PyTorch-RL. `reward_ce` is now the single implementation.
+
+The reference arm used to be imported from `ade20k/rl_train.py`, but that file was a
+PORT, and by the end its `ce_from_logits` was a one-line delegation to `reward_ce` — so
+the test was asserting that a wrapper equals what it wraps. Since the consolidation
+deleted the port, the arm below is transcribed from the TRUE upstream instead
+(`CanViT-PyTorch-RL/src/canvit_pytorch_rl/canvas_ops.py::ce_from_logits` +
+`scoring.py::per_image_ce`), which is a strictly stronger guard: it can catch a
+mis-transcription that comparing against our own port never could.
 """
 import torch
+import torch.nn.functional as F
 
 from canvit_pretrain.ade20k.data import IGNORE_LABEL
 from canvit_pretrain.ade20k.metrics import _warn_score_res, reward_ce
-from canvit_pretrain.ade20k.rl_train import ce_from_logits
 
 B, C, G, S = 2, 6, 8, 32
 
@@ -23,11 +30,30 @@ def _batch(seed=0):
     return logits, masks
 
 
-def test_rl_train_delegates_bit_identically():
-    """rl_train is the frozen reference: delegating must not change its numbers."""
+def _upstream_ce_from_logits(logits, masks, *, score_res=None):
+    """Verbatim transcription of canvit_pytorch_rl's reward, kept independent of ours.
+
+    Do NOT refactor this to share code with `reward_ce` — being a separate expression is
+    the entire point. The one deliberate difference is the indivisible-score_res case:
+    upstream asserts, we warn and fall back to full res (covered separately below), so the
+    comparison here only uses divisors of S. `.float()` on the logits is a no-op for the
+    fp32 inputs used here.
+    """
+    full = masks.shape[-1]
+    res = score_res or full
+    assert full % res == 0
+    m = masks if res == full else masks[:, :: full // res, :: full // res].contiguous()
+    up = F.interpolate(logits, size=(res, res), mode="bilinear", align_corners=False)
+    ce = F.cross_entropy(up, m, ignore_index=IGNORE_LABEL, reduction="none")
+    valid = (m != IGNORE_LABEL).sum(dim=(1, 2)).clamp(min=1)
+    return (ce.sum(dim=(1, 2)) / valid).float()
+
+
+def test_matches_upstream_bit_identically():
+    """The reward IS the objective, so it must equal the reference's to the bit."""
     logits, masks = _batch()
     for res in (None, 16, S):
-        assert torch.equal(ce_from_logits(logits, masks, score_res=res),
+        assert torch.equal(_upstream_ce_from_logits(logits, masks, score_res=res),
                            reward_ce(logits, masks, score_res=res)), f"score_res={res}"
 
 
@@ -37,7 +63,7 @@ def test_the_harness_task_uses_the_same_function_at_128_by_default():
     from canvit_pretrain.ade20k.config import Ade20kConfig
     from canvit_pretrain.tasks.ade20k.task import BoundAde20kTask
 
-    assert Ade20kConfig().reward_score_res == 128, "must match rl_train's score_res"
+    assert Ade20kConfig().reward_score_res == 128, "must match the reference's score_res"
     src = inspect.getsource(BoundAde20kTask.per_image_loss)
     assert "reward_ce" in src
     assert "nearest" not in src, "the old native-grid/nearest-downsample path must be gone"

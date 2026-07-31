@@ -1,9 +1,9 @@
 """The knobs that let the harness express the CanViT-PyTorch-RL recipe (doc 15 §A).
 
 Each of these was a SILENT deviation: the harness ran, logged plausible numbers, and
-simply trained under a different recipe than the gate-validated `ade20k/rl_train.py`.
-Nothing surfaced them except reading both stacks side by side, which is why they are
-pinned here against rl_train's own constants.
+simply trained under a different recipe than the reference. Nothing surfaced them except
+reading both stacks side by side, which is why they are pinned here against the
+reference's own constants.
 
 Two of the three fixes live in shared harness types (`GroupOptim.betas`, the policy
 group's optimizer recipe in `resolve_spec`), so they apply to a policy on ANY task —
@@ -21,7 +21,11 @@ from canvit_pretrain.harness.optim import build_optimizer_and_scheduler
 from canvit_pretrain.harness.spec import GroupOptim, ScheduleSpec, TrainSpec
 from canvit_pretrain.train.config import JointPolicyConfig
 
-# The reference values, from canvit_pretrain/ade20k/rl_train.py's PolicyTrainConfig.
+# The reference values, transcribed from UPSTREAM CanViT-PyTorch-RL —
+# src/canvit_pytorch_rl/training/config.py: lr=2e-4 (:81), weight_decay=1e-2 (:85),
+# adam_beta1=0.9 / adam_beta2=0.95 (:87-88), warmup_frac=0.125 (:92). Previously cited via
+# our own port (`ade20k/rl_train.py::PolicyTrainConfig`); the port was deleted in the
+# harness consolidation, and citing upstream is the stronger reference anyway.
 _RL_LR, _RL_WD = 2e-4, 1e-2
 _RL_BETAS = (0.9, 0.95)
 _RL_WARMUP_FRAC = 0.125
@@ -235,17 +239,23 @@ def test_policy_without_a_probe_warns(caplog):
     assert "reward is noise" in caplog.text
 
 
-def test_rl_train_defaults_to_the_bands_squish_protocol():
-    """`rl_train` is the FROZEN REFERENCE for CanViT-PyTorch-RL, whose measurement
-    contract is squish everywhere (its dataset class is named `Ade20kSquish`). This
-    default already regressed once — commit 1a0b452 lifted the hardcoded "squish"
-    into a knob defaulting to center_crop, and exp27 arm A then scored 0.016 CE
-    "better" than the band, ~20x its 0.0007 seed spread, purely from the protocol.
-    `Ade20kConfig` deliberately keeps center_crop; only the reference is pinned."""
-    from canvit_pretrain.ade20k.config import Ade20kConfig
-    from canvit_pretrain.ade20k.rl_train import PolicyTrainConfig
+def test_our_default_is_center_crop_while_the_band_protocol_is_squish():
+    """CanViT-PyTorch-RL's measurement contract is squish EVERYWHERE — upstream has no
+    resize knob at all: `data.py::Ade20kSquish` calls
+    `make_val_transforms(scene_size, "squish")` with the mode hardcoded, and its CLAUDE.md
+    says "Measurement = the paper's (squish) protocol, always".
 
-    assert PolicyTrainConfig.resize_mode == "squish"
+    We deliberately diverge: `Ade20kConfig` defaults to center_crop (aspect-preserving,
+    matching pretraining and what the exp24 probes used). That is safe ONLY because a
+    policy run under any non-squish mode warns it is not band-comparable — pinned by
+    `test_harness_policy_run_warns_when_not_band_comparable` below, which is now the real
+    guard here. It has to be: commit 1a0b452 once lifted the reference's hardcoded squish
+    into a knob defaulting to center_crop, and exp27 arm A then scored 0.016 CE "better"
+    than the band — ~20x its 0.0007 seed spread — purely from the protocol change.
+
+    (This used to assert against the deleted `rl_train.PolicyTrainConfig.resize_mode`.)"""
+    from canvit_pretrain.ade20k.config import Ade20kConfig
+
     assert Ade20kConfig().resize_mode == "center_crop"  # new work keeps aspect ratio
 
 

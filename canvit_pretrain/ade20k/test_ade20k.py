@@ -66,6 +66,18 @@ def test_foveated_rollout_trains_probe() -> None:
     _run_two_step(seg)
 
 
+def test_square_patcher_also_routes_the_full_image() -> None:
+    """SQUARE, not just foveated. "Square counts as foveated" was a real bug (it made the
+    square patcher take the uniform pre-crop path); the only same-seed check on it lived in
+    `unification_docs/parity_configs.py`, which was an old-loop-vs-harness A/B and retired
+    with `train/step.py`. Pinned here so the routing predicate keeps its second case."""
+    from canvit_pytorch import SquarePatcherConfig
+
+    seg = _tiny_seg({"patcher_name": "square", "square_patcher": SquarePatcherConfig()})
+    assert consumes_full_image(seg)
+    _run_two_step(seg)
+
+
 def test_glimpse_px_token_guard() -> None:
     """A glimpse_px that yields the wrong token count must fail loudly."""
     from .rollout import derive_glimpse_px

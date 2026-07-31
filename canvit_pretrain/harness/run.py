@@ -7,10 +7,11 @@
 
 Everything task-specific lives behind the ``RunTask`` seam (a run-level ``Task``:
 ``tasks/{distill,ade20k,in1k}/task.py``); everything task-neutral is here or in the
-sibling harness modules (rollout / optim / checkpoint / loop / policy). This subsumes
-the three legacy entry points (``train`` loop, ``ade20k.train``, ``in1k.train``) as one
-``TrainSpec``-driven call — the big-bang cutover (a separate, owner-gated step) only
-repoints ``python -m canvit_pretrain.train`` at this and deletes the old loops.
+sibling harness modules (rollout / optim / checkpoint / loop / policy). This subsumed the
+four former entry points (the ``train`` distill loop, ``ade20k.train``, ``in1k.train`` and
+``ade20k.rl_train``) into one ``TrainSpec``-driven call, and as of the 2026-07-31
+consolidation those four are DELETED — this is the only training entry point in the repo.
+Historical launchers still reach them via commit pinning; see the README.
 
 Config is **composed** (D-B), not one mega-dataclass: the task holds its own per-task
 config; :class:`RunSettings` carries the harness-level, cross-cutting knobs; ``TrainSpec``

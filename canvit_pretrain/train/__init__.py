@@ -1,4 +1,12 @@
-"""CanViT pretraining training loop: data, probe, scheduler, viewpoint, viz."""
+"""Shared pretraining LIBRARY: config, data, probe, scheduler, viewpoint, selectors,
+RL objectives, JointPolicy, tracker, viz.
+
+Despite the name this is no longer a trainer. The distill training loop (``loop.py`` +
+``step.py`` + ``__main__.py``) was deleted in the 2026-07-31 consolidation; the harness
+(``canvit_pretrain.harness``) is the single entry point and imports the modules here as
+its shared substrate. The package keeps its name because ~15 import sites and every
+pinned historical launcher reference it.
+"""
 
 from canvit_pretrain.train.data import (
     Batch,

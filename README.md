@@ -80,7 +80,39 @@ the venv's (editable, local) install. See
 
 ## Run
 
-Export DINOv3 teacher features once:
+**There is one training entry point.** Every task and every training configuration goes
+through it:
+
+```bash
+python -m canvit_pretrain.harness.run <task> --preset <preset> [--cfg.* ...] [--opts.* ...]
+```
+
+| `<task>` | what it trains | data |
+|---|---|---|
+| `distill` | passive→active dense latent distillation from DINOv3 (the pretraining objective) | IN21k webdataset shards |
+| `ade20k` | ADE20K semantic-segmentation probe / finetune | ADE20K (`$ADE20K_ROOT`) |
+| `in1k` | ImageNet-1k linear probe / full finetune | IN1k webdataset + val ImageFolder |
+
+`--preset` picks *what trains*, orthogonally to the task:
+
+| preset | trains |
+|---|---|
+| `default` | the task's own recipe (task-tuned LR schedule) |
+| `probe` | head only, backbone frozen |
+| `finetune` | backbone + head |
+| `policy_only` | the viewpoint-selection policy only, everything else frozen |
+| `joint` | task + policy together |
+
+Not every cell is meaningful (`distill` has no head, so `--preset probe` is refused).
+**`unification_docs/capability_matrix.md` is generated from the live task objects** and
+lists exactly which task/preset combinations exist and what spec each resolves to — read
+it rather than guessing, and regenerate it with
+`unification_docs/capability_matrix.py` after touching a `default_spec`.
+
+On SLURM, use `slurm_nhr/harness_train.sbatch` and copy an existing launcher from
+`slurm_nhr/runs/<group>/` as your template.
+
+Export DINOv3 teacher features once (only needed for `distill` on raw shards):
 
 ```bash
 uv run python scripts/build_shuffled_index.py \
@@ -88,19 +120,25 @@ uv run python scripts/build_shuffled_index.py \
 sbatch --array=0-99%20 slurm/export_features.sh
 ```
 
-Pretraining:
+Publish a trained checkpoint to the local HF layout (never automatic — always explicit):
 
 ```bash
-sbatch slurm/train.sbatch [--flag value ...]
+python -m canvit_pretrain.checkpoint.to_hf --pt-path <run>/checkpoints/best.pt --out-dir <dir>
 ```
 
-Ablations:
+It detects the checkpoint type: a `distill` checkpoint becomes the pretraining layout
+(`CanViTForPretrainingHFHub`), an `in1k` one becomes the classifier layout that
+CanViT-eval's `in1k_clf` task loads.
 
-```bash
-bash slurm/ablations/baseline.sh
-bash slurm/ablations/no-bptt.sh
-# ...
-```
+### Historical launchers — do not use for new work
+
+`slurm_nhr/base_train.sbatch`, `slurm_nhr/ade20k/`, `slurm_nhr/in1k/`, and the
+`*-oldloop*.sh` / `policy-{bneval,oldloop,pooled}-s0.sh` run scripts drive entry points
+that **no longer exist in this repo** (`canvit_pretrain.train`, `canvit_pretrain.ade20k`,
+`canvit_pretrain.in1k`, `canvit_pretrain.ade20k.rl_train`). They still run correctly,
+because each pins pre-consolidation commits that `git archive` restores into the job's
+`TMPDIR` — that is how the exp22/exp23/exp27 comparisons stay reproducible. Keep them for
+reproduction; start new work from a `harness_train.sbatch` launcher.
 
 ## Citation
 

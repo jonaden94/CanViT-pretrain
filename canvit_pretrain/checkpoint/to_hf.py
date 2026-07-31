@@ -18,6 +18,13 @@ Output dir gets:
 
 Usage:
     python -m canvit_pretrain.checkpoint.to_hf --pt-path /path/to/step-NNNNNN.pt --out-dir /path/to/out
+
+IN1k CLASSIFIER checkpoints (``metadata.task == "in1k"``) are dispatched to a second
+path that emits the ``CanViTForImageClassification.from_pretrained`` layout instead —
+what ``CanViT-eval/tasks/in1k_clf.py`` loads. The standalone ``in1k/train.py`` used to
+write that directory itself (``clf.save_pretrained(run_dir/"best-hf")``); when it was
+deleted in the harness consolidation, the harness had no HF export at all, so an in1k
+finetune could not be handed to canvit_eval. Same CLI, auto-detected from the payload.
 """
 
 import json
@@ -180,9 +187,51 @@ def build_config(raw: dict, pt_path: Path) -> dict[str, Any]:
     return config
 
 
+def is_classifier_checkpoint(raw: dict) -> bool:
+    """True for an IN1k classifier checkpoint, which needs the classification layout
+    rather than the pretraining one. ``model_config`` is the harness in1k task's
+    (``tasks/in1k/task.py::model_config``); a distill payload has no ``task`` key there."""
+    return (raw.get("model_config") or {}).get("task") == "in1k"
+
+
+def classifier_to_hf(raw: dict, out_dir: Path) -> None:
+    """Write the ``CanViTForImageClassification.from_pretrained`` layout.
+
+    Rebuilds the module and reuses the class's OWN ``save_pretrained`` (from
+    ``PyTorchModelHubMixin``) rather than hand-assembling config.json + safetensors —
+    the layout then cannot drift from what ``from_pretrained`` expects, which is the
+    whole failure mode a second writer would introduce.
+
+    The architecture is reconstructed with ``from_pretrained_with_new_head``, whose fresh
+    random head is immediately overwritten by the checkpoint's own weights. That is
+    correct for BOTH modes: ``finetune`` trained from a head built by
+    ``from_pretrained_with_probe``, but the *architecture* either constructor produces is
+    identical (LN(D) -> Linear(D, n_classes)) — only the init differs, and we load over it.
+    """
+    from canvit_pytorch import CanViTForImageClassification
+
+    mc = raw["model_config"]
+    repo, n_classes = mc["model_repo"], mc["n_classes"]
+    log.info("in1k classifier (mode=%s, n_classes=%d) over %s", mc.get("mode"), n_classes, repo)
+    clf = CanViTForImageClassification.from_pretrained_with_new_head(
+        pretrained_repo=repo, n_classes=n_classes)
+    # strict: a silently-partial load would publish a half-trained classifier.
+    clf.load_state_dict(raw["model_state"], strict=True)
+    assert clf.head.out_features == n_classes, (
+        f"head has {clf.head.out_features} classes, checkpoint says {n_classes}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    clf.save_pretrained(out_dir)
+    log.info("Wrote %s (step=%s)", out_dir, raw.get("step"))
+    log.info("Load with: CanViTForImageClassification.from_pretrained(%r)", str(out_dir))
+
+
 def main(args: Args) -> None:
     log.info("Loading %s ...", args.pt_path)
-    raw = normalize_schema(torch.load(args.pt_path, map_location="cpu", weights_only=False))
+    raw = torch.load(args.pt_path, map_location="cpu", weights_only=False)
+    if is_classifier_checkpoint(raw):
+        classifier_to_hf(raw, args.out_dir)
+        return
+    raw = normalize_schema(raw)
     _migrate_standardizers_in_place(raw)
 
     config = build_config(raw, args.pt_path)

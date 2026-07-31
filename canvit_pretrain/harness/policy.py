@@ -113,14 +113,18 @@ def build_policy(
     # modes rank actions very differently (argmax agrees 8-14%). It defaults True because
     # that reproduces the qband checkpoints for QReg/PG; autoreg_tryout cannot hit this at
     # all (its policy heads carry no BatchNorm, so sampling and scoring are one tensor).
-    # Warn, don't override — the default is owner-approved and this is the user's call.
+    # REFUSE rather than warn (owner's call, 2026-07-31): `select_bn_eval` defaults True,
+    # so the biased combination was what a plain `--rl.objective vpg` GOT, and a log line
+    # is not enough to stop someone acting on the run's numbers. Opting in is one explicit
+    # flag; there is no legitimate reason to want the biased gradient.
     if isinstance(obj, VPG) and rl.select_bn_eval:
-        log.warning(
-            "objective='vpg' with select_bn_eval=True: the glimpse is SAMPLED from an "
-            "eval-mode BN forward but log pi is differentiated from the TRAIN-mode scores, "
-            "so the REINFORCE gradient is off-policy and biased. autoreg_tryout has no BN "
-            "in its policy heads and cannot hit this. Pass --rl.no-select-bn-eval for a "
-            "faithful (and unbiased) VPG run.")
+        raise ValueError(
+            "objective='vpg' requires --rl.no-select-bn-eval. With select_bn_eval=True the "
+            "glimpse is SAMPLED from an eval-mode BN forward but log pi is differentiated "
+            "from the TRAIN-mode scores, so the REINFORCE gradient is off-policy and biased "
+            "(the two BN modes' argmax agrees only 8-14% on real rollout states). The True "
+            "default exists to reproduce the qband checkpoints for QReg/PG, which do not "
+            "sample; autoreg_tryout has no BN in its policy heads and cannot hit this.")
 
     # VPG needs the value head unconditionally — that IS its baseline — so it is not the
     # user's `dueling` knob to turn off. QReg honors the knob; plain PG never gets one
