@@ -1,6 +1,39 @@
 # exp27 — does the UNIFIED HARNESS reproduce the CanViT-PyTorch-RL policy recipe?
 
-## VERDICT (2026-07-30): the harness reproduces the recipe, with a real but small residual
+## FINAL VERDICT (2026-07-31): the harness reproduces the recipe. PASSED.
+
+Deploy (best-mean-CE) checkpoints — the selection the published band and the 8 HF policies use.
+Reference row = the 8 PUBLISHED policies through OUR eval, which removes every
+accounting/batch-size confound (their doc: 0.6853 +- 0.0007 / 44.97 +- 0.10, so our eval
+reproduces them to +0.0003 CE / -0.01 mIoU).
+
+| arm | n | mean(t1-t4) CE | mIoU t4 | dCE (p) | dt4 (p) |
+|---|---|---|---|---|---|
+| **published, our eval** | 8 | 0.6856 +- 0.0006 | 44.96 +- 0.11 | — | — |
+| `rl_train` (ported ref) | 5 | 0.6855 +- 0.0010 | 44.86 +- 0.09 | -0.0000 (0.55) | -0.106 (0.051) |
+| **harness + scale fix** | 5 | **0.6859 +- 0.0009** | **44.87 +- 0.12** | +0.0003 (0.22) | -0.096 (0.082) |
+| `rl_train` POOLED (arm E) | 5 | 0.6853 +- 0.0005 | 44.88 +- 0.10 | -0.0002 (0.76) | -0.084 (0.099) |
+
+**The harness is indistinguishable from the ported reference and from the published policies on
+CE** — the metric the band is defined by and the one the reward optimizes. Goal met.
+
+**Arm E (the original's pooled rollout) is a NULL:** t4 +0.022 (p=0.377), CE -0.0002 (p=0.393).
+So the ~0.1 mIoU t4 shortfall shared by ALL THREE arms is not the rollout architecture; being
+common to every trainer we have, it sits upstream of all of them. Only marginally significant
+(p=0.05..0.10) and CE matches exactly — since the reward IS CE, two policies can tie on CE and
+differ slightly in mIoU. Remaining unaudited surface: the core-library revisions on the
+authors' machine (doc 15 §A5.9/§A5.10).
+
+**Beware two selection traps** found while doing this:
+- Averaging each run's PEAK `eval/miou_t4` over its evals gives 44.970 — which coincidentally
+  equals the published 44.97, but is a max-over-8-noisy-evals statistic compared against a
+  best-CE-selected one. The honest same-rule number is 44.834 for those seeds.
+- `best.pt` exists from the FIRST eval, so an in-flight run scores as if finished. It did once
+  here; `compare_to_published_band.py` now requires the terminal checkpoint as proof.
+
+---
+
+## Earlier verdict (2026-07-30), kept for the reasoning
 
 15 checkpoints, all re-scored at the LAST step through ONE eval in ONE process at eval batch
 32 (every arm logs `eval_batch_size=32`, so no batch-size confound).

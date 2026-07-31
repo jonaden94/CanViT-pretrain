@@ -555,6 +555,68 @@ scorer train/eval mode save-restore around eval.
 **Unresolved.** Either it is the 1-in-23 fluke, or it lives somewhere none of the above
 covers. Only more seeds can separate those — variance estimates at n=5 are very unstable.
 
+### A5.9 FINAL (2026-07-31): all three arms reproduce the published CE band; arm E is a NULL
+
+Deploy (best-mean-CE) checkpoints — the selection the published band and the 8 HF policies use
+— scored by our eval at batch 32 on full val. The reference row is the 8 PUBLISHED policies
+run through **our** eval, which removes every accounting/batch-size confound (their own doc
+says 0.6853 ± 0.0007 / 44.97 ± 0.10, so our eval reproduces them to +0.0003 CE / −0.01 mIoU):
+
+| arm | n | mean(t1–t4) CE | mIoU t4 | ΔCE (p) | Δt4 (p) |
+|---|---|---|---|---|---|
+| **published, our eval** | 8 | 0.6856 ± 0.0006 | 44.96 ± 0.11 | — | — |
+| `rl_train` (ported) | 5 | 0.6855 ± 0.0010 | 44.86 ± 0.09 | −0.0000 (0.55) | −0.106 (0.051) |
+| harness + scale fix | 5 | 0.6859 ± 0.0009 | 44.87 ± 0.12 | +0.0003 (0.22) | −0.096 (0.082) |
+| `rl_train` POOLED (arm E) | 5 | 0.6853 ± 0.0005 | 44.88 ± 0.10 | −0.0002 (0.76) | −0.084 (0.099) |
+
+**Two conclusions.**
+
+**1. The unification goal is met.** The harness is indistinguishable from the ported reference
+(0.6859 vs 0.6855, 44.87 vs 44.86) and from the published policies on CE (p = 0.22). CE is the
+metric the band is defined by and the one the reward optimizes.
+
+**2. Arm E is a NULL — the pooled rollout does NOT explain the residual.** Pooling the loss
+forward over B*H = 64 (the original's architecture, §A5's last substantive difference) moves
+t4 by **+0.022, exact one-sided p = 0.377** and CE by −0.0002 (p = 0.393). Neither is a real
+effect. So the ~0.1 mIoU t4 shortfall present in *all three* arms is not the rollout
+architecture, and — being common to every trainer we have — sits upstream of all of them.
+
+**What is left unaudited, and it is the only surface remaining:** the core-library revisions.
+The band was trained on the authors' machine against their own sibling clones at
+`bcb9742f`→`007f7173` on a 4090; ours run against these clones on A100s. Their venv's editable
+installs now point at *our* checkouts, so their original core cannot be inspected from here.
+Verified same, from their source: the frozen backbone repo string, the probe formula,
+`unfreeze="none"`, selection under eval-mode BN, per-depth `RunningNorm`, and every recipe
+hyperparameter (§A5.10).
+
+Note the shortfall is significant only marginally (p = 0.05…0.10) and CE matches exactly.
+Since the reward *is* CE, two policies can tie on CE and differ slightly in mIoU — this may be
+a position on the CE/mIoU tradeoff rather than a defect.
+
+### A5.10 What differs from CanViT-PyTorch-RL, read from their source (2026-07-30/31)
+
+Verified **identical**: frozen backbone (`canvitb16-add-vpe-pretrain-g128px-s512px-in21k-dv3b16-2026-02-02`),
+probe (`probe-ade20k-40k-s512-c{grid}-in21k`, `unfreeze="none"` so frozen both sides), glimpse
+selection under eval-mode BN (`act_fwd` = `with eval_mode(net)`), per-depth `RunningNorm`,
+`prime_on_policy=0.5`, `dueling=True`, `train_horizon=4`, `budget_forwards=640_000` → 8000
+steps, `batch_size=16`, `eval_every=1000`, separate grad-clip on the scorer, squish, no
+augmentation.
+
+Remaining differences, none of which now has evidence of mattering:
+
+1. **Rollout architecture** — theirs pools the loss forward over B*H; ours is per-depth in-graph.
+   **TESTED, null** (arm E, above). `--pooled-policy-loss` reproduces theirs exactly (1 BN
+   train-forward over 64 vs 4 over 16, counted).
+2. **Eval grid** — `rl_train` evaluates at 1000…8000, the harness at 0…7000, so the harness's
+   `best.pt` can never be the terminal checkpoint and one eval is spent on the untrained model.
+   A real asymmetry; effect likely small (terminal CE 0.6858–0.6890 vs in-run bests ~0.685–0.686,
+   so step 8000 would rarely win). Not fixed.
+3. **Not ported, no metric path**: MLflow/uv/justfile, sweeps (`search/`), the `unfreeze="probe"`
+   ladder and Q-Prop trainer extras, `keep_every` step checkpoints, the `policy.eval` episode
+   runner, flow.
+4. **Environment**: their 4090 + their core revs vs our A100s + these clones. Unquantifiable
+   from here, and GPU nondeterminism alone is non-trivial (§A5.8).
+
 ### A5.7 Pipeline coverage — what is MEASURED identical, stage by stage
 
 The owner asked the right question: the multi-step test fed both paths batches from ONE

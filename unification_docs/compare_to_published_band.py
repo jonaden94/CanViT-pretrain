@@ -34,7 +34,9 @@ from canvit_pretrain.harness.spec import TrainSpec
 from canvit_pretrain.tasks.ade20k.task import Ade20kRunTask
 
 ROOT = Path("/mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-pretrain")
-SEEDS = [5, 6, 7, 8, 9]          # the newest batch only
+# Per-arm seed sets: arms C/D used seeds 5-9 (jobs 15107841-50), arm E seeds 0-4
+# (15108500-04). Each arm carries its own list so a new arm cannot silently inherit
+# the wrong one.
 
 # qband_results.md, "Deploy band — per-seed best-mean(t1-4)-CE checkpoint, mean ± std over 8 seeds"
 PUB_CE = {1: (0.7143, 0.0012), 2: (0.6878, 0.0009), 3: (0.6741, 0.0007), 4: (0.6652, 0.0008)}
@@ -42,8 +44,8 @@ PUB_MI = {1: (42.65, 0.16), 2: (43.95, 0.16), 3: (44.62, 0.12), 4: (44.97, 0.10)
 PUB_CE_MEAN = (0.6853, 0.0007)
 
 
-def rl_best(seed: int) -> Path | None:
-    for d in sorted(glob(str(ROOT / f"checkpoints/canvit-ade20k-policies/exp27-policy-bneval-s{seed}_qreg_s{seed}_*"))):
+def rl_best(seed: int, tag: str = "exp27-policy-bneval") -> Path | None:
+    for d in sorted(glob(str(ROOT / f"checkpoints/canvit-ade20k-policies/{tag}-s{seed}_qreg_s{seed}_*"))):
         p, last = Path(d) / "best.pt", Path(d) / "last.pt"
         if p.exists() and last.exists():   # same completion guard as the harness side
             if torch.load(last, map_location="cpu", weights_only=False)["step"] >= 8000:
@@ -51,8 +53,8 @@ def rl_best(seed: int) -> Path | None:
     return None
 
 
-def harness_best(seed: int) -> Path | None:
-    d = ROOT / f"logs/exp27/exp27-policy-lossfix-s{seed}/checkpoints"
+def harness_best(seed: int, tag: str = "exp27-policy-lossfix") -> Path | None:
+    d = ROOT / f"logs/exp27/{tag}-s{seed}/checkpoints"
     # COMPLETION GUARD: `best.policy.pt` appears from the very first eval, so a still-running
     # (or walltime-killed) job exposes an early checkpoint that looks perfectly loadable and
     # silently drags the arm's mean down and its variance up. Require the terminal checkpoint
@@ -61,8 +63,16 @@ def harness_best(seed: int) -> Path | None:
     return (d / "best.policy.pt") if (d / "step-8000.policy.pt").exists() else None
 
 
-ARMS = [("rl_train (ported)", rl_best, "net_state"),
-        ("harness + fix", harness_best, "scorer")]
+def rl_pooled_best(seed: int) -> Path | None:
+    return rl_best(seed, tag="exp27-policy-pooled")
+
+
+# (label, finder, state_dict key, seeds)
+ARMS = [
+    ("rl_train (ported)", rl_best, "net_state", [5, 6, 7, 8, 9]),
+    ("harness + fix", harness_best, "scorer", [5, 6, 7, 8, 9]),
+    ("rl_train POOLED", rl_pooled_best, "net_state", [0, 1, 2, 3, 4]),
+]
 
 T, BS, dev = 5, 32, torch.device("cuda")
 torch.manual_seed(0)
@@ -79,9 +89,9 @@ apply_requires_grad(model=model, head=head_mod, joint=joint,
                     spec=TrainSpec.policy_only(freeze_model=True))
 model.eval()
 
-print(f"DEPLOY (best mean-CE) checkpoints, seeds {SEEDS}, one process, eval batch {BS}, full val\n")
+print(f"DEPLOY (best mean-CE) checkpoints, one process, eval batch {BS}, full val\n")
 res: dict[str, dict[str, list]] = {}
-for arm, finder, key in ARMS:
+for arm, finder, key, SEEDS in ARMS:
     res[arm] = {"ce": [], "mi": [], "ce_mean": [], "seeds": []}
     for s in SEEDS:
         p = finder(s)
