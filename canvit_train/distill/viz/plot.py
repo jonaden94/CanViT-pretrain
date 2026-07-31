@@ -9,7 +9,7 @@ from matplotlib.patches import Rectangle
 from numpy.typing import NDArray
 from sklearn.decomposition import PCA
 
-from ...harness.viewpoint import PixelBox
+from ...harness.rollout.viewpoint import PixelBox
 from ...harness.viz.metrics import cosine_dissimilarity
 from ...harness.viz.pca import fit_pca, pca_rgb
 from ..probe import TopKPrediction

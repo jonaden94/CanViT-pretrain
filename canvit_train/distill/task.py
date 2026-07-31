@@ -25,7 +25,7 @@ from torch import Tensor
 
 from canvit_train.distill.loss import DistillTask
 from canvit_train.harness.rollout import GlimpseOut
-from canvit_train.harness.viewpoint import ViewpointType
+from canvit_train.harness.rollout.viewpoint import ViewpointType
 
 log = logging.getLogger(__name__)
 
@@ -335,7 +335,7 @@ class DistillRunTask:
             return NormFeatures(patches=feats.patches.float(), cls=feats.cls.float())
 
     def build_selector(self, *, device, canvas_grid, is_foveated):
-        from canvit_train.harness.selector import RandomSelector
+        from canvit_train.harness.rollout.selector import RandomSelector
         return RandomSelector(is_foveated=is_foveated, foveated_scale=self.cfg.foveated_scale,
                               min_viewpoint_scale=self.cfg.min_viewpoint_scale)
 
@@ -546,7 +546,7 @@ class DistillRunTask:
         from canvit_train.distill.data import scene_size_px
         from canvit_train.distill.probe import load_probe
         from canvit_train.distill.viz import validate
-        from canvit_train.harness.tracker import make_tracker
+        from canvit_train.harness.infra.tracker import make_tracker
         try:
             teacher = self._teacher_for_forward(device)  # validation targets: compiled
             amp = torch.autocast("cuda", dtype=torch.bfloat16) if device.type == "cuda" else nullcontext()

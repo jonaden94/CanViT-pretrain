@@ -9,8 +9,8 @@ import torch
 
 from canvit_train import CanViTForPretrainingConfig
 from canvit_train.harness.config import FoveatedScaleConfig, JointPolicyConfig
-from canvit_train.harness.eval_viewpoints import EvalPolicy
-from canvit_train.harness.utils import get_sensible_device
+from canvit_train.harness.infra.utils import get_sensible_device
+from canvit_train.harness.rollout.eval_viewpoints import EvalPolicy
 
 # Default HF repo for the teacher model
 TEACHER_REPO_ID = "facebook/dinov3-vitb16-pretrain-lvd1689m"

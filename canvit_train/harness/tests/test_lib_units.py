@@ -10,8 +10,8 @@ from canvit_train.distill.data import (
     InfiniteLoader,
 )
 from canvit_train.distill.viz import imagenet_denormalize_to_numpy, timestep_colors
-from canvit_train.harness.scheduler import warmup_constant_scheduler
-from canvit_train.harness.viewpoint import (
+from canvit_train.harness.optim.scheduler import warmup_constant_scheduler
+from canvit_train.harness.rollout.viewpoint import (
     PixelBox,
     make_eval_viewpoints,
     viewpoint_to_pixel_box,

@@ -7,7 +7,7 @@ the SCHEDULE and the pick RULE on CPU so a regression is caught without a GPU ru
 """
 import torch
 
-from canvit_train.harness.eval_viewpoints import (
+from canvit_train.harness.rollout.eval_viewpoints import (
     CLOSED_LOOP,
     PAPER_TABLE4_C64,
     EntropyGuidedC2F,

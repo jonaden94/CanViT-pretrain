@@ -126,7 +126,7 @@ def test_onecycle_matches_ade20k_reference_scheduler(warmup_steps, warmup_lr_rat
 
 def test_warmup_cosine_matches_in1k_reference_scheduler():
     """``warmup_cosine`` must equal in1k's AdamW + warmup_cosine_scheduler step for step."""
-    from canvit_train.harness.scheduler import warmup_cosine_scheduler
+    from canvit_train.harness.optim.scheduler import warmup_cosine_scheduler
 
     lr, total, warm = 3e-4, 400, 20
     start_lr = lr * 1e-6

@@ -31,7 +31,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
-from canvit_train.harness import dist as _slurm_dist
+from canvit_train.harness.infra import dist as _slurm_dist
 
 log = logging.getLogger(__name__)
 

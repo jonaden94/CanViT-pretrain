@@ -124,7 +124,7 @@ def open_loop_viewpoints(
     from canvit_pytorch.policies import repeated_full_scene
 
     from canvit_train.ade20k.rollout import make_random_viewpoints
-    from canvit_train.harness.viewpoint import make_eval_viewpoints, make_eval_viewpoints_foveated
+    from canvit_train.harness.rollout.viewpoint import make_eval_viewpoints, make_eval_viewpoints_foveated
 
     if policy == "coarse_to_fine":
         return make_eval_viewpoints(batch_size, device, n_viewpoints=n)
@@ -189,8 +189,8 @@ def deploy_rollout_viewpoints(
     semantics, and the reason a policy eval cannot leak gradient or BatchNorm statistics
     into training. Train mode is restored on the way out.
     """
-    from canvit_train.harness.rollout import _to_vp
-    from canvit_train.harness.viewpoint import ViewpointType
+    from canvit_train.harness.rollout.engine import _to_vp
+    from canvit_train.harness.rollout.viewpoint import ViewpointType
 
     # t0 must be the FULL anchor: the scorer needs a canvas to read, and at t=0 there is
     # no state yet. FULL delegates to the RandomSelector fallback, which needs none. This

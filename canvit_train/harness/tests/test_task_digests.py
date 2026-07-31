@@ -37,9 +37,9 @@ from canvit_train.ade20k.data import IGNORE_LABEL, NUM_CLASSES
 from canvit_train.ade20k.task import BoundAde20kTask
 from canvit_train.harness.config import FoveatedScaleConfig
 from canvit_train.harness.rollout import run_rollout
-from canvit_train.harness.selector import RandomSelector
+from canvit_train.harness.rollout.selector import RandomSelector
+from canvit_train.harness.rollout.viewpoint import ViewpointType
 from canvit_train.harness.spec import BpttSpec
-from canvit_train.harness.viewpoint import ViewpointType
 from canvit_train.in1k.task import BoundIn1kTask
 
 _B, _G, _IMG, _N_CLS = 2, 8, 224, 10

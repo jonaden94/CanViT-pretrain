@@ -344,7 +344,7 @@ def test_in1k_default_spec_reproduces_standalone_lr_schedule():
     import torch
     from torch import nn
 
-    from canvit_train.harness.scheduler import warmup_cosine_scheduler
+    from canvit_train.harness.optim.scheduler import warmup_cosine_scheduler
 
     cfg = In1kConfig(tracker="none", max_steps=300, warmup_steps=15)
     total = cfg.max_steps

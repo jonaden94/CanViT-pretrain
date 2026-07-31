@@ -12,13 +12,13 @@ from canvit_pytorch import CanViTForSemanticSegmentation
 
 from canvit_train.ade20k.data import IGNORE_LABEL, NUM_CLASSES
 from canvit_train.ade20k.task import BoundAde20kTask
-from canvit_train.harness.checkpoint import find_latest, load_checkpoint, restore_into
 from canvit_train.harness.config import FoveatedScaleConfig
+from canvit_train.harness.infra.checkpoint import find_latest, load_checkpoint, restore_into
 from canvit_train.harness.loop import apply_requires_grad, run_training_loop
 from canvit_train.harness.optim import build_optimizer_and_scheduler
-from canvit_train.harness.selector import RandomSelector
+from canvit_train.harness.rollout.selector import RandomSelector
+from canvit_train.harness.rollout.viewpoint import ViewpointType
 from canvit_train.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TrainSpec
-from canvit_train.harness.viewpoint import ViewpointType
 
 _B, _G, _IMG = 2, 8, 224
 

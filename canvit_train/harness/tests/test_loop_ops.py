@@ -22,9 +22,9 @@ from canvit_train.harness.loop import (
     run_training_loop,
 )
 from canvit_train.harness.optim import build_optimizer_and_scheduler
-from canvit_train.harness.selector import RandomSelector
+from canvit_train.harness.rollout.selector import RandomSelector
+from canvit_train.harness.rollout.viewpoint import ViewpointType
 from canvit_train.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TrainSpec
-from canvit_train.harness.viewpoint import ViewpointType
 
 _B, _G, _IMG = 2, 8, 224
 
@@ -160,7 +160,7 @@ def test_seed_mode_loads_weights_only_and_starts_at_zero(tmp_path):
     """SEED: weights come from the checkpoint but opt/sched are fresh and step is 0
     (vs RESUME which continues the step count). Uses restore_into directly — the same
     call run() makes — so this pins the semantics without building a full run."""
-    from canvit_train.harness.checkpoint import load_checkpoint, restore_into, save_checkpoint
+    from canvit_train.harness.infra.checkpoint import load_checkpoint, restore_into, save_checkpoint
 
     seg, spec, opt, sched, sel = _setup()
     # train a couple of steps so the weights differ from a fresh init, then save

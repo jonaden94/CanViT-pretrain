@@ -39,13 +39,13 @@ import torch.distributed as dist
 from canvit_pytorch import RecurrentState, Viewpoint
 from torch import Tensor
 
-from canvit_train.harness.selector import RandomSelector, Selector
+from canvit_train.harness.rollout.selector import RandomSelector, Selector
+from canvit_train.harness.rollout.viewpoint import Viewpoint as NamedViewpoint
+from canvit_train.harness.rollout.viewpoint import ViewpointType
 from canvit_train.harness.spec import BpttSpec
-from canvit_train.harness.viewpoint import Viewpoint as NamedViewpoint
-from canvit_train.harness.viewpoint import ViewpointType
 
 if TYPE_CHECKING:  # heavy import kept off the runtime path
-    from canvit_train.harness.joint import JointPolicy
+    from canvit_train.harness.policy.joint import JointPolicy
 
 
 class GlimpseOut(NamedTuple):

@@ -35,9 +35,9 @@ from canvit_pytorch.policy import (
 )
 
 from canvit_train.harness.config import FoveatedScaleConfig, JointPolicyConfig
-from canvit_train.harness.joint import JointPolicy
-from canvit_train.harness.rl import PG, VPG, Objective, QReg
-from canvit_train.harness.selector import PolicySelector, RandomSelector
+from canvit_train.harness.policy.joint import JointPolicy
+from canvit_train.harness.policy.rl import PG, VPG, Objective, QReg
+from canvit_train.harness.rollout.selector import PolicySelector, RandomSelector
 
 log = logging.getLogger(__name__)
 

@@ -5,7 +5,7 @@ can silently change during the harness refactor."""
 
 import torch
 
-from ..viewpoint import Viewpoint, random_foveated_viewpoint, sample_view_scales
+from canvit_train.harness.rollout.viewpoint import Viewpoint, random_foveated_viewpoint, sample_view_scales
 
 _CPU = torch.device("cpu")
 

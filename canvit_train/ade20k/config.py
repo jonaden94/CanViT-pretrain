@@ -11,7 +11,7 @@ from canvit_pytorch import resolve_canvit_repo
 from canvit_pytorch.data.ade20k import ResizeMode  # noqa: F401  (re-exported for this repo's consumers)
 
 from ..harness.config import FoveatedScaleConfig
-from ..harness.eval_viewpoints import EvalPolicy
+from ..harness.rollout.eval_viewpoints import EvalPolicy
 
 
 def _default_wandb_project() -> str | None:

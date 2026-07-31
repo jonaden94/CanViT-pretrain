@@ -39,9 +39,9 @@ from canvit_train import CanViTForPretraining, CanViTForPretrainingConfig
 from canvit_train.distill.loss import DistillTask
 from canvit_train.harness.config import FoveatedScaleConfig
 from canvit_train.harness.rollout import GlimpseOut, run_rollout
-from canvit_train.harness.selector import RandomSelector
+from canvit_train.harness.rollout.selector import RandomSelector
+from canvit_train.harness.rollout.viewpoint import ViewpointType
 from canvit_train.harness.spec import BpttSpec
-from canvit_train.harness.viewpoint import ViewpointType
 
 
 class _DistillAdapter:

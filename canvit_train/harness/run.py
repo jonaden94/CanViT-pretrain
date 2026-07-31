@@ -56,8 +56,8 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 import torch
 
-from canvit_train.harness import ddp
-from canvit_train.harness.checkpoint import find_latest, load_checkpoint, restore_into
+from canvit_train.harness.infra import ddp
+from canvit_train.harness.infra.checkpoint import find_latest, load_checkpoint, restore_into
 from canvit_train.harness.loop import (
     apply_requires_grad,
     cancel_slurm_array,
@@ -65,8 +65,8 @@ from canvit_train.harness.loop import (
     run_training_loop,
 )
 from canvit_train.harness.optim import build_optimizer_and_scheduler
+from canvit_train.harness.rollout.viewpoint import ViewpointType
 from canvit_train.harness.spec import TaskCaps, TrainSpec, check_spec
-from canvit_train.harness.viewpoint import ViewpointType
 
 log = logging.getLogger(__name__)
 
@@ -335,7 +335,7 @@ def run(*, task: RunTask, spec: TrainSpec, settings: RunSettings) -> dict:
     prior_meta = (prior_ckpt or {}).get("metadata", {}) if prior_ckpt else {}
     tracker = None
     if settings.tracker == "wandb":
-        from canvit_train.harness.tracker import make_tracker
+        from canvit_train.harness.infra.tracker import make_tracker
         # Resume the SAME wandb run across SLURM array tasks (train/loop.py 249-253):
         # a 245-job array is ONE experiment, and without the id round-trip each task
         # would open its own run and the curves would come out in 245 pieces.

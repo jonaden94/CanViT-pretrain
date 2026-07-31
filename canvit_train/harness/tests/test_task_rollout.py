@@ -20,12 +20,12 @@ from canvit_train.ade20k.task import BoundAde20kTask
 from canvit_train.distill.loss import DistillTask
 from canvit_train.distill.task import BoundDistillTask
 from canvit_train.harness.config import FoveatedScaleConfig, JointPolicyConfig
-from canvit_train.harness.joint import build_joint_policy
 from canvit_train.harness.policy import build_policy
+from canvit_train.harness.policy.joint import build_joint_policy
 from canvit_train.harness.rollout import run_rollout
-from canvit_train.harness.selector import RandomSelector
+from canvit_train.harness.rollout.selector import RandomSelector
+from canvit_train.harness.rollout.viewpoint import ViewpointType
 from canvit_train.harness.spec import BpttSpec
-from canvit_train.harness.viewpoint import ViewpointType
 from canvit_train.in1k.task import POLICY_FEATURE_GROUPS as IN1K_GROUPS
 from canvit_train.in1k.task import BoundIn1kTask
 

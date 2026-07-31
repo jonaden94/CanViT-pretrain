@@ -16,7 +16,7 @@ import pytest
 import torch
 
 from canvit_train.harness.config import FoveatedScaleConfig
-from canvit_train.harness.eval_viewpoints import (
+from canvit_train.harness.rollout.eval_viewpoints import (
     HISTORICAL_DEFAULTS,
     OPEN_LOOP,
     deploy_rollout_viewpoints,
@@ -54,7 +54,7 @@ def test_every_task_config_still_defaults_to_auto():
 
 
 def test_distill_uniform_is_bit_identical_to_the_old_generator():
-    from canvit_train.harness.viewpoint import make_eval_viewpoints
+    from canvit_train.harness.rollout.viewpoint import make_eval_viewpoints
 
     torch.manual_seed(0)
     old = make_eval_viewpoints(_B, _DEV, n_viewpoints=_N)
@@ -65,7 +65,7 @@ def test_distill_uniform_is_bit_identical_to_the_old_generator():
 
 
 def test_distill_foveated_is_bit_identical_to_the_old_generator():
-    from canvit_train.harness.viewpoint import make_eval_viewpoints_foveated
+    from canvit_train.harness.rollout.viewpoint import make_eval_viewpoints_foveated
 
     old = make_eval_viewpoints_foveated(_B, _DEV, n_viewpoints=_N, scale=2.0)
     new = open_loop_viewpoints("fixation_grid", batch_size=_B, device=_DEV, n=_N,
@@ -144,7 +144,7 @@ def test_deploy_forces_pure_argmax():
 
 
 def test_deploy_requires_a_full_t0_anchor():
-    from canvit_train.harness.viewpoint import ViewpointType
+    from canvit_train.harness.rollout.viewpoint import ViewpointType
 
     with pytest.raises(AssertionError, match="FULL t0 anchor"):
         deploy_rollout_viewpoints(joint=_tiny_joint(), advance=lambda vp, st, t: st,
@@ -156,7 +156,7 @@ def test_deploy_rollout_is_closed_loop_and_restores_train_mode():
     """Each glimpse must be chosen from the state the previous one produced (that is
     what 'closed loop' means), and a validation must not leave the scorer in eval mode
     — the next training step would then update no BatchNorm statistics."""
-    from canvit_train.harness.viewpoint import ViewpointType
+    from canvit_train.harness.rollout.viewpoint import ViewpointType
 
     joint = _tiny_joint()
     joint.scorer.train()
@@ -189,7 +189,7 @@ def _tiny_joint(prime_on_policy: float = 1.0):
     import torch.nn as nn
 
     from canvit_train.harness.config import FoveatedScaleConfig
-    from canvit_train.harness.selector import PolicySelector, RandomSelector
+    from canvit_train.harness.rollout.selector import PolicySelector, RandomSelector
 
     class _Scorer(nn.Module):
         def __init__(self):

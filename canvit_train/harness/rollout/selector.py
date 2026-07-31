@@ -15,9 +15,9 @@ import torch
 from canvit_pytorch import RecurrentState
 from torch import Tensor
 
-from .config import FoveatedScaleConfig
-from .viewpoint import Viewpoint as NamedViewpoint
-from .viewpoint import ViewpointType, random_foveated_viewpoint, sample_view_scales
+from canvit_train.harness.config import FoveatedScaleConfig
+from canvit_train.harness.rollout.viewpoint import Viewpoint as NamedViewpoint
+from canvit_train.harness.rollout.viewpoint import ViewpointType, random_foveated_viewpoint, sample_view_scales
 
 
 @dataclass

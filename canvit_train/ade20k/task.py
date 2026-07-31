@@ -27,7 +27,7 @@ from canvit_train.ade20k.data import IGNORE_LABEL
 from canvit_train.ade20k.metrics import ce_loss
 from canvit_train.ade20k.rollout import consumes_full_image, derive_glimpse_px
 from canvit_train.harness.rollout import GlimpseOut, TaskLoss
-from canvit_train.harness.viewpoint import ViewpointType
+from canvit_train.harness.rollout.viewpoint import ViewpointType
 
 log = logging.getLogger(__name__)
 
@@ -218,7 +218,7 @@ class Ade20kRunTask:
         return make_ade20k_loaders(self.cfg)
 
     def build_selector(self, *, device, canvas_grid, is_foveated):
-        from canvit_train.harness.selector import RandomSelector
+        from canvit_train.harness.rollout.selector import RandomSelector
         return RandomSelector(is_foveated=is_foveated, foveated_scale=self.cfg.foveated_scale,
                               min_viewpoint_scale=self.cfg.min_vp_scale)
 
@@ -329,7 +329,7 @@ class Ade20kRunTask:
     def _policy_rollout(self, *, model, images, joint, T, canvas_grid, amp):
         """Closed-loop deploy rollout for the LEARNED policy: the scorer picks each glimpse
         by argmax from the live canvas."""
-        from canvit_train.harness.eval_viewpoints import deploy_rollout_viewpoints
+        from canvit_train.harness.rollout.eval_viewpoints import deploy_rollout_viewpoints
 
         return self._closed_loop_rollout(
             model=model, images=images, T=T, canvas_grid=canvas_grid, amp=amp,
@@ -340,7 +340,7 @@ class Ade20kRunTask:
     def _entropy_c2f_rollout(self, *, model, images, T, canvas_grid, amp):
         """Closed-loop rollout for EG-C2F — the paper's strongest heuristic baseline. A
         fresh chooser per batch: it carries per-rollout `visited` state."""
-        from canvit_train.harness.eval_viewpoints import closed_loop_rollout, entropy_c2f_chooser
+        from canvit_train.harness.rollout.eval_viewpoints import closed_loop_rollout, entropy_c2f_chooser
 
         chooser = entropy_c2f_chooser(seg=model, batch_size=images.shape[0],
                                       device=images.device, canvas_grid=canvas_grid)
@@ -384,7 +384,7 @@ class Ade20kRunTask:
         from canvit_train.ade20k.data import IGNORE_LABEL, NUM_CLASSES
         from canvit_train.ade20k.metrics import eval_probe_on_batch, mIoUAccumulator
         from canvit_train.ade20k.rollout import rollout_canvas_hidden
-        from canvit_train.harness.eval_viewpoints import open_loop_viewpoints, resolve
+        from canvit_train.harness.rollout.eval_viewpoints import open_loop_viewpoints, resolve
         T = self.cfg.n_timesteps
         cg = self.canvas_grid(model)
         is_fov = consumes_full_image(model)

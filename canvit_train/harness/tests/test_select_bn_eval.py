@@ -8,8 +8,8 @@ RL reference uses running statistics — 45.7% of chosen glimpses differ, and mo
 import torch
 import torch.nn as nn
 
-from canvit_train.harness.selector import PolicySelector, RandomSelector
-from canvit_train.harness.viewpoint import ViewpointType
+from canvit_train.harness.rollout.selector import PolicySelector, RandomSelector
+from canvit_train.harness.rollout.viewpoint import ViewpointType
 
 _B, _A = 4, 8
 

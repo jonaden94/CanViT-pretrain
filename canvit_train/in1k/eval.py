@@ -10,7 +10,7 @@ import logging
 import torch
 import torch.distributed as tdist
 
-from ..harness import dist as ddp
+from ..harness.infra import dist as ddp
 from .config import In1kConfig
 from .metrics import TopKAccuracy
 from .rollout import consumes_full_image, rollout_cls_tokens
@@ -24,8 +24,8 @@ def _policy_rollout_cls(*, clf, images, joint, n, canvas_grid, glimpse_px, amp_c
     ``rollout_cls_tokens`` it mirrors, so the accuracy code below is shared."""
     from canvit_pytorch import sample_at_viewpoint
 
-    from ..harness.eval_viewpoints import deploy_rollout_viewpoints
-    from ..harness.viewpoint import ViewpointType
+    from ..harness.rollout.eval_viewpoints import deploy_rollout_viewpoints
+    from ..harness.rollout.viewpoint import ViewpointType
     from .rollout import derive_glimpse_px
 
     B = images.shape[0]
@@ -58,7 +58,7 @@ def evaluate(clf, cfg: In1kConfig, val_loader, *, device, canvas_grid, amp_ctx, 
     historical trajectory; the harness passes the already-resolved value. ``"policy"``
     deploys ``joint``'s scorer by argmax, which needs the live canvas and so cannot
     precompute its viewpoints."""
-    from ..harness.eval_viewpoints import open_loop_viewpoints, resolve
+    from ..harness.rollout.eval_viewpoints import open_loop_viewpoints, resolve
     policy = resolve(eval_policy or cfg.eval_policy, task="in1k", is_foveated=is_foveated)
     clf.eval()
     acc = TopKAccuracy(ks=(1, 5))

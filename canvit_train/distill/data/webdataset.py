@@ -34,7 +34,7 @@ from PIL import Image
 from torch import Tensor
 from torch.utils.data import DataLoader
 
-from ...harness.schedule import compute_schedule_slice, compute_shards_per_gpu
+from ...harness.infra.schedule import compute_schedule_slice, compute_shards_per_gpu
 
 if TYPE_CHECKING:
     from ..config import Config

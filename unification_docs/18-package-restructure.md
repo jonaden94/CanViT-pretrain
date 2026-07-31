@@ -82,6 +82,37 @@ Two further hazards checked rather than assumed:
 - **Sibling repos.** None import this package (the single hit is a comment in the
   read-only `CanViT-specialize` fallback).
 
+## Second pass, same day: harness subpackages
+
+`harness/` ended the first pass with 22 flat modules. Two measurements said grouping was
+worth it — the intra-harness dependency graph has genuine knots (`selector→viewpoint`,
+`engine→selector+viewpoint+joint`, `eval_viewpoints→engine+viewpoint`; and
+`joint→rl+selector`, `policy→joint+rl`), and **external coupling is sharply asymmetric**:
+
+| | modules | external import sites |
+|---|---|---|
+| shared vocabulary | `spec` 41, `config` 32, `viewpoint` 27, `selector` 19 | belongs flat anyway |
+| periphery | `ema` 1, `dist` 2, `utils` 2, `scheduler` 3, `rl` 3, `schedule` 3, `joint` 4, `tracker` 4, `ddp` 4 | cheap to move, nobody needs to see them |
+
+So the cheapest grouping is also the most useful one: **group the periphery, keep the core
+flat.** Result — 5 flat files (`run cli loop spec config`) + `rollout/ policy/ optim/
+infra/ viz/ tests/`.
+
+`rollout.py` → `rollout/engine.py`, `policy.py` → `policy/build.py`, `optim.py` →
+`optim/build.py`; each subpackage's `__init__.py` re-exports that module's public API, so
+all 35 external `harness.{rollout,optim,policy}` import sites were untouched (every one of
+them imports symbols, never the module object — checked before relying on it).
+
+`cli` imports `run` and `run` reaches back for `cli` — a pre-existing cycle, so both stay
+at the same level. Splitting them would deepen it.
+
+**Method note that saved time:** every intra-harness relative import was normalized to
+absolute *before* moving anything, which makes depth shifts impossible by construction.
+The residual breakage was one import *form* the dotted-path mapping didn't match —
+`from canvit_train.harness import ddp` (module-object rather than dotted path). It failed
+loudly at import, not subtly. Same gates as the first pass, all unchanged: five digests,
+307 tests, byte-identical capability matrix, byte-identical CLI flag surface.
+
 ## What was deliberately left alone
 
 - **Dated docs in this folder keep the old paths.** `07`, `08`, `12`, `ddp_validation.md`,

@@ -17,7 +17,7 @@ from ..ade20k.config import (
     _default_wandb_project,
 )
 from ..harness.config import FoveatedScaleConfig
-from ..harness.eval_viewpoints import EvalPolicy
+from ..harness.rollout.eval_viewpoints import EvalPolicy
 
 NUM_CLASSES = 1000
 
@@ -104,7 +104,7 @@ class In1kConfig:
     eval_policy: EvalPolicy = "auto"
 
     # Training (step-based, like Ade20kConfig). Train uses the SAME resumable, shard-
-    # aligned schedule as distill pretraining (canvit_train.harness.schedule): a
+    # aligned schedule as distill pretraining (canvit_train.harness.infra.schedule): a
     # seeded global shard permutation, each SLURM-array job consuming a contiguous block.
     max_steps: int = 200_000
     """Total optimizer steps = the LR-schedule (cosine) horizon across ALL array jobs.

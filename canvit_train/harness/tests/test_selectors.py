@@ -3,9 +3,9 @@
 
 import torch
 
-from ..config import FoveatedScaleConfig
-from ..selector import MixtureSelector, PolicySelector, RandomSelector
-from ..viewpoint import ViewpointType
+from canvit_train.harness.config import FoveatedScaleConfig
+from canvit_train.harness.rollout.selector import MixtureSelector, PolicySelector, RandomSelector
+from canvit_train.harness.rollout.viewpoint import ViewpointType
 
 _B, _A = 4, 8
 _CPU = torch.device("cpu")

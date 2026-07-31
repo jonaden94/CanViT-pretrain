@@ -27,7 +27,7 @@ import torch
 
 from canvit_train.distill.config import Config
 from canvit_train.distill.task import DistillRunTask
-from canvit_train.harness.checkpoint import find_latest, load_checkpoint
+from canvit_train.harness.infra.checkpoint import find_latest, load_checkpoint
 from canvit_train.harness.run import RunSettings, run
 from canvit_train.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TrainSpec
 

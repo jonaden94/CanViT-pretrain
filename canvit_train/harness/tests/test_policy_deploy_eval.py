@@ -87,8 +87,8 @@ def test_ade20k_default_eval_is_untouched_and_selects_on_miou():
 def test_ade20k_policy_deploy_actually_changes_the_trajectory():
     """Guards the failure this whole change is about: if 'policy' silently fell back to
     the random trajectory, every metric would still look plausible."""
-    from canvit_train.harness.eval_viewpoints import deploy_rollout_viewpoints, open_loop_viewpoints
-    from canvit_train.harness.viewpoint import ViewpointType
+    from canvit_train.harness.rollout.eval_viewpoints import deploy_rollout_viewpoints, open_loop_viewpoints
+    from canvit_train.harness.rollout.viewpoint import ViewpointType
 
     task, seg, _ = _ade_task("policy")
     joint = _joint_for(canvit=seg.canvit, encode_model=seg, groups=ADE_GROUPS)

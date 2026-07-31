@@ -87,15 +87,27 @@ holds only what is specific to that task.**
 
 ```
 canvit_train/
-├── harness/      the single entry point + every shared primitive
-│                 run cli loop rollout spec optim checkpoint ddp policy eval_viewpoints
-│                 config viewpoint selector rl joint scheduler ema dist tracker schedule viz/
-├── distill/      DINOv3 latent distillation (pretraining)
-├── ade20k/       ADE20K segmentation probe / finetune
-├── in1k/         ImageNet-1k linear probe / full finetune
-├── checkpoint/   to_hf — publish a trained checkpoint to the HF layout
-└── datasets/     small dataset helpers
+├── harness/          the single entry point + every shared primitive
+│   ├── run.py        process entry point
+│   ├── cli.py        tyro CLI; --preset × task → TrainSpec
+│   ├── loop.py       training loop: cadence, validation, checkpointing
+│   ├── spec.py       TrainSpec / BpttSpec / GroupOptim + validation
+│   ├── config.py     the two config knobs every task shares
+│   ├── rollout/      batch → glimpse sequence: engine, viewpoint, selector, eval_viewpoints
+│   ├── policy/       learned viewpoint policy: builder, JointPolicy, RL objectives
+│   ├── optim/        optimizer construction, LR schedules, EMA
+│   ├── infra/        checkpoint I/O, tracker, DDP, SLURM, shard schedule, utils
+│   └── viz/          task-agnostic PCA / figure-I/O / metric leaves
+├── distill/          DINOv3 latent distillation (pretraining)
+├── ade20k/           ADE20K segmentation probe / finetune
+├── in1k/             ImageNet-1k linear probe / full finetune
+├── checkpoint/       to_hf — publish a trained checkpoint to the HF layout
+└── datasets/         small dataset helpers
 ```
+
+The five flat files in `harness/` are the ones to read first; the subpackages are the
+machinery. `rollout`, `policy` and `optim` re-export their main module, so
+`from canvit_train.harness.rollout import run_rollout` works as it always did.
 
 Each task folder has the same shape: `task.py` (the harness adapter — build model,
 loaders, eval, viz hooks), `config.py` (that task's knobs), plus its own data / metrics /

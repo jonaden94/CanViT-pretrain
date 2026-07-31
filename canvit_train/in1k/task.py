@@ -20,7 +20,7 @@ from torch import Tensor
 
 from canvit_train.ade20k.rollout import consumes_full_image, derive_glimpse_px
 from canvit_train.harness.rollout import GlimpseOut, TaskLoss
-from canvit_train.harness.viewpoint import ViewpointType
+from canvit_train.harness.rollout.viewpoint import ViewpointType
 
 # in1k's classifier reads the CLS token, not a spatial probe, so the probe-entropy
 # groups don't apply — the scorer uses the probe-free INTRINSIC groups (like distill).
@@ -163,7 +163,7 @@ class In1kRunTask:
         return loader, val
 
     def build_selector(self, *, device, canvas_grid, is_foveated):
-        from canvit_train.harness.selector import RandomSelector
+        from canvit_train.harness.rollout.selector import RandomSelector
         return RandomSelector(is_foveated=is_foveated, foveated_scale=self.cfg.foveated_scale,
                               min_viewpoint_scale=self.cfg.min_vp_scale)
 
@@ -269,7 +269,7 @@ class In1kRunTask:
         """Top-1/5 over the eval policy (reuses in1k/eval.py::evaluate)."""
         if val_loader is None:
             return {}
-        from canvit_train.harness.eval_viewpoints import resolve
+        from canvit_train.harness.rollout.eval_viewpoints import resolve
         from canvit_train.in1k.eval import evaluate as _eval
         amp = torch.autocast("cuda", dtype=torch.bfloat16) if device.type == "cuda" else nullcontext()
         is_fov = consumes_full_image(model)

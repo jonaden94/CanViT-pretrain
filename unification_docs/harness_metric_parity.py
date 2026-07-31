@@ -85,7 +85,7 @@ def main() -> None:
                            grad_norm_deep_prefixes=("patcher", "patcher.conditioner"))
     # run() builds its tracker via make_tracker when settings.tracker == "wandb"; swap in
     # the recorder so the full logging path runs with NO wandb process and no upload.
-    import canvit_train.harness.tracker as T
+    import canvit_train.harness.infra.tracker as T
     real_make = T.make_tracker
     T.make_tracker = lambda **kw: rec
     try:

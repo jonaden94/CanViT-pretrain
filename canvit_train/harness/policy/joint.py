@@ -30,10 +30,20 @@ from canvit_pytorch.policy import (
 from canvit_pytorch.policy.features import INTRINSIC_GROUPS
 from torch import Tensor
 
-from .config import FoveatedScaleConfig, JointPolicyConfig
-from .rl import PG, VPG, Objective, QReg, RunningNorm, entropy_floor_step, pg_loss, qreg_loss, vpg_loss
-from .selector import PolicySelector, RandomSelector
-from .viewpoint import ViewpointType
+from canvit_train.harness.config import FoveatedScaleConfig, JointPolicyConfig
+from canvit_train.harness.policy.rl import (
+    PG,
+    VPG,
+    Objective,
+    QReg,
+    RunningNorm,
+    entropy_floor_step,
+    pg_loss,
+    qreg_loss,
+    vpg_loss,
+)
+from canvit_train.harness.rollout.selector import PolicySelector, RandomSelector
+from canvit_train.harness.rollout.viewpoint import ViewpointType
 
 
 @dataclass

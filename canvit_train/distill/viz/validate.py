@@ -17,10 +17,10 @@ from dinov3_in1k_probes import DINOv3LinearClassificationHead
 from torch import Tensor
 
 from canvit_train import CanViTForPretraining
-from canvit_train.harness.utils import assert_shape
+from canvit_train.harness.infra.utils import assert_shape
 
-from ...harness.eval_viewpoints import open_loop_viewpoints, resolve
-from ...harness.tracker import Tracker
+from ...harness.infra.tracker import Tracker
+from ...harness.rollout.eval_viewpoints import open_loop_viewpoints, resolve
 from ...harness.viz.disk import plot_combined_curves, save_figure
 from ..probe import (
     compute_in1k_top1,
@@ -146,8 +146,8 @@ def _deploy_viewpoints(*, model, images, joint, n, canvas_grid_size):
     argmax selection under ``no_grad`` consumes no RNG, so it revisits the same states.
     (ade20k/in1k collect their readout DURING selection and pay nothing extra.)
     """
-    from canvit_train.harness.eval_viewpoints import deploy_rollout_viewpoints
-    from canvit_train.harness.viewpoint import ViewpointType
+    from canvit_train.harness.rollout.eval_viewpoints import deploy_rollout_viewpoints
+    from canvit_train.harness.rollout.viewpoint import ViewpointType
 
     B = images.shape[0]
 
