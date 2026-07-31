@@ -49,7 +49,7 @@ def run_once(steps: int, steps_per_job: int, batch: int, tail_frac: float) -> fl
     # already running the right interpreter, and PYTHONPATH/PYTHONSAFEPATH set by the
     # sbatch make the child import the pinned sources too.
     cmd = [
-        sys.executable, "-m", "canvit_pretrain.train",
+        sys.executable, "-m", "canvit_train.train",
         "--webdataset-dir", WDS, "--val-dir", VAL,
         "--batch-size-per-gpu", str(batch),
         "--steps-per-job", str(steps_per_job),

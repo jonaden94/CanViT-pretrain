@@ -28,17 +28,17 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 import torch
 from canvit_pytorch import CanViTForSemanticSegmentation
 
-from canvit_pretrain.ade20k.config import Ade20kConfig
-from canvit_pretrain.ade20k.data import NUM_CLASSES, make_ade20k_loaders
-from canvit_pretrain.harness.checkpoint import find_latest, load_checkpoint, restore_into
-from canvit_pretrain.harness.loop import apply_requires_grad, run_training_loop
-from canvit_pretrain.harness.optim import build_optimizer_and_scheduler
-from canvit_pretrain.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TaskCaps, TrainSpec
-from canvit_pretrain.ade20k.rollout import consumes_full_image
-from canvit_pretrain.tasks.ade20k.task import BoundAde20kTask
-from canvit_pretrain.train.config import FoveatedScaleConfig
-from canvit_pretrain.train.selector import RandomSelector
-from canvit_pretrain.train.viewpoint import ViewpointType
+from canvit_train.ade20k.config import Ade20kConfig
+from canvit_train.ade20k.data import NUM_CLASSES, make_ade20k_loaders
+from canvit_train.harness.checkpoint import find_latest, load_checkpoint, restore_into
+from canvit_train.harness.loop import apply_requires_grad, run_training_loop
+from canvit_train.harness.optim import build_optimizer_and_scheduler
+from canvit_train.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TaskCaps, TrainSpec
+from canvit_train.ade20k.rollout import consumes_full_image
+from canvit_train.tasks.ade20k.task import BoundAde20kTask
+from canvit_train.train.config import FoveatedScaleConfig
+from canvit_train.train.selector import RandomSelector
+from canvit_train.train.viewpoint import ViewpointType
 
 ADE_ROOT = Path("/user/henrich1/u25995/jonathan/datasets/"
                 "zhoubolei--scene_parse_150/ADEChallengeData2016")

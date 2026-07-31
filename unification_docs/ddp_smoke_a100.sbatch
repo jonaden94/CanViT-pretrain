@@ -23,7 +23,7 @@
 #SBATCH -o /user/henrich1/u25995/output/ddp-a100-%J.out
 
 set -uo pipefail   # NOT -e: probes are allowed to fail without aborting the smoke
-cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=$((20000 + (SLURM_JOB_ID % 10000)))

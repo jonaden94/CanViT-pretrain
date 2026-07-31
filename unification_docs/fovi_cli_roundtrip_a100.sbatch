@@ -3,7 +3,7 @@
 # unified CLI, and that the view-scale footgun is closed for harness checkpoints:
 #   1. train a few steps of distill with --cfg.model.patcher-name foveated  (was IMPOSSIBLE
 #      to express before: the old hand-rolled argparse had no --model.* flags at all)
-#   2. convert the resulting harness checkpoint with `python -m canvit_pretrain.checkpoint.to_hf`
+#   2. convert the resulting harness checkpoint with `python -m canvit_train.checkpoint.to_hf`
 #   3. assert config.json records patcher_name=foveated AND a non-None pretrain_view_scale
 #      (a None here is the silent OOD footgun that broke run 15025338)
 #   4. load the exported dir back as a real model
@@ -21,7 +21,7 @@
 #SBATCH -o /user/henrich1/u25995/output/fovi-roundtrip-%J.out
 
 set -uo pipefail
-cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 
 export HF_HOME=/user/henrich1/u25995/.cache/huggingface
 export HF_HUB_OFFLINE=1
@@ -35,7 +35,7 @@ rm -rf "$LOGS"; mkdir -p "$LOGS"
 echo "=== node $(hostname)  gpu: $(nvidia-smi --query-gpu=name --format=csv,noheader)"
 
 echo "=== [1/4] FOVEATED distill through the new CLI ==="
-"$VENV/bin/python" -m canvit_pretrain.harness.run distill --preset default \
+"$VENV/bin/python" -m canvit_train.harness.run distill --preset default \
     --cfg.model.patcher-name foveated \
     --cfg.foveated-scale.mode fixed --cfg.foveated-scale.fixed-scale 1.0 \
     --cfg.webdataset-dir "$WDS" --cfg.val-dir "$VAL" --cfg.val-index-dir "$VAL_INDEX" \
@@ -48,7 +48,7 @@ echo "=== train exit: $RC_TRAIN ==="
 
 CKPT="$LOGS/fovi/roundtrip/checkpoints/latest.pt"
 echo "=== [2/4] convert $CKPT ==="
-"$VENV/bin/python" -m canvit_pretrain.checkpoint.to_hf --pt-path "$CKPT" --out-dir "$LOGS/hf"
+"$VENV/bin/python" -m canvit_train.checkpoint.to_hf --pt-path "$CKPT" --out-dir "$LOGS/hf"
 RC_CONV=$?
 echo "=== convert exit: $RC_CONV ==="
 

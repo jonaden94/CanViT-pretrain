@@ -18,7 +18,7 @@ TASK=in1k
 # === config (TPU recipe, batch-adapted) ===
 CFG_WANDB_PROJECT=exp25
 CFG_RUN_NAME=in1k-uni16-1516k      # wandb run name = the finetune BASE model (owner request)
-CFG_MODEL_REPO=/user/henrich1/u25995/jonathan/repos/CanViT-pretrain/logs/jon_exp22_full_runs/exp22-uniform16-lrdrop-1516k/checkpoints/step-319488-hf
+CFG_MODEL_REPO=/user/henrich1/u25995/jonathan/repos/CanViT-train/logs/jon_exp22_full_runs/exp22-uniform16-lrdrop-1516k/checkpoints/step-319488-hf
 CFG_PROBE_REPO=canvit/dinov3-vitb16-lvd1689m-in1k-512x512-linear-clf-probe  # fused into the head (TPU parity; was a RANDOM head before the fix)
 CFG_MODE=finetune
 CFG_BATCH_SIZE=64
@@ -42,7 +42,7 @@ PRETRAIN_COMMIT=8f780ba
 PYTORCH_COMMIT=017ce9b
 FOVI_COMMIT=c399d3b
 
-cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-pretrain
+cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
 mkdir -p "logs/$RUN_GROUP/$RUN_NAME/log"
 export TASK RUN_GROUP RUN_NAME NGPU EXTRA_ARGS PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
 for v in $(compgen -v); do [[ "$v" == CFG_* || "$v" == OPT_* ]] && export "$v"; done

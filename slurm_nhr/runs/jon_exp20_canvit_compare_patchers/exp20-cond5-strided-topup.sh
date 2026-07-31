@@ -21,7 +21,7 @@ CFG_NUM_WORKERS=4
 EXTRA_ARGS="--model.patcher-name square --model.square-patcher.method strided --model.square-patcher.grid-size-fovea 4 --model.square-patcher.patch-size 8 --model.square-patcher.edge-length-multipliers 4 12 36 --model.n-backbone-registers 31"
 # =================
 
-cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-pretrain
+cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
 mkdir -p "logs/$RUN_GROUP/$RUN_NAME/log"
 export RUN_GROUP RUN_NAME NGPU EXTRA_ARGS
 for v in $(compgen -v); do [[ "$v" == CFG_* ]] && export "$v"; done

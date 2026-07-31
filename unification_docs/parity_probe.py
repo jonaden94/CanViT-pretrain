@@ -17,7 +17,7 @@ that implementation is gone. The recorded constant in the test is now the sole r
 which is exactly the trade the design doc sanctioned, conditional on the harness having
 reproduced it byte-for-byte first (it did).
 
-Usage (from the CanViT-pretrain repo root):
+Usage (from the CanViT-train repo root):
 
     .venv-cu126/bin/python unification_docs/parity_probe.py
 
@@ -35,13 +35,13 @@ from pathlib import Path
 import torch
 from canvit_pytorch import create_backbone
 
-from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
-from canvit_pretrain.harness.rollout import GlimpseOut, run_rollout
-from canvit_pretrain.harness.spec import BpttSpec
-from canvit_pretrain.train.config import FoveatedScaleConfig
-from canvit_pretrain.train.selector import RandomSelector
-from canvit_pretrain.train.task import DistillTask
-from canvit_pretrain.train.viewpoint import ViewpointType
+from canvit_train import CanViTForPretraining, CanViTForPretrainingConfig
+from canvit_train.harness.rollout import GlimpseOut, run_rollout
+from canvit_train.harness.spec import BpttSpec
+from canvit_train.train.config import FoveatedScaleConfig
+from canvit_train.train.selector import RandomSelector
+from canvit_train.train.task import DistillTask
+from canvit_train.train.viewpoint import ViewpointType
 
 
 class _DistillAdapter:

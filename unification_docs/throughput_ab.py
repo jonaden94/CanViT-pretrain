@@ -33,7 +33,7 @@ VAL = Path("/user/henrich1/u25995/jonathan/datasets/imagenet1k-val")
 
 
 def make_cfg(batch: int, steps_per_job: int, non_blocking: bool):
-    from canvit_pretrain.train.config import Config
+    from canvit_train.train.config import Config
     return Config(
         webdataset_dir=WDS, val_dir=VAL, batch_size_per_gpu=batch,
         steps_per_job=steps_per_job, num_workers=4, canvas_patch_grid_size=32,
@@ -69,8 +69,8 @@ class _StepClock(logging.Handler):
 
 
 def time_harness(cfg, n_steps: int, warmup: int) -> list[float]:
-    from canvit_pretrain.harness.run import RunSettings, run
-    from canvit_pretrain.tasks.distill.task import DistillRunTask
+    from canvit_train.harness.run import RunSettings, run
+    from canvit_train.tasks.distill.task import DistillRunTask
 
     clock = _StepClock()
     root = logging.getLogger()

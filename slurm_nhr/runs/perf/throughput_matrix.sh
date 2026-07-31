@@ -32,7 +32,7 @@
 
 set -euo pipefail
 
-REPO=/user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+REPO=/user/henrich1/u25995/jonathan/repos/CanViT-train
 cd "$REPO"
 
 # NB: source the preamble BEFORE `set -u` bites on unset vars in .bashrc
@@ -55,7 +55,7 @@ SRC="${TMPDIR:?TMPDIR must be set}/canvit_src"
 : "${PRETRAIN_COMMIT:?set PRETRAIN_COMMIT}"
 : "${PYTORCH_COMMIT:?set PYTORCH_COMMIT}"
 : "${FOVI_COMMIT:?set FOVI_COMMIT}"
-for pair in "CanViT-pretrain:$PRETRAIN_COMMIT" "CanViT-PyTorch:$PYTORCH_COMMIT" "fovi:$FOVI_COMMIT"; do
+for pair in "CanViT-train:$PRETRAIN_COMMIT" "CanViT-PyTorch:$PYTORCH_COMMIT" "fovi:$FOVI_COMMIT"; do
     name="${pair%%:*}"; commit="${pair##*:}"
     mkdir -p "$SRC/$name"
     git -C "$_REPO_BASE/$name" archive "$commit" | tar -x -C "$SRC/$name"
@@ -63,7 +63,7 @@ for pair in "CanViT-pretrain:$PRETRAIN_COMMIT" "CanViT-PyTorch:$PYTORCH_COMMIT" 
     echo "Pinned $name -> $commit"
 done
 export PYTHONSAFEPATH=1   # the snapshot must win over cwd and the editable install
-cd "$SRC/CanViT-pretrain"
+cd "$SRC/CanViT-train"
 
 PY="$REPO/.venv-cu126/bin/python"
 STEPS=${STEPS:-100}
@@ -74,7 +74,7 @@ echo "=== node: $(hostname) ==="
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 $PY -c "import torch;p=torch.cuda.get_device_properties(0);print(f'SMs={p.multi_processor_count} (full A100=108)')"
 echo "steps=$STEPS warmup=$WARMUP reps=$REPS"
-echo "code: $SRC/CanViT-pretrain (pinned $PRETRAIN_COMMIT)"
+echo "code: $SRC/CanViT-train (pinned $PRETRAIN_COMMIT)"
 
 declare -A RESULTS
 for arm in sync async old; do RESULTS[$arm]=""; done
@@ -85,10 +85,10 @@ for rep in $(seq 1 "$REPS"); do
     for arm in sync async old; do
         case "$arm" in
             sync|async)
-                out=$($PY $SRC/CanViT-pretrain/unification_docs/throughput_ab.py --arm "$arm" \
+                out=$($PY $SRC/CanViT-train/unification_docs/throughput_ab.py --arm "$arm" \
                         --steps "$STEPS" --warmup "$WARMUP" 2>&1 | tail -40 || true) ;;
             old)
-                out=$($PY $SRC/CanViT-pretrain/unification_docs/throughput_oldloop.py --once \
+                out=$($PY $SRC/CanViT-train/unification_docs/throughput_oldloop.py --once \
                         --steps $((STEPS + WARMUP)) 2>&1 | tail -40 || true) ;;
         esac
         # `grep` exits 1 when the arm produced no MEDIAN_MS, and under `set -e` +

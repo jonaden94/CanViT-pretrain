@@ -207,7 +207,7 @@ message). So train metrics remain comparable across the pin change, which is exa
 the verdict above is built on them.
 
 Operational lesson: a long `%1` array pins per **task**, at task start — so one run can
-straddle a code change. Grep `Pinned canvit_pretrain →` across *all* of a run's logs, not
+straddle a code change. Grep `Pinned canvit_train →` across *all* of a run's logs, not
 just task 0.
 
 ## What is NOT claimed

@@ -28,7 +28,7 @@
 #
 # Tune steps_per_job: start with --steps-per-job 10, check how long it takes,
 # then scale up to fill ~20h of a 24h slot (leave buffer for startup/checkpoint).
-cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 source /user/henrich1/u25995/.bashrc
 
 set -eu
@@ -57,7 +57,7 @@ exec uv run python -m canvit_pretrain.train \
     --val-dir "$IN1K_VAL_IMAGE_DIR" \
     --train-index-dir "$INDEX_DIR" \
     --ckpt-dir "$CHECKPOINTS_DIR" \
-    --wandb-project "${WANDB_PROJECT:-canvit-pretrain}" \
+    --wandb-project "${WANDB_PROJECT:-canvit-train}" \
     ${WANDB_ENTITY:+--wandb-entity "$WANDB_ENTITY"} \
     ${WANDB_DIR:+--wandb-dir "$WANDB_DIR"} \
     --steps-per-job 50000 \

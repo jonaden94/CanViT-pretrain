@@ -23,15 +23,15 @@ implementable and CPU-validatable now.
   opt-in.
 - **D-G** persist **all locally** (backbone+head+policy sidecar + `train_spec` +
   `pretrain_view_scale` metadata). **NEVER auto-push to HF** — training writes local
-  files only, exactly as CanViT-pretrain/specialize do today. HF publishing stays a
-  separate **manual** `python -m canvit_pretrain.checkpoint.to_hf` step.
+  files only, exactly as CanViT-train/specialize do today. HF publishing stays a
+  separate **manual** `python -m canvit_train.checkpoint.to_hf` step.
 - **Loop model** — **step-based only** (owner approved). The harness has ONE step-driven
   loop (owns SLURM-array `steps_per_job` resume + commit-pinning). IN1k's "epochs" are
   derived: its WebDataset `with_epoch(N)` fixes `steps_per_epoch`, so epoch boundaries
   become periodic LR/eval hooks and cosine-over-epochs maps to cosine-over-steps. No
   second (epoch) loop shape.
 - **Migration** — **big-bang**: ONE new unified entry point
-  `python -m canvit_pretrain.train --task {distill,ade20k,in1k}`; the three old entry
+  `python -m canvit_train.train --task {distill,ade20k,in1k}`; the three old entry
   modules (`ade20k.train`, `ade20k.rl_train`, `in1k.train`, the distill loop) and their
   SLURM launchers are rewritten to it and the old loops deleted.
 - **PARITY SAFEGUARD (owner approved)** — big-bang deletes the old distill loop, so the
@@ -45,7 +45,7 @@ implementable and CPU-validatable now.
 
 ## IMPLEMENTATION STATUS (2026-07-23) — spine DONE + VERIFIED, additive
 
-All work so far is **additive** (new `canvit_pretrain/harness/` package); no existing
+All work so far is **additive** (new `canvit_train/harness/` package); no existing
 file touched, so the live distill/ade20k/in1k trainers are untouched and the tree is
 unbroken. Nothing committed (owner review pending).
 
@@ -108,8 +108,8 @@ CPU. Fully offline (random backbone, precomputed features, no teacher/HF).
 - `harness/run.py` — the single orchestration `run(*, task, spec, settings)` (build_model →
   build_policy(joint) → apply_requires_grad → build_optimizer → build_loaders → build_selector →
   run_training_loop + eval/log/ckpt hooks) + `RunSettings` (composed config, D-B) + `RunTask` Protocol
-  + an ADDITIVE CLI `python -m canvit_pretrain.harness.run --task {distill,ade20k,in1k} [--preset ...]`.
-  The CLI does NOT replace `python -m canvit_pretrain.train` (that repoint is the gated cutover).
+  + an ADDITIVE CLI `python -m canvit_train.harness.run --task {distill,ade20k,in1k} [--preset ...]`.
+  The CLI does NOT replace `python -m canvit_train.train` (that repoint is the gated cutover).
 - `tasks/{distill,ade20k,in1k}/task.py` gained the run-level `*RunTask` (full seam: caps/default_spec/
   build_model[from_pretrained_with_new_probe|head / create_model]/build_loaders/build_selector/
   build_policy/trainable_param_groups[in1k head = norm+head]/bind/evaluate[mIoU / top-1,5 / distill
@@ -193,7 +193,7 @@ uploads): 92 metric keys incl. `val/in1k_tts_top1_t0..t9`, 171 hyperparameters, 
   (loop already calls `joint.allreduce_grads()` when dist); assert unsupported cells. **Owner: SKIP until a multi-GPU node.**
 - (optional) port ADE20K's `WarmupOneCycleLR` into `optim.py` (onecycle currently raises); distill
   `evaluate()` full viz/PCA (currently best-effort `validate()` reuse) — both land naturally at the cutover.
-- **Big-bang cutover (owner GREEN LIGHT required — destructive):** repoint `python -m canvit_pretrain.train`
+- **Big-bang cutover (owner GREEN LIGHT required — destructive):** repoint `python -m canvit_train.train`
   at `harness.run`, flip `train/step.py`→`run_rollout` (re-confirm the REAL parity probe +
   93-test pretrain suite), delete old loops + rewrite SLURM launchers. Then the GPU gate. The scaffolding
   above makes this mechanical.
@@ -235,7 +235,7 @@ This doc finishes the job.
   the substrate; it is one `tasks/distill.py` sitting beside the other two, all three
   calling the same `harness.run(task, spec, cfg)`.
 
-The repo keeps the name `CanViT-pretrain` (renaming a repo is out of scope), but its
+The repo keeps the name `CanViT-train` (renaming a repo is out of scope), but its
 *internals* stop privileging pretraining.
 
 ## 2. Target package layout
@@ -245,7 +245,7 @@ canvit_pytorch (core)                    ← already done in P1
   policy/                                ViewpointScorer, StateEncoder, candidates
   data/ade20k.py, metrics.py             shared eval primitives (P6)
 
-canvit_pretrain/
+canvit_train/
   harness/                               ← NEW: task-neutral training machinery
     run.py           run(task, spec, cfg): the single entry the 3 tasks call
     rollout.py       the one rollout engine (§6): no-grad / full / chunked TBPTT

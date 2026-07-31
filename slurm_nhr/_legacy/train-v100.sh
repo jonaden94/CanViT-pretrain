@@ -10,7 +10,7 @@
 #   bash slurm_nhr/train-v100.sh --run-name my-run
 #   bash slurm_nhr/train-v100.sh --run-name my-run --steps-per-job 50000
 
-cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 
 set -eu
 
@@ -40,7 +40,7 @@ exec "$VENV/bin/python" -m canvit_pretrain.train \
     --run-name "$RUN_NAME" \
     --webdataset-dir "$WEBDATASET_DIR" \
     --ckpt-dir "$CHECKPOINTS_DIR" \
-    --wandb-project "${WANDB_PROJECT:-canvit-pretrain}" \
+    --wandb-project "${WANDB_PROJECT:-canvit-train}" \
     ${WANDB_ENTITY:+--wandb-entity "$WANDB_ENTITY"} \
     ${WANDB_DIR:+--wandb-dir "$WANDB_DIR"} \
     --batch-size-per-gpu 64 \

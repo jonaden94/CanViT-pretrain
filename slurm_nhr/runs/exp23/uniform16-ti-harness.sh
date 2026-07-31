@@ -2,7 +2,7 @@
 # exp23 — CUTOVER FIDELITY A/B, HARNESS side, uniform16 + teacher-init.
 #
 # This is the CURRENT-STACK half of the exp23 pair: exp22-uniform16-teacherinit run
-# through the UNIFIED harness (python -m canvit_pretrain.harness.run distill) on the
+# through the UNIFIED harness (python -m canvit_train.harness.run distill) on the
 # CURRENT code. Overlay against uniform16-ti-oldloop.sh (exp22's exact old stack).
 #
 # Pins: pretrain 24a8500 = current HEAD (NOT bc63eee — 24a8500 adds the matplotlib-DDP
@@ -43,7 +43,7 @@ PRETRAIN_COMMIT=24a8500
 PYTORCH_COMMIT=017ce9b
 FOVI_COMMIT=c399d3b
 
-cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-pretrain
+cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
 mkdir -p "logs/$RUN_GROUP/$RUN_NAME/log"
 export TASK RUN_GROUP RUN_NAME NGPU EXTRA_ARGS PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
 for v in $(compgen -v); do [[ "$v" == CFG_* ]] && export "$v"; done

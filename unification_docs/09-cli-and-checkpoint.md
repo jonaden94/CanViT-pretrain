@@ -14,13 +14,13 @@ three standalone entry points already use (`train/__main__.py`, `ade20k/__main__
 
 ```bash
 # foveated pretraining â€” the config that was UNREACHABLE before (no --model.* flags)
-python -m canvit_pretrain.harness.run distill \
+python -m canvit_train.harness.run distill \
     --cfg.model.patcher-name foveated --cfg.foveated-scale.mode per_rollout \
     --cfg.webdataset-dir "$WDS" --cfg.val-dir "$VAL" \
     --cfg.run-group fovi --cfg.init-backbone-from-teacher
 
-python -m canvit_pretrain.harness.run ade20k --preset probe --cfg.model-repo "$REPO"
-python -m canvit_pretrain.harness.run in1k  --preset joint --rl.use-rl True --opts.n-steps 50000
+python -m canvit_train.harness.run ade20k --preset probe --cfg.model-repo "$REPO"
+python -m canvit_train.harness.run in1k  --preset joint --rl.use-rl True --opts.n-steps 50000
 ```
 
 Now reachable (all were missing): the whole `--cfg.model.*` tree incl. **`patcher-name`
@@ -109,7 +109,7 @@ Also added `torch.set_float32_matmul_precision("high")` in the CLI entry (TF32 â
 
 ## Verification
 
-- Full `canvit_pretrain` suite green, **parity digest unchanged** (the loop edit is
+- Full `canvit_train` suite green, **parity digest unchanged** (the loop edit is
   behaviour-preserving for the distill stream).
 - New CPU tests: nested-config parsing (fovi flags land), config-derived RunSettings,
   in1k step-budget refusal, comet refusal, converter schema round-trip, patch_stride

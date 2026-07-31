@@ -1,6 +1,6 @@
 #!/bin/bash
 # HARNESS REPRODUCTION run — exp22-uniform16 through the UNIFIED harness
-# (python -m canvit_pretrain.harness.run distill) instead of the old train/loop.py.
+# (python -m canvit_train.harness.run distill) instead of the old train/loop.py.
 #
 # Purpose: production-scale fidelity A/B before the big-bang cutover. Overlay this run's
 # loss + val-recon curves against the EXISTING old-loop exp22-uniform16 run (you already
@@ -43,7 +43,7 @@ PRETRAIN_COMMIT=bc63eee
 PYTORCH_COMMIT=017ce9b
 FOVI_COMMIT=c399d3b
 
-cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-pretrain
+cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
 mkdir -p "logs/$RUN_GROUP/$RUN_NAME/log"
 export TASK RUN_GROUP RUN_NAME NGPU EXTRA_ARGS PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
 for v in $(compgen -v); do [[ "$v" == CFG_* ]] && export "$v"; done

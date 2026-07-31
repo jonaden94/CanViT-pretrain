@@ -27,7 +27,7 @@
 #   export ADE20K_ROOT=/user/henrich1/u25995/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016
 #   sbatch --export=ALL slurm_nhr/ade20k/train_policy.sbatch --run-name qband-port --seed 0
 
-cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 source /user/henrich1/u25995/.bashrc
 
 set -eu
@@ -50,10 +50,10 @@ _CODE_DIR="$TMPDIR/canvit_src"
 if [ -n "${PRETRAIN_COMMIT:-}" ] || [ -n "${PYTORCH_COMMIT:-}" ] || [ -n "${FOVI_COMMIT:-}" ]; then
     mkdir -p "$_CODE_DIR"
     if [ -n "${PRETRAIN_COMMIT:-}" ]; then
-        mkdir -p "$_CODE_DIR/CanViT-pretrain"
-        git -C "$_REPO_BASE/CanViT-pretrain" archive "$PRETRAIN_COMMIT" | tar -x -C "$_CODE_DIR/CanViT-pretrain"
-        export PYTHONPATH="$_CODE_DIR/CanViT-pretrain${PYTHONPATH:+:$PYTHONPATH}"
-        log "Pinned canvit_pretrain → $PRETRAIN_COMMIT"
+        mkdir -p "$_CODE_DIR/CanViT-train"
+        git -C "$_REPO_BASE/CanViT-train" archive "$PRETRAIN_COMMIT" | tar -x -C "$_CODE_DIR/CanViT-train"
+        export PYTHONPATH="$_CODE_DIR/CanViT-train${PYTHONPATH:+:$PYTHONPATH}"
+        log "Pinned canvit_train → $PRETRAIN_COMMIT"
     fi
     if [ -n "${PYTORCH_COMMIT:-}" ]; then
         mkdir -p "$_CODE_DIR/CanViT-PyTorch"

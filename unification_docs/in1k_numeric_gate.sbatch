@@ -8,16 +8,16 @@
 #SBATCH -A nib00021
 #SBATCH --mem=64G
 #SBATCH --array=0-5
-#SBATCH -o /user/henrich1/u25995/jonathan/repos/CanViT-pretrain/logs/in1k_gate/gate-%A_%a.log
-#SBATCH -e /user/henrich1/u25995/jonathan/repos/CanViT-pretrain/logs/in1k_gate/gate-%A_%a.log
+#SBATCH -o /user/henrich1/u25995/jonathan/repos/CanViT-train/logs/in1k_gate/gate-%A_%a.log
+#SBATCH -e /user/henrich1/u25995/jonathan/repos/CanViT-train/logs/in1k_gate/gate-%A_%a.log
 #SBATCH --job-name=in1k-gate
 
 # IN1k top-1 numeric gate: does the harness in1k task reproduce the standalone probe?
 # Both are SEEDED identically (torch.manual_seed(seed+rank)) and share the loaders
 # (make_train_loader / make_val_loader) AND the eval fn (in1k/train.evaluate). Run-to-run
 # noise is large at intermediate steps, so (like the ade20k gate) compare BANDS: n=3 each.
-#   arms 0,1,2: standalone (python -m canvit_pretrain.in1k)        seeds 0,1,2
-#   arms 3,4,5: harness    (python -m canvit_pretrain.harness.run) seeds 0,1,2
+#   arms 0,1,2: standalone (python -m canvit_train.in1k)        seeds 0,1,2
+#   arms 3,4,5: harness    (python -m canvit_train.harness.run) seeds 0,1,2
 # PASS = harness band overlaps standalone band at each overlapping eval step. tracker=none:
 # top-1 is read from stdout ("Step N: top1=..." / "step N  eval: {'top1': ...}").
 #
@@ -27,7 +27,7 @@
 # Commit-pin for a frozen snapshot (edit-safe while it runs): export PRETRAIN_COMMIT /
 # PYTORCH_COMMIT / FOVI_COMMIT before sbatch.
 
-cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 source /user/henrich1/u25995/.bashrc
 set -euo pipefail
 
@@ -40,10 +40,10 @@ _CODE_DIR="$TMPDIR/canvit_src"
 if [ -n "${PRETRAIN_COMMIT:-}" ] || [ -n "${PYTORCH_COMMIT:-}" ] || [ -n "${FOVI_COMMIT:-}" ]; then
     mkdir -p "$_CODE_DIR"
     if [ -n "${PRETRAIN_COMMIT:-}" ]; then
-        mkdir -p "$_CODE_DIR/CanViT-pretrain"
-        git -C "$_REPO_BASE/CanViT-pretrain" archive "$PRETRAIN_COMMIT" | tar -x -C "$_CODE_DIR/CanViT-pretrain"
-        export PYTHONPATH="$_CODE_DIR/CanViT-pretrain${PYTHONPATH:+:$PYTHONPATH}"
-        echo "Pinned canvit_pretrain -> $PRETRAIN_COMMIT"
+        mkdir -p "$_CODE_DIR/CanViT-train"
+        git -C "$_REPO_BASE/CanViT-train" archive "$PRETRAIN_COMMIT" | tar -x -C "$_CODE_DIR/CanViT-train"
+        export PYTHONPATH="$_CODE_DIR/CanViT-train${PYTHONPATH:+:$PYTHONPATH}"
+        echo "Pinned canvit_train -> $PRETRAIN_COMMIT"
     fi
     if [ -n "${PYTORCH_COMMIT:-}" ]; then
         mkdir -p "$_CODE_DIR/CanViT-PyTorch"
@@ -60,7 +60,7 @@ if [ -n "${PRETRAIN_COMMIT:-}" ] || [ -n "${PYTORCH_COMMIT:-}" ] || [ -n "${FOVI
 fi
 
 VENV=.venv-cu126
-CKPT=/user/henrich1/u25995/jonathan/repos/CanViT-pretrain/logs/jon_exp22_full_runs/exp22-uniform16/checkpoints/step-1515520-hf
+CKPT=/user/henrich1/u25995/jonathan/repos/CanViT-train/logs/jon_exp22_full_runs/exp22-uniform16/checkpoints/step-1515520-hf
 OUT="$TMPDIR/in1k_gate_arm${SLURM_ARRAY_TASK_ID}"   # ckpts: node-local, never read back
 mkdir -p "$OUT"
 
@@ -70,8 +70,8 @@ echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader)"
 case "$SLURM_ARRAY_TASK_ID" in
   0|1|2)
     SEED=$SLURM_ARRAY_TASK_ID
-    echo "=== ARM $SLURM_ARRAY_TASK_ID: STANDALONE (python -m canvit_pretrain.in1k) seed=$SEED ==="
-    "${RUN[@]}" -m canvit_pretrain.in1k \
+    echo "=== ARM $SLURM_ARRAY_TASK_ID: STANDALONE (python -m canvit_train.in1k) seed=$SEED ==="
+    "${RUN[@]}" -m canvit_train.in1k \
         --model-repo "$CKPT" --mode frozen \
         --max-steps 1024 --warmup-steps 50 --val-every 256 --n-timesteps 10 --batch-size 64 \
         --limit-val-batches 25 --num-workers 8 --tracker none \
@@ -79,8 +79,8 @@ case "$SLURM_ARRAY_TASK_ID" in
     ;;
   3|4|5)
     SEED=$((SLURM_ARRAY_TASK_ID - 3))
-    echo "=== ARM $SLURM_ARRAY_TASK_ID: HARNESS (python -m canvit_pretrain.harness.run in1k) seed=$SEED ==="
-    "${RUN[@]}" -m canvit_pretrain.harness.run in1k \
+    echo "=== ARM $SLURM_ARRAY_TASK_ID: HARNESS (python -m canvit_train.harness.run in1k) seed=$SEED ==="
+    "${RUN[@]}" -m canvit_train.harness.run in1k \
         --cfg.model-repo "$CKPT" --cfg.mode frozen \
         --cfg.max-steps 1024 --cfg.warmup-steps 50 --cfg.val-every 256 --cfg.n-timesteps 10 --cfg.batch-size 64 \
         --cfg.limit-val-batches 25 --cfg.num-workers 8 --cfg.tracker none \

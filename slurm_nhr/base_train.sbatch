@@ -16,7 +16,7 @@
 #
 # Launch via: slurm_nhr/submit.sh --group GROUP --name NAME --ngpu N [...]
 
-cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 source /user/henrich1/u25995/.bashrc
 
 set -eu
@@ -66,11 +66,11 @@ _CODE_DIR="$TMPDIR/canvit_src"
 if [ -n "${PRETRAIN_COMMIT:-}" ] || [ -n "${PYTORCH_COMMIT:-}" ] || [ -n "${FOVI_COMMIT:-}" ]; then
     mkdir -p "$_CODE_DIR"
     if [ -n "${PRETRAIN_COMMIT:-}" ]; then
-        mkdir -p "$_CODE_DIR/CanViT-pretrain"
-        git -C "$_REPO_BASE/CanViT-pretrain" archive "$PRETRAIN_COMMIT" \
-            | tar -x -C "$_CODE_DIR/CanViT-pretrain"
-        export PYTHONPATH="$_CODE_DIR/CanViT-pretrain${PYTHONPATH:+:$PYTHONPATH}"
-        log "Pinned canvit_pretrain → $PRETRAIN_COMMIT"
+        mkdir -p "$_CODE_DIR/CanViT-train"
+        git -C "$_REPO_BASE/CanViT-train" archive "$PRETRAIN_COMMIT" \
+            | tar -x -C "$_CODE_DIR/CanViT-train"
+        export PYTHONPATH="$_CODE_DIR/CanViT-train${PYTHONPATH:+:$PYTHONPATH}"
+        log "Pinned canvit_train → $PRETRAIN_COMMIT"
     fi
     if [ -n "${PYTORCH_COMMIT:-}" ]; then
         mkdir -p "$_CODE_DIR/CanViT-PyTorch"
@@ -131,7 +131,7 @@ log "MASTER_ADDR=$MASTER_ADDR  MASTER_PORT=$MASTER_PORT  WORLD_SIZE=$WORLD_SIZE"
 # segments), which is exactly the interference we're eliminating here.
 
 # CFG_* fallbacks for vars whose Python default would fail at runtime.
-# Anything not listed here falls through to canvit_pretrain/train/config.py.
+# Anything not listed here falls through to canvit_train/train/config.py.
 CFG_WANDB_PROJECT="${CFG_WANDB_PROJECT:-jon_exp_canvit_default}"
 
 # Auto-build `--flag value` pairs from every CFG_* env var (CFG_FOO_BAR → --foo-bar).
@@ -151,10 +151,16 @@ log "Starting training (group=$RUN_GROUP, name=$RUN_NAME)..."
 # inside every srun task; setting it in the outer shell does not propagate.
 #
 # PYTHONSAFEPATH=1: `python -m` otherwise prepends the cwd (this repo root) to
-# sys.path[0], which shadows the pinned canvit_pretrain snapshot on PYTHONPATH
+# sys.path[0], which shadows the pinned canvit_train snapshot on PYTHONPATH
 # (canvit_pytorch/fovi aren't under cwd so they were unaffected). With safe-path
 # on, PYTHONPATH is authoritative — all three pinned packages win; when unpinned,
 # imports fall back to the venv's editable install as before.
+#
+# The module below is `canvit_pretrain`, NOT `canvit_train`, and that is deliberate: the
+# package was renamed on 2026-07-31, but this launcher only ever runs PRE-rename pinned
+# commits (its entry point was deleted in the consolidation), so `canvit_pretrain` is the
+# name their git-archive snapshot contains. Do not "fix" it. Cf. harness_train.sbatch,
+# which is shared with new runs and therefore detects the package name (`_PKG`).
 exec srun env TMPDIR="$TMPDIR" \
     PYTHONSAFEPATH=1 \
     ${PYTHONPATH:+PYTHONPATH="$PYTHONPATH"} \

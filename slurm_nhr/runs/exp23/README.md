@@ -10,9 +10,9 @@ production baseline — not just against a same-pin sibling.
 | script | patcher | side | entry point | pins (pretrain/pytorch/fovi) |
 |---|---|---|---|---|
 | `uniform16-ti-oldloop.sh` | uniform | OLD | `python -m canvit_pretrain.train` | **fe24aa1 / 3277048 / c399d3b** (exp22's exact stack) |
-| `uniform16-ti-harness.sh` | uniform | NEW | `python -m canvit_pretrain.harness.run distill` | **24a8500 / 017ce9b / c399d3b** (current HEAD) |
+| `uniform16-ti-harness.sh` | uniform | NEW | `python -m canvit_train.harness.run distill` | **24a8500 / 017ce9b / c399d3b** (current HEAD) |
 | `fovi-ti-oldloop.sh` | foveated | OLD | `python -m canvit_pretrain.train` | fe24aa1 / 3277048 / c399d3b |
-| `fovi-ti-harness.sh` | foveated | NEW | `python -m canvit_pretrain.harness.run distill` | 24a8500 / 017ce9b / c399d3b |
+| `fovi-ti-harness.sh` | foveated | NEW | `python -m canvit_train.harness.run distill` | 24a8500 / 017ce9b / c399d3b |
 
 Everything else is held identical across a pair: `seed=0`, `peak_lr=4e-4`,
 `batch=64`, `warmup_steps=100_000` (config default), constant LR after warmup
@@ -65,7 +65,7 @@ Overlay each pair (`*-oldloop` vs `*-harness`) in wandb project `exp23`:
 ## Submit (owner runs these; nothing here submits on its own)
 
 ```bash
-cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 bash slurm_nhr/runs/exp23/uniform16-ti-oldloop.sh
 bash slurm_nhr/runs/exp23/uniform16-ti-harness.sh
 # then, once the uniform pair looks right:

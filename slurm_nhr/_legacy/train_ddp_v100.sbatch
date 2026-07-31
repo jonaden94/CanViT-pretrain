@@ -31,7 +31,7 @@
 # Resume existing run:
 #   sbatch --array=0-50%1 slurm_nhr/train_ddp_v100.sbatch --run-name train-XXXXXXX
 
-cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 source /user/henrich1/u25995/.bashrc
 
 set -eu
@@ -74,7 +74,7 @@ exec srun "$VENV/bin/python" -m canvit_pretrain.train \
     --run-name "$RUN_NAME" \
     --webdataset-dir "$WEBDATASET_DIR" \
     --ckpt-dir "$CHECKPOINTS_DIR" \
-    --wandb-project "${WANDB_PROJECT:-canvit-pretrain}" \
+    --wandb-project "${WANDB_PROJECT:-canvit-train}" \
     ${WANDB_ENTITY:+--wandb-entity "$WANDB_ENTITY"} \
     ${WANDB_DIR:+--wandb-dir "$WANDB_DIR"} \
     --batch-size-per-gpu 64 \

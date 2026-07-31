@@ -2,7 +2,7 @@
 # NUMERIC QUALITY GATE: does the harness ADE20K probe reach the same mIoU as the
 # standalone probe it replaces?
 #
-# The standalone probe (canvit_pretrain/ade20k/train.py) has NO seeding — no cfg.seed,
+# The standalone probe (canvit_train/ade20k/train.py) has NO seeding — no cfg.seed,
 # no torch.manual_seed — so probe init, augmentation and viewpoint sampling all differ
 # run to run. Bit-parity with it is therefore impossible by construction, and a single
 # harness-vs-standalone number would be unfalsifiable: any gap could be either a port
@@ -10,7 +10,7 @@
 #
 # So this runs FOUR arms under one identical environment:
 #   tasks 0,1,2  standalone replicates  -> their spread IS the measured noise floor
-#   task  3      harness (python -m canvit_pretrain.harness.run ade20k)
+#   task  3      harness (python -m canvit_train.harness.run ade20k)
 # PASS = the harness curve sits inside the standalone band at every eval point.
 #
 # Both arms share the same eval primitives (ade20k.metrics.eval_probe_on_batch +
@@ -32,14 +32,14 @@
 #SBATCH --array=0-3
 #SBATCH -o /user/henrich1/u25995/output/ade20k-gate-%A_%a.out
 
-cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 # `set -u` must come AFTER .bashrc: /etc/bashrc reads an unset BASHRCSOURCED and
 # would abort the job (same ordering as base_train.sbatch).
 source /user/henrich1/u25995/.bashrc
 set -uo pipefail
 source slurm_nhr/env.sh
 
-export WANDB_PROJECT=canvit-pretrain
+export WANDB_PROJECT=canvit-train
 ADE20K_ROOT=/user/henrich1/u25995/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016
 export ADE20K_ROOT
 # Overridable so a re-run of one arm can use a fresh root instead of racing with arms
@@ -67,8 +67,8 @@ echo "node $(hostname)  gpu: $(nvidia-smi --query-gpu=name --format=csv,noheader
 
 case "$ARM" in
   0|1|2)
-    echo "=== ARM $ARM: STANDALONE (python -m canvit_pretrain.ade20k), replicate $ARM ==="
-    "$VENV/bin/python" -m canvit_pretrain.ade20k \
+    echo "=== ARM $ARM: STANDALONE (python -m canvit_train.ade20k), replicate $ARM ==="
+    "$VENV/bin/python" -m canvit_train.ade20k \
         --ade20k-root "$ADE20K_ROOT" \
         --max-steps "$STEPS" --val-every "$VAL_EVERY" \
         --probe-ckpt-dir "$ARM_DIR" \
@@ -78,8 +78,8 @@ case "$ARM" in
     # HARNESS_SEED lets a rerun sample the harness's OWN seed distribution (the harness
     # is deterministically seeded — torch.manual_seed(seed) — so without this every rerun
     # is byte-identical and tells you nothing about run-to-run spread). Unset => seed 0.
-    echo "=== ARM 3: HARNESS (python -m canvit_pretrain.harness.run ade20k) seed=${HARNESS_SEED:-0} ==="
-    "$VENV/bin/python" -m canvit_pretrain.harness.run ade20k \
+    echo "=== ARM 3: HARNESS (python -m canvit_train.harness.run ade20k) seed=${HARNESS_SEED:-0} ==="
+    "$VENV/bin/python" -m canvit_train.harness.run ade20k \
         --cfg.ade20k-root "$ADE20K_ROOT" \
         --cfg.max-steps "$STEPS" --cfg.val-every "$VAL_EVERY" \
         --cfg.probe-ckpt-dir "$ARM_DIR" \

@@ -14,7 +14,7 @@
 #SBATCH -o /user/henrich1/u25995/output/harness-integ-%J.out
 
 set -uo pipefail
-cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 
 export HF_HOME=/user/henrich1/u25995/.cache/huggingface
 export HF_HUB_OFFLINE=1

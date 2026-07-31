@@ -2,7 +2,7 @@
 
 ## What was added
 
-1. **Uniform-sampler distribution test** — `canvit_pretrain/train/test_viewpoint_scale.py::
+1. **Uniform-sampler distribution test** — `canvit_train/train/test_viewpoint_scale.py::
    test_named_random_uniform_branch_safebox_law`. The foveated branch was already pinned by
    the existing tests in that file; this adds the missing uniform branch (`Viewpoint.random`:
    scale bounds, `p(s) ∝ (1-s)` skew, per-sample safe-box center coupling). Both canonical
@@ -26,7 +26,7 @@
 
 | repo | suite | result |
 |---|---|---|
-| CanViT-pretrain | full (`pytest canvit_pretrain`) | **61 passed** (incl. new test) |
+| CanViT-train | full (`pytest canvit_train`) | **61 passed** (incl. new test) |
 | CanViT-PyTorch-RL | full (`pytest`) | **24 passed** |
 | CanViT-specialize | `pytest tests` | **9 passed** (incl. 2 new) |
 

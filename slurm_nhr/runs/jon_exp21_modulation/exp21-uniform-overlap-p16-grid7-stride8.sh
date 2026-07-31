@@ -7,7 +7,7 @@
 #
 # !!! REQUIRES the overlapping-patch (--patch-stride) feature, which is NOT in the
 # pinned commits below. Before submitting, commit the stride feature in
-# canvit_pytorch + canvit_pretrain and bump PRETRAIN_COMMIT / PYTORCH_COMMIT to the
+# canvit_pytorch + canvit_train and bump PRETRAIN_COMMIT / PYTORCH_COMMIT to the
 # new hashes. As-is (4544bb8/96c35fb) the job will fail fast: tyro rejects the
 # unknown --patch-stride flag on the old snapshot. !!!
 set -euo pipefail
@@ -40,7 +40,7 @@ PRETRAIN_COMMIT=bc2db02
 PYTORCH_COMMIT=d864b83
 FOVI_COMMIT=763bf7a
 
-cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-pretrain
+cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
 mkdir -p "logs/$RUN_GROUP/$RUN_NAME/log"
 export RUN_GROUP RUN_NAME NGPU EXTRA_ARGS PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
 for v in $(compgen -v); do [[ "$v" == CFG_* ]] && export "$v"; done

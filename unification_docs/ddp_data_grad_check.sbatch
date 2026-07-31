@@ -15,7 +15,7 @@
 #SBATCH -o /user/henrich1/u25995/output/ddp-datagrad-%J.out
 
 set -uo pipefail
-cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=$((22000 + (SLURM_JOB_ID % 10000)))

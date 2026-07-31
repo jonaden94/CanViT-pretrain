@@ -129,7 +129,7 @@ the gain. Gate it as: 20 steps with and without, compare wall-clock AND step-0 m
 (e) **`seed_ckpt` for the probes: deliberately absent.** `restore_into` does a strict
 `load_state_dict`, and a distill checkpoint's keys do not match a `CanViTForSemanticSegmentation`
 / `…ForImageClassification` wrapper, so exposing it would only produce key errors. Seeding
-a probe from pretraining goes through `python -m canvit_pretrain.checkpoint.to_hf` →
+a probe from pretraining goes through `python -m canvit_train.checkpoint.to_hf` →
 `cfg.model_repo`, which is what exp24/exp25 do. (`--opts.resume` covers continuation from a
 probe's own checkpoint.)
 
@@ -158,7 +158,7 @@ Minor/cosmetic, left alone: `Config.device` is a `torch.device` while the probe 
 
 ## Verification
 
-- `pytest canvit_pretrain/{harness,tasks,ade20k,in1k} train/test_seams.py` — 117 passed,
+- `pytest canvit_train/{harness,tasks,ade20k,in1k} train/test_seams.py` — 117 passed,
   including a new `test_run_identity_is_uniform_across_tasks` (name/run_dir/ckpt_dir for all
   three tasks, the no-`run_group` fallback, the `--opts` overrides) and two guard tests:
   `check_spec` errors under `is_dist` for a `supports_ddp=False` task, `build_loaders`
@@ -175,7 +175,7 @@ Minor/cosmetic, left alone: `Config.device` is a `torch.device` while the probe 
   step-3.pt,latest.pt}, visualization/seg_train/step-{0,1,2}.png, visualization/seg_val/
   step-0.png}`, exit 0. `eval (4.6s)` / `eval (0.6s)` in the log = the new val-timing line,
   and 0.6s for a 2000-image val set = `limit_val_batches` honored.
-- **Real standalone run** (`python -m canvit_pretrain.ade20k --run-name … --seed 7
+- **Real standalone run** (`python -m canvit_train.ade20k --run-name … --seed 7
   --limit-val-batches 2`): tracker name `smoke-standalone-named`, checkpoints under
   `probe_ckpt_dir/smoke-standalone-named/`, val capped — i.e. none of the three new
   standalone knobs is a dead flag.

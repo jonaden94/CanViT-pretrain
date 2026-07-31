@@ -36,7 +36,7 @@ Cosmetic/observability, not correctness. Port from `train/loop.py`: per-branch d
 flattened-config `log_parameters`, and the validation-phase PCA/curves + IN1k linear-probe readout
 (the TRAINING-batch PCA viz is already ported). Owner constraint still in force: **distill viz only —
 no ade20k/in1k viz.**
-SUCCESS CRITERIA: a debug sbatch run logging to wandb project `canvit-pretrain` shows the same metric
+SUCCESS CRITERIA: a debug sbatch run logging to wandb project `canvit-train` shows the same metric
 set as an existing `jon_exp22` run for the same step range.
 
 **Then, in order:** (a) **DDP — BLOCKED, needs a multi-GPU node** (verify: 2-rank, weights identical
@@ -53,13 +53,13 @@ Self-contained pickup point. Full design + running status: `07-unified-harness-d
 
 ## What this project is
 Refactoring the three CanViT trainers (distill / ade20k / in1k) into ONE task-neutral harness
-(`canvit_pretrain/harness/`) + three peer tasks (`canvit_pretrain/tasks/`), driven by an orthogonal
+(`canvit_train/harness/`) + three peer tasks (`canvit_train/tasks/`), driven by an orthogonal
 `TrainSpec`. All work so far is ADDITIVE — no existing trainer file has been modified, the live
 distill/ade20k/in1k trainers are intact, nothing committed. All 7 sub-decisions locked (doc 07).
 
 ## Environment
-- venv: `/user/henrich1/u25995/jonathan/repos/CanViT-pretrain/.venv-cu126/bin/python` (torch cu126).
-- GPU: A100-80GB. Run from repo root `/user/henrich1/u25995/jonathan/repos/CanViT-pretrain`.
+- venv: `/user/henrich1/u25995/jonathan/repos/CanViT-train/.venv-cu126/bin/python` (torch cu126).
+- GPU: A100-80GB. Run from repo root `/user/henrich1/u25995/jonathan/repos/CanViT-train`.
 - Offline: prefix with `HF_HOME=/user/henrich1/u25995/.cache/huggingface HF_HUB_OFFLINE=1`.
   NO HF upload ever (D-G). Datasets: see `dataset-paths.md`.
 - Big smoke checkpoints go to `/mnt/vast-nhr/projects/nib00021/jonathan/_harness_smoke_ckpts/`
@@ -76,7 +76,7 @@ engine cores (Bound*Task). Distill parity byte-exact; config cross-product prove
   build_policy(joint) → apply_requires_grad → build_optimizer → build_loaders → build_selector →
   run_training_loop, with eval/log/ckpt hooks) + `RunSettings` (composed config, D-B) + a
   `RunTask` Protocol + an additive CLI. The CLI deliberately does NOT replace
-  `python -m canvit_pretrain.train` (that repoint is the owner-gated big-bang cutover).
+  `python -m canvit_train.train` (that repoint is the owner-gated big-bang cutover).
   **SUPERSEDED 2026-07-24 — see `09-cli-and-checkpoint.md`:** the curated `--task/--preset`
   argparse is gone, replaced by `harness/cli.py` (tyro over each task's own config, subcommand
   form `... harness.run distill --cfg.model.patcher-name foveated`). `RunSettings` is now
@@ -92,7 +92,7 @@ engine cores (Bound*Task). Distill parity byte-exact; config cross-product prove
   `9a0100a1a3de3acd`** after the edit. (Closed task #18.)
 
 ### Validation (real cached pretrained CanViT, offline, A100)
-- **51→53 harness/task CPU tests green** (`pytest canvit_pretrain/harness/tests canvit_pretrain/tasks/tests`):
+- **51→53 harness/task CPU tests green** (`pytest canvit_train/harness/tests canvit_train/tasks/tests`):
   the earlier 42 + **9 new run-wrapper tests** (`tasks/tests/test_run_wrappers.py`) + **2 task_weight
   scaling tests** (`harness/tests/test_rollout_engine.py`). Parity test included → green.
 - **Real-data GPU smokes (individual task cores)** — all PASS + checkpoint round-trip:
@@ -107,8 +107,8 @@ engine cores (Bound*Task). Distill parity byte-exact; config cross-product prove
   ade20k mIoU-per-t + in1k top-1/5 return valid-range metrics (~0 for the fresh heads, as expected);
   **distill `evaluate()` returned a real `val_metric=0.640`** (the `validate()` reuse ran end-to-end —
   cached teacher loaded offline, NOT the `{}` fallback). Eval mechanics for all three tasks confirmed.
-- **Full `canvit_pretrain` suite green: 146 passed** (live trainers + harness + tasks) — additive edits
-  broke nothing. Also `python -m canvit_pretrain.harness.run --task ade20k --preset probe` ran end-to-end.
+- **Full `canvit_train` suite green: 146 passed** (live trainers + harness + tasks) — additive edits
+  broke nothing. Also `python -m canvit_train.harness.run --task ade20k --preset probe` ran end-to-end.
 
 ### Single-GPU operational features (2026-07-24 pass 2) — CORE set DONE + validated
 Ported the CORE task-neutral operational features (single-GPU resume / preemption / crash-safety).
@@ -259,7 +259,7 @@ launcher sets both at the cutover.
    (+ probe/IN1k-acc during distill val) lands naturally at the cutover when loop.py is consolidated.
 3. **DDP** (`harness/ddp.py`) — owner said SKIP for now. Single-GPU only. The loop already calls
    `joint.allreduce_grads()` when `is_dist`; the §9 support matrix + manual backbone AllReduce are TODO.
-4. **(Needs owner GREEN LIGHT — destructive) big-bang cutover:** repoint `python -m canvit_pretrain.train`
+4. **(Needs owner GREEN LIGHT — destructive) big-bang cutover:** repoint `python -m canvit_train.train`
    at `harness.run`, flip `train/step.py`→`run_rollout` (re-confirm the REAL parity probe
    `9a0100a1a3de3acd` + the 93-test pretrain suite), delete the old loops (`ade20k.train`,
    `ade20k.rl_train`, `in1k.train`, distill `train/loop.py`+`step.py`), rewrite `slurm_nhr/` launchers.

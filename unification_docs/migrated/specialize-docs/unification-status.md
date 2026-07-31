@@ -1,4 +1,4 @@
-# CanViT-specialize vs CanViT-pretrain — divergence report & unification notes
+# CanViT-specialize vs CanViT-train — divergence report & unification notes
 
 **Written:** 2026-07-22 · **Audience:** whoever plans the pretrain/specialize unification
 **Status of facts:** every claim below was checked against the working tree on 2026-07-22.
@@ -9,7 +9,7 @@ acting on anything here**, especially the "broken" claims.
 
 ## 1. Purpose and scope
 
-The stated goal is to eventually collapse `CanViT-pretrain` and `CanViT-specialize` into a
+The stated goal is to eventually collapse `CanViT-train` and `CanViT-specialize` into a
 single training repo with as little duplicated code as possible. This document answers the
 prerequisite question: **where does specialize actually stand relative to pretrain today, and
 what will bite during a merge?**
@@ -45,7 +45,7 @@ Three consequences that matter for planning:
 
 ## 3. Snapshot
 
-| | CanViT-pretrain | CanViT-specialize |
+| | CanViT-train | CanViT-specialize |
 |---|---|---|
 | Python LOC (excl. venv) | ~8,700 | ~3,800 |
 | HEAD (2026-07-22) | `fe24aa1` (2026-07-12) | `e53e27b` (2026-06-26) |
@@ -162,7 +162,7 @@ highest-risk refactor in the whole project.
 ### 5.4 🟠 Viewpoint generation — three implementations
 
 1. `canvit_pytorch/policies/` — `random_viewpoints`, `coarse_to_fine_viewpoints`, etc.
-2. `canvit_pretrain/train/viewpoint.py` — own `Viewpoint` wrapper over `CoreViewpoint`, plus
+2. `canvit_train/train/viewpoint.py` — own `Viewpoint` wrapper over `CoreViewpoint`, plus
    `PixelBox`, `ViewpointType`, `random_fixation`, `viewpoint_to_pixel_box`, and a documented
    L²-uniform safe-box scale sampler (`p(s) ∝ (1-s)`).
 3. `canvit_specialize/training/utils.py` — thin `make_viewpoints` delegating to (1).
@@ -324,11 +324,11 @@ front-loading them: they are not merge-contingent, and they de-risk step 4.
 
 ```bash
 # drift: when was each side last touched?
-git -C CanViT-pretrain   log -1 --date=short --format='%ad %h' -- canvit_pretrain/train/step.py
+git -C CanViT-train   log -1 --date=short --format='%ad %h' -- canvit_train/train/step.py
 git -C CanViT-specialize log -1 --date=short --format='%ad %h' -- canvit_specialize/training/ade20k/
 
 # foveated awareness, per repo
-grep -rl "foveated\|square\|patcher_name" CanViT-pretrain/canvit_pretrain   --include=*.py | wc -l
+grep -rl "foveated\|square\|patcher_name" CanViT-train/canvit_train   --include=*.py | wc -l
 grep -rl "foveated\|square\|patcher_name" CanViT-specialize/canvit_specialize --include=*.py | wc -l
 
 # does the task wrapper still expose the stable façade?

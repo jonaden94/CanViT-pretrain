@@ -14,7 +14,7 @@
 
 # See slurm_nhr/tmux_resubmit/README.md for usage.
 
-cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 source /user/henrich1/u25995/.bashrc
 
 set -eu
@@ -67,7 +67,7 @@ log "Starting training..."
 exec srun "$VENV/bin/python" -m canvit_pretrain.train \
     --webdataset-dir "$WEBDATASET_DIR" \
     --ckpt-dir "$CHECKPOINTS_DIR" \
-    --wandb-project "${WANDB_PROJECT:-canvit-pretrain}" \
+    --wandb-project "${WANDB_PROJECT:-canvit-train}" \
     ${WANDB_ENTITY:+--wandb-entity "$WANDB_ENTITY"} \
     ${WANDB_DIR:+--wandb-dir "$WANDB_DIR"} \
     --batch-size-per-gpu 64 \

@@ -23,7 +23,7 @@
 # Submit with:
 #   sbatch slurm_nhr/exp17/train_1gpu.sbatch
 
-cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 source /user/henrich1/u25995/.bashrc
 
 set -eu

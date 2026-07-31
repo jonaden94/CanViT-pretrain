@@ -73,7 +73,7 @@ PRETRAIN_COMMIT=4bf8bf8
 PYTORCH_COMMIT=017ce9b
 FOVI_COMMIT=c399d3b
 
-cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-pretrain
+cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
 mkdir -p "logs/$RUN_GROUP"
 export PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
 

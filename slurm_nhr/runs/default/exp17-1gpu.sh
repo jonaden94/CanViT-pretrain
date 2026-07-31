@@ -4,7 +4,7 @@
 # linear scaling), and starts from scratch (full 100-task / 409,600-step
 # plan rather than a mid-run continuation).
 #
-# RUN_NAME is pinned to the CanViT-pretrain commit it was created against
+# RUN_NAME is pinned to the CanViT-train commit it was created against
 # (9649b9e) for reproducibility — bump it if you re-create this run on a
 # newer commit.
 #
@@ -33,7 +33,7 @@ CFG_NUM_WORKERS=4
 EXTRA_ARGS=
 # =================
 
-cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-pretrain
+cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
 mkdir -p "logs/$RUN_GROUP/$RUN_NAME/log"
 export RUN_GROUP RUN_NAME NGPU EXTRA_ARGS
 for v in $(compgen -v); do [[ "$v" == CFG_* ]] && export "$v"; done

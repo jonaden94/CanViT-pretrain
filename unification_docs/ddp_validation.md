@@ -66,13 +66,13 @@ digest. A single-GPU-large-batch reference was never the target.
 ## Harness CLI (superseded 2026-07-24 — now full tyro parity)
 
 The stopgaps used during DDP validation (env-driven `VAL_DIR`/`VAL_INDEX_DIR` and a
-hand-rolled `--steps-per-job`) are **gone**. `canvit_pretrain/harness/cli.py` now runs
+hand-rolled `--steps-per-job`) are **gone**. `canvit_train/harness/cli.py` now runs
 `tyro` over each task's own config dataclass — the same idiom as the three standalone
 entry points — so every field is reachable, including `--cfg.model.patcher-name` (fovi)
 and the `--cfg.foveated-scale.*` tree. Invocation changed to subcommands:
 
 ```
-python -m canvit_pretrain.harness.run distill --cfg.webdataset-dir ... --cfg.val-dir ...
+python -m canvit_train.harness.run distill --cfg.webdataset-dir ... --cfg.val-dir ...
 ```
 
 `RunSettings` is DERIVED from the task config (`cfg.steps_per_job` → `n_steps`,
@@ -96,6 +96,6 @@ that partition has been **reverted** (V100 is only a playground; production is A
 
 ## Still gated (not done here)
 
-The **big-bang cutover** (repoint `python -m canvit_pretrain.train` at the harness, delete
+The **big-bang cutover** (repoint `python -m canvit_train.train` at the harness, delete
 the old loops) remains owner-gated and destructive. Before it: parity probe prints
 `9a0100a1a3de3acd`, full suite green, launchers set `eval_every == cfg.val_every`.

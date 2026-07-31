@@ -74,7 +74,7 @@ task standalones keep the best checkpoint, not just the last one:
   a `best_val_miou_t*` series;
 * `in1k/train.py:210-214` — `best_top1`, saves `best.pt` + a `best-hf/` export.
 
-The harness had **no best tracking at all** (`grep best canvit_pretrain/harness/` was
+The harness had **no best tracking at all** (`grep best canvit_train/harness/` was
 empty), so a 40 000-step probe would have published its *last* head rather than its best.
 That is a silent quality regression, not a crash.
 
@@ -139,7 +139,7 @@ So the gate runs four arms in one array under an identical environment:
 | arm | what |
 |---|---|
 | 0,1,2 | standalone replicates — their spread is the **measured** noise floor |
-| 3 | harness (`python -m canvit_pretrain.harness.run ade20k`) |
+| 3 | harness (`python -m canvit_train.harness.run ade20k`) |
 
 PASS = the harness curve sits inside the standalone band at every eval point. 6000 steps
 (which also sets the LR horizon, so every arm anneals identically), val every 1000 ⇒ six
@@ -241,7 +241,7 @@ uniform smoke test.** The same asymmetry produced the earlier `is_foveated`
 
 * **A behavioural difference, needing an owner decision, not a fix:** the harness
   **resumes by default** (`RunSettings.resume=True`); the standalone probes cannot resume
-  at all. So `python -m canvit_pretrain.ade20k` twice = two independent runs, while
+  at all. So `python -m canvit_train.ade20k` twice = two independent runs, while
   `harness.run ade20k` twice into the same `--cfg.probe-ckpt-dir` = the second *continues*
   the first. That is the right default for distill's 245-job arrays and a footgun for the
   single-job probe tasks. Options: leave it (documented), or default `resume` per task

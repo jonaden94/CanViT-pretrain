@@ -87,7 +87,7 @@ def smoke_test(path: Path) -> None:
     """Load model from checkpoint, run one forward pass with dummy input."""
     from canvit_pytorch.viewpoint import Viewpoint
 
-    from canvit_pretrain.checkpoint import load_model
+    from canvit_train.checkpoint import load_model
 
     print("\n--- smoke test ---")
     print("loading model...", end=" ", flush=True)

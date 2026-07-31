@@ -8,13 +8,13 @@ below) — a SLURM job the user submits. Suite: 65 passed; parity digest unchang
 
 ## Delivered
 
-- **`canvit_pretrain/ade20k/`** (new package): `config.py` (Ade20kConfig, tyro),
+- **`canvit_train/ade20k/`** (new package): `config.py` (Ade20kConfig, tyro),
   `data.py` (dataset + dinov3 aug + loaders + AdamW/WarmupOneCycleLR + amp),
   `metrics.py` (ce_loss, mIoUAccumulator, ProbeState, eval_probe_on_batch),
   `rollout.py` (patcher-aware `rollout_canvas_hidden` on the WRAPPER —
   `consumes_full_image` routing + `derive_glimpse_px` token guard, both from
   canvit_eval), `train.py` (frozen-backbone loop, pretrain Tracker, per-t scalars),
-  `__main__.py` (`python -m canvit_pretrain.ade20k`, tyro CLI verified).
+  `__main__.py` (`python -m canvit_train.ade20k`, tyro CLI verified).
 - **Tests** (`ade20k/test_ade20k.py`, 3): uniform pre-crop rollout trains probe /
   frozen backbone untouched; **foveated full-image rollout trains probe — the NEW
   capability specialize never had**; glimpse_px token-count guard fails loudly.
@@ -46,7 +46,7 @@ Reference: the specialize ADE probe run on exp22-uniform16 best checkpoint
 `train_ade20k_uniform16_best.sbatch`, launched 2026-07-22). Command:
 
 ```bash
-export MODEL_REPO=/user/henrich1/u25995/jonathan/repos/CanViT-pretrain/logs/jon_exp22_full_runs/exp22-uniform16/checkpoints/step-1515520-hf
+export MODEL_REPO=/user/henrich1/u25995/jonathan/repos/CanViT-train/logs/jon_exp22_full_runs/exp22-uniform16/checkpoints/step-1515520-hf
 export ADE20K_ROOT=/user/henrich1/u25995/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016
 export PRETRAIN_COMMIT=<this commit>  PYTORCH_COMMIT=<core HEAD>  # optional pin
 sbatch --export=ALL slurm_nhr/ade20k/train_ade20k.sbatch
@@ -67,7 +67,7 @@ on an exp22-fovi checkpoint must train end-to-end (no reference numbers — new)
 
 ## Remaining P2 work (in order)
 
-2. **Port the ADE task into `canvit_pretrain/ade20k/`** from
+2. **Port the ADE task into `canvit_train/ade20k/`** from
    `canvit_specialize/training/ade20k/` + `canvit_specialize/datasets/ade20k.py`:
    - `data.py` — the ADE20kDataset + train/val transforms (faithful port; the P2
      gate is reproducing exp22 probe numbers, so keep augmentation identical).
@@ -79,7 +79,7 @@ on an exp22-fovi checkpoint must train end-to-end (no reference numbers — new)
      collects `get_spatial(state.canvas)` per timestep (head applied by trainer —
      wrapper docstring blesses head-only on cached state). `canvas_hidden` ONLY
      (`recon_normalized` dropped per D3).
-   - `train.py` — entry `python -m canvit_pretrain.ade20k.train`: frozen backbone,
+   - `train.py` — entry `python -m canvit_train.ade20k.train`: frozen backbone,
      per-timestep probe CE (mean over timesteps), AdamW + warmup, per-timestep val
      CE/mIoU, wandb scalars (pretrain conventions; specialize's wandb *image*
      logging is NOT ported — disk viz can come later), checkpoint + HF-format probe

@@ -3,7 +3,7 @@
 # Launchers are read at SUBMIT time and are NOT themselves pinned (same as every other
 # runs/*.sh here), so edit freely once the job is queued.
 set -euo pipefail
-cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 export PRETRAIN_COMMIT=$(git rev-parse --short HEAD)
 export PYTORCH_COMMIT=$(git -C ../CanViT-PyTorch rev-parse --short HEAD)
 export FOVI_COMMIT=$(git -C ../fovi rev-parse --short HEAD)

@@ -21,7 +21,7 @@
 #SBATCH -o /user/henrich1/u25995/output/ddp-distill-%J.out
 
 set -uo pipefail
-cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=$((21000 + (SLURM_JOB_ID % 10000)))
@@ -41,12 +41,12 @@ ls -d "$WDS/train-shuffled" >/dev/null 2>&1 && echo "  train-shuffled/ present" 
 
 srun --ntasks=2 \
     env WORLD_SIZE=2 MASTER_ADDR="$MASTER_ADDR" MASTER_PORT="$MASTER_PORT" \
-    "$VENV/bin/python" -m canvit_pretrain.harness.run distill --preset default \
+    "$VENV/bin/python" -m canvit_train.harness.run distill --preset default \
         --cfg.webdataset-dir "$WDS" --cfg.val-dir "$VAL" --cfg.val-index-dir "$VAL_INDEX" \
         --cfg.batch-size-per-gpu 8 --cfg.steps-per-job 4096 \
         `# steps_per_job(4096)*batch(8)=32768 = 8*samples_per_shard(4096): shard-aligned` \
         --cfg.log-every 5 --cfg.no-compile \
         --opts.n-steps 40 --opts.eval-every 0 --opts.ckpt-every 0 \
-        --cfg.tracker wandb --cfg.wandb-project canvit-pretrain \
+        --cfg.tracker wandb --cfg.wandb-project canvit-train \
         --cfg.run-group ddp-validation --cfg.run-name "ddp-distill-a100-$SLURM_JOB_ID"
 echo "=== srun exit: $? ==="

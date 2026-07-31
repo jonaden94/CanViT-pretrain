@@ -27,13 +27,13 @@ from pathlib import Path
 
 import torch
 
-from canvit_pretrain.ade20k.config import Ade20kConfig
-from canvit_pretrain.ade20k.data import make_ade20k_loaders
-from canvit_pretrain.harness.loop import apply_requires_grad
-from canvit_pretrain.harness.spec import TrainSpec
-from canvit_pretrain.tasks.ade20k.task import Ade20kRunTask
+from canvit_train.ade20k.config import Ade20kConfig
+from canvit_train.ade20k.data import make_ade20k_loaders
+from canvit_train.harness.loop import apply_requires_grad
+from canvit_train.harness.spec import TrainSpec
+from canvit_train.tasks.ade20k.task import Ade20kRunTask
 
-ROOT = Path("/mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-pretrain")
+ROOT = Path("/mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train")
 # Per-arm seed sets: arms C/D used seeds 5-9 (jobs 15107841-50), arm E seeds 0-4
 # (15108500-04). Each arm carries its own list so a new arm cannot silently inherit
 # the wrong one.

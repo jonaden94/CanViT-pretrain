@@ -14,7 +14,7 @@ NGPU=1
 # === OPTIONAL (TRAINING CONFIGS THAT CAN BE MODIFIED BUT DO NOT HAVE TO) ====================================================
 # Add new tunables here as CFG_FOO_BAR=value  — base_train.sbatch auto-emits
 # them as `--foo-bar $value` (uppercase/underscores → lowercase/hyphens).
-# Empty value → falls back to Python's own default in canvit_pretrain/train/config.py.
+# Empty value → falls back to Python's own default in canvit_train/train/config.py.
 CFG_WANDB_PROJECT=jon_exp17_canvit_first_tryouts
 CFG_PEAK_LR=0.0004
 CFG_BATCH_SIZE_PER_GPU=64

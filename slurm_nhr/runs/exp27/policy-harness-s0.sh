@@ -1,7 +1,7 @@
 #!/bin/bash
 # exp27 ARM B — the SAME recipe through the UNIFIED HARNESS.
 #
-#   python -m canvit_pretrain.harness.run ade20k --preset policy_only
+#   python -m canvit_train.harness.run ade20k --preset policy_only
 #
 # This is the run the whole session was building toward: the first production-scale
 # test of the harness's policy path. `unification_docs/14-parity-coverage.md` calls
@@ -85,7 +85,7 @@ FOVI_COMMIT=c399d3b
 # exist here.
 export ADE20K_ROOT=/user/henrich1/u25995/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016
 
-cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-pretrain
+cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
 mkdir -p "logs/$RUN_GROUP/$RUN_NAME/log"
 export TASK RUN_GROUP RUN_NAME NGPU EXTRA_ARGS ADE20K_ROOT PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
 for v in $(compgen -v); do [[ "$v" == CFG_* ]] && export "$v"; done

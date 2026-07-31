@@ -19,10 +19,10 @@ matplotlib.use("Agg")  # headless
 
 import torch
 
-from canvit_pretrain.harness.run import RunSettings, run
-from canvit_pretrain.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TrainSpec
-from canvit_pretrain.tasks.distill.task import DistillRunTask
-from canvit_pretrain.train.config import Config
+from canvit_train.harness.run import RunSettings, run
+from canvit_train.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TrainSpec
+from canvit_train.tasks.distill.task import DistillRunTask
+from canvit_train.train.config import Config
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 

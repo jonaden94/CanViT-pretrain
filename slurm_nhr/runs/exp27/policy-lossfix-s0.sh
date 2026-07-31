@@ -1,7 +1,7 @@
 #!/bin/bash
 # exp27 ARM D — arm B (the unified harness) with the POLICY-LOSS SCALE FIX.
 #
-#   python -m canvit_pretrain.harness.run ade20k --preset policy_only
+#   python -m canvit_train.harness.run ade20k --preset policy_only
 #
 # WHY THIS ARM EXISTS. Arm B (5 seeds, 15100922-26) landed at mean(t1-t4) CE
 # 0.6880 +- 0.0010 / mIoU t4 44.77 +- 0.13, while arm C (`rl_train`, the ported
@@ -80,7 +80,7 @@ FOVI_COMMIT=c399d3b
 # NOT in env.sh — every exp24 ade20k script exports it explicitly.
 export ADE20K_ROOT=/user/henrich1/u25995/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016
 
-cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-pretrain
+cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
 mkdir -p "logs/$RUN_GROUP/$RUN_NAME/log"
 export TASK RUN_GROUP RUN_NAME NGPU EXTRA_ARGS ADE20K_ROOT PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
 for v in $(compgen -v); do [[ "$v" == CFG_* ]] && export "$v"; done

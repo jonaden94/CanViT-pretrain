@@ -23,13 +23,13 @@ a defensible alternative convention.
 
 ## Why it is a bug and not a preference
 
-`canvit_pretrain` was the **only** repo in the stack doing it the old way:
+`canvit_train` was the **only** repo in the stack doing it the old way:
 
 | code | order |
 |---|---|
 | `canvit_eval/tasks/ade20k_seg.py:92` | bilinear-upsample logits → argmax |
 | `canvit_pytorch_rl/scoring.py:44` ("Paper-protocol scoring") | bilinear-upsample logits → argmax |
-| `canvit_pretrain/ade20k/metrics.py:35` (before this) | **argmax → nearest-upsample** |
+| `canvit_train/ade20k/metrics.py:35` (before this) | **argmax → nearest-upsample** |
 
 Every published ADE20K number — the paper's Table 4, the qband band, the EG-C2F baselines —
 is measured the reference way. So the old path could not be compared to any of them.

@@ -1,4 +1,4 @@
-"""Is `canvit_pretrain.ade20k` (the port) equivalent to `canvit_specialize`'s ADE20K probe?
+"""Is `canvit_train.ade20k` (the port) equivalent to `canvit_specialize`'s ADE20K probe?
 
 The P2 gate compared the two by mIoU and passed *with an open caveat*: the port sat below
 specialize at every timestep (-0.0023 -> -0.0068, widening with t), flagged as "worth ONE
@@ -72,7 +72,7 @@ def _probe():
 
 @check("ce_loss agrees")
 def _ce():
-    from canvit_pretrain.ade20k.metrics import ce_loss as port_ce
+    from canvit_train.ade20k.metrics import ce_loss as port_ce
     from canvit_specialize.training.ade20k.loss import ce_loss as spec_ce
     torch.manual_seed(0)
     logits = torch.randn(2, 150, 32, 32)
@@ -102,7 +102,7 @@ def _miou():
 
 @check("LR trajectory agrees (40k steps)")
 def _lr():
-    from canvit_pretrain.ade20k.data import make_optimizer_and_scheduler as port_mk
+    from canvit_train.ade20k.data import make_optimizer_and_scheduler as port_mk
     from canvit_specialize.training.ade20k.common import make_optimizer_and_scheduler as spec_mk
     kw = dict(lr=3e-4, weight_decay=1e-3, max_steps=40000, warmup_steps=1500,
               warmup_lr_ratio=1e-6)
@@ -149,8 +149,8 @@ def _data():
 def _train_aug():
     if not ADE_ROOT.exists():
         return True, f"SKIPPED (no ADE20K at {ADE_ROOT})"
-    from canvit_pretrain.ade20k.config import Ade20kConfig
-    from canvit_pretrain.ade20k.data import make_ade20k_loaders as port_mk
+    from canvit_train.ade20k.config import Ade20kConfig
+    from canvit_train.ade20k.data import make_ade20k_loaders as port_mk
     from canvit_specialize.training.ade20k.common import make_ade20k_loaders as spec_mk
     from canvit_specialize.training.ade20k.config import Config as SpecCfg
 
@@ -192,7 +192,7 @@ def _train_aug():
 
 @check("uniform viewpoint law agrees")
 def _viewpoints():
-    from canvit_pretrain.ade20k.rollout import make_random_viewpoints
+    from canvit_train.ade20k.rollout import make_random_viewpoints
     from canvit_specialize.training.utils import make_viewpoints
 
     dev = torch.device("cpu")
@@ -220,7 +220,7 @@ def _viewpoints():
 def _resize_default():
     """specialize hardcodes squish for val; the port lifted it to a config knob whose
     default is center_crop (commit 1a0b452). Same protocol needs it passed explicitly."""
-    from canvit_pretrain.ade20k.config import Ade20kConfig
+    from canvit_train.ade20k.config import Ade20kConfig
     default = Ade20kConfig().resize_mode
     same = default == "squish"
     return same, (f"port default={default!r} vs specialize's hardcoded 'squish' — "

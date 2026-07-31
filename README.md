@@ -1,6 +1,8 @@
-# CanViT-pretrain
+# CanViT-train
 
-Passive-to-active dense latent distillation of [CanViT](https://github.com/m2b3/CanViT-PyTorch) ([arXiv:2603.22570](https://arxiv.org/abs/2603.22570)) from [DINOv3](https://github.com/facebookresearch/dinov3) ([arXiv:2508.10104](https://arxiv.org/abs/2508.10104)).
+All training for [CanViT](https://github.com/m2b3/CanViT-PyTorch) ([arXiv:2603.22570](https://arxiv.org/abs/2603.22570)), behind one harness: passive-to-active dense latent distillation from [DINOv3](https://github.com/facebookresearch/dinov3) ([arXiv:2508.10104](https://arxiv.org/abs/2508.10104)) (`distill`), ADE20K segmentation and ImageNet-1k probes/finetunes (`ade20k`, `in1k`), and reinforcement learning of the viewpoint-selection policy on any of them.
+
+> Formerly `CanViT-pretrain`. Renamed 2026-07-31: downstream training (from `CanViT-specialize`) and viewpoint-policy RL (from `CanViT-PyTorch-RL`) were merged in, so "pretrain" no longer described the scope.
 
 Originally designed to run on [the Nibi SLURM cluster](https://docs.alliancecan.ca/wiki/Nibi) using its [hosted ImageNet-21k `winter21_whole` replica](https://docs.alliancecan.ca/wiki/ImageNet).
 
@@ -15,7 +17,7 @@ Please ensure that `HF_TOKEN`, `COMET_API_KEY`, and `COMET_WORKSPACE` are set.
 
 ## Environment & local multi-repo setup
 
-CanViT-pretrain is developed together with four sibling repos and depends on
+CanViT-train is developed together with four sibling repos and depends on
 `CanViT-PyTorch[fovi]`:
 
 ```
@@ -23,8 +25,8 @@ repos/
 ├── fovi/               # leaf — no internal deps
 ├── CanViT-PyTorch/     # depends on fovi
 ├── CanViT-specialize/  # depends on CanViT-PyTorch
-├── CanViT-pretrain/    # this repo; depends on CanViT-PyTorch[fovi]
-└── CanViT-eval/        # depends on CanViT-PyTorch[fovi] + CanViT-specialize
+├── CanViT-train/       # this repo; depends on CanViT-PyTorch[fovi]
+└── CanViT-eval/        # depends on CanViT-PyTorch[fovi]
 ```
 
 Each repo has its **own** uv-managed venv. Clone all five **as siblings in the
@@ -84,7 +86,7 @@ the venv's (editable, local) install. See
 through it:
 
 ```bash
-python -m canvit_pretrain.harness.run <task> --preset <preset> [--cfg.* ...] [--opts.* ...]
+python -m canvit_train.harness.run <task> --preset <preset> [--cfg.* ...] [--opts.* ...]
 ```
 
 | `<task>` | what it trains | data |
@@ -128,7 +130,7 @@ Write a `slurm_nhr`-style launcher for it if you need to re-export.
 Publish a trained checkpoint to the local HF layout (never automatic — always explicit):
 
 ```bash
-python -m canvit_pretrain.checkpoint.to_hf --pt-path <run>/checkpoints/best.pt --out-dir <dir>
+python -m canvit_train.checkpoint.to_hf --pt-path <run>/checkpoints/best.pt --out-dir <dir>
 ```
 
 It detects the checkpoint type: a `distill` checkpoint becomes the pretraining layout
@@ -144,6 +146,14 @@ that **no longer exist in this repo** (`canvit_pretrain.train`, `canvit_pretrain
 because each pins pre-consolidation commits that `git archive` restores into the job's
 `TMPDIR` — that is how the exp22/exp23/exp27 comparisons stay reproducible. Keep them for
 reproduction; start new work from a `harness_train.sbatch` launcher.
+
+**Those `canvit_pretrain` module paths are deliberate, not stale.** The package was
+renamed `canvit_pretrain` → `canvit_train` on 2026-07-31, but a launcher pinning a
+pre-rename commit gets a snapshot whose package is still `canvit_pretrain` — so that is
+the only name under which those entry points exist. Do not "fix" them.
+`harness_train.sbatch` is shared between new runs and pre-rename pinned arms (exp23,
+exp27 B/D/E), so it *detects* which package the snapshot contains and dispatches
+accordingly; see `_PKG` in that file.
 
 ## Citation
 

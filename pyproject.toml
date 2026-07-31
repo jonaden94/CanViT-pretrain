@@ -1,7 +1,7 @@
 [project]
-name = "canvit-pretrain"
+name = "canvit-train"
 version = "0.1.0"
-description = "CanViT pretraining (passive-to-active dense distillation)"
+description = "CanViT training: distillation pretraining, ADE20K/IN1k probes and finetunes, and viewpoint-policy RL, behind one harness"
 authors = [{ name = "Yohaï-Eliel BERREBY", email = "me@yberreby.com" }]
 readme = "README.md"
 requires-python = ">=3.12"
@@ -34,7 +34,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["canvit_pretrain"]
+packages = ["canvit_train"]
 
 [tool.uv]
 default-groups = ["dev", "cuda"]
@@ -89,7 +89,7 @@ cu126 = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["canvit_pretrain"]
+testpaths = ["canvit_train"]
 python_files = ["test.py", "test_*.py"]
 
 [tool.ruff]
@@ -102,9 +102,9 @@ select = ["E", "F", "I", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
 # Sets torch._functorch.config before imports (required).
-"canvit_pretrain/train/loop.py" = ["E402"]
+"canvit_train/train/loop.py" = ["E402"]
 # Harness entry point: sets MPLCONFIGDIR + Agg before matplotlib is imported (DDP-safety).
-"canvit_pretrain/harness/run.py" = ["E402"]
+"canvit_train/harness/run.py" = ["E402"]
 
 [tool.basedpyright]
 typeCheckingMode = "standard"

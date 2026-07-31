@@ -5,7 +5,7 @@ what the goal actually needed: **delete the duplicate entry points so a newcomer
 interface.** Owner's constraint: remove nothing we still need, and *report* anything
 about to be removed that the harness had not absorbed.
 
-`python -m canvit_pretrain.harness.run <task> --preset <preset>` is now the only trainer
+`python -m canvit_train.harness.run <task> --preset <preset>` is now the only trainer
 in the repo.
 
 ## Deleted

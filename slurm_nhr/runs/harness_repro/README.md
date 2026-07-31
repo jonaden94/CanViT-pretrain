@@ -1,7 +1,7 @@
 # harness_repro — production-scale fidelity A/B (the pre-cutover gate)
 
 Ready-to-fire launchers that re-run **existing old-loop configs through the unified
-harness** (`python -m canvit_pretrain.harness.run`), so their curves can be overlaid on
+harness** (`python -m canvit_train.harness.run`), so their curves can be overlaid on
 the results you already have. This is the one remaining hole before the big-bang cutover:
 everything so far is component-level (byte-exact distill rollout parity), short runs, or
 probe-scale gates — this closes it at production scale on the *old* configs.

@@ -42,7 +42,7 @@ CFG_STEPS_PER_JOB=8192
 CFG_VAL_EVERY=8192  # validate once per job (= steps_per_job)
 CFG_LOG_EVERY=512
 CFG_NUM_WORKERS=4
-CFG_SEED_CKPT=/user/henrich1/u25995/jonathan/repos/CanViT-pretrain/logs/jon_exp22_full_runs/exp22-uniform16-teacherinit/checkpoints/step-638976.pt
+CFG_SEED_CKPT=/user/henrich1/u25995/jonathan/repos/CanViT-train/logs/jon_exp22_full_runs/exp22-uniform16-teacherinit/checkpoints/step-638976.pt
 EXTRA_ARGS="--model.patcher-name uniform --webdataset-dir /mnt/lustre-rzg/workspaces/ws/nib00021/u25995-inet21k-feat/webdataset-imagenet-21k-with-features"
 # =================
 
@@ -53,7 +53,7 @@ PRETRAIN_COMMIT=fe24aa1
 PYTORCH_COMMIT=3277048
 FOVI_COMMIT=c399d3b
 
-cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-pretrain
+cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
 mkdir -p "logs/$RUN_GROUP/$RUN_NAME/log"
 export RUN_GROUP RUN_NAME NGPU EXTRA_ARGS PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
 for v in $(compgen -v); do [[ "$v" == CFG_* ]] && export "$v"; done

@@ -25,7 +25,7 @@
   cu128 intact). Tests: core 41, eval 22, pretrain 87; parity `9a0100a1a3de3acd` unchanged.
   **specialize now has no runtime importers.**
 - **Foveated view-scale footgun FIXED (write + read).** Write: converter ported into the
-  unified repo as `canvit_pretrain/checkpoint/to_hf.py` (`python -m`, replaces the
+  unified repo as `canvit_train/checkpoint/to_hf.py` (`python -m`, replaces the
   archived specialize script) and now records an explicit `metadata.pretrain_view_scale`
   ({patcher_name, mode, fixed_scale, …}) extracted from `training_config_history`
   (`None` for uniform / older ckpts). Read: eval `config.resolve_view_scale` +

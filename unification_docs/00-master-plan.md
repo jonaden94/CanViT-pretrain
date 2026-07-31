@@ -1,4 +1,4 @@
-# Unification master plan — merging specialize + RL into CanViT-pretrain
+# Unification master plan — merging specialize + RL into CanViT-train
 
 **Written:** 2026-07-22 · **Status:** approved design, implementation not started
 **Prerequisite reading:** `CanViT-specialize/docs/unification-status.md` (the divergence
@@ -8,7 +8,7 @@ inventory; this plan builds on it and does not repeat it).
 
 ## 1. Goal
 
-One training repo (`CanViT-pretrain`) that supports every cell of this matrix:
+One training repo (`CanViT-train`) that supports every cell of this matrix:
 
 | axis | values |
 |---|---|
@@ -19,7 +19,7 @@ One training repo (`CanViT-pretrain`) that supports every cell of this matrix:
 
 Today's three-repo functionality maps to three specific configurations:
 
-1. `task=distill, locations=random, train=backbone+heads` → current CanViT-pretrain
+1. `task=distill, locations=random, train=backbone+heads` → current CanViT-train
 2. `task=ade20k, locations=random, train=head-only (frozen backbone)` → current CanViT-specialize/ADE
 3. `task=ade20k, locations=policy, train=policy-only (frozen backbone+probe)` → current CanViT-PyTorch-RL
 
@@ -66,7 +66,7 @@ docs mined first — see §9). The RL repo's `flow/` module (continuous-action R
   `r_t = (L_t − L_{t+1}) / L_t` where `L` = per-image task loss (seg CE / cls CE /
   distill MSE), computed detached, standardized by per-depth `RunningNorm`. The RL repo's
   128px `score_res` scoring trick ports as-is for seg.
-- **Repo name stays `CanViT-pretrain`** for now. Renaming (e.g. `canvit-train`) is a
+- **Repo name stays `CanViT-train`** for now. Renaming (e.g. `canvit-train`) is a
   cosmetic decision for later; nothing in the plan depends on it.
 
 ## 4. Target architecture
@@ -82,7 +82,7 @@ canvit_pytorch (core)                          ← D1
     actions.py    candidate-viewpoint builders: uniform (scales × safe-box grid,
                   from RL canvas_ops) + foveated variant (new, §6)
 
-canvit_pretrain (the merged training repo)
+canvit_train (the merged training repo)
   train/
     loop.py, step.py, …    existing pretrain loop — REFACTORED into the harness (§4.2)
     selector.py            RandomSelector / PolicySelector / MixtureSelector (ε-schedule)
@@ -212,7 +212,7 @@ run drifts out of the qband band and the drift traces to this, fall back to
 |---|---|---|
 | **P0** ✅ | **DONE 2026-07-22** (see `p0-notes.md`): ADE 2-step CPU smoke tests (specialize), uniform-sampler distribution test (pretrain; foveated already covered), deterministic parity probe + baseline digest `9a0100a1…`. Ckpt compat asserts moved to P3 (need the new ckpt format). | ✅ all 3 suites green on current code (61/24/9) |
 | **P1** ✅ | **DONE 2026-07-22** (see `p1-notes.md`): `selector.py` + `task.py` seams injected into `training_step` (defaults = historical behavior); spy-injection test added. Rollout-engine extraction deferred to P3/P4 by design. | ✅ parity digest byte-identical (`9a0100a1…`); 61+1 tests green |
-| **P2** 🟡 | **CODE COMPLETE 2026-07-22** (see `p2-notes.md`): `canvit_pretrain/ade20k/` package (wrapper-only, patcher-aware rollout, 3 smoke tests incl. foveated), commit-pinned launcher. Core gained `from_pretrained_with_new_probe` (`2759e18`). | 🟡 gate run pending (user submits; command in p2-notes) — CPU/code gates green (65 tests, parity digest unchanged) |
+| **P2** 🟡 | **CODE COMPLETE 2026-07-22** (see `p2-notes.md`): `canvit_train/ade20k/` package (wrapper-only, patcher-aware rollout, 3 smoke tests incl. foveated), commit-pinned launcher. Core gained `from_pretrained_with_new_probe` (`2759e18`). | 🟡 gate run pending (user submits; command in p2-notes) — CPU/code gates green (65 tests, parity digest unchanged) |
 | **P3** 🟡 | **CODE COMPLETE 2026-07-22** (see `p3-notes.md`): `canvit_pytorch.policy` in core (`524d27c`, fixation action space incl.); `train/rl.py` + in-graph `ade20k/rl_train.py` trainer in pretrain; first-ever foveated policy step passes. Selector-seam integration → P4. | 🟡 gate pending (qband-band seed run + published-ckpt load; user submits) — CPU gates green (68 tests, parity digest unchanged) |
 | **P4** 🟡 | **P4a DONE 2026-07-22** (see `p4-notes.md`): PolicySelector + MixtureSelector behind the P1 seam (ε-curriculum plumbing, aux for joint losses). **P4b (joint modes) deliberately gate-blocked** on job 15025279 validating BN mode (a). | 🟡 P4a: 71 tests green, parity unchanged. P4b gates unchanged (DDP tests, stable joint runs) |
 | **P5** | CUDA IN1k task (doc §6.3) | linear-probe/fine-tune numbers sane vs canvit_eval's frozen-probe baseline |

@@ -8,7 +8,7 @@ set -uo pipefail
 ROOT=/user/henrich1/u25995/jonathan/repos
 PY="$ROOT/CanViT-eval/.venv/bin/python"
 CONV="$ROOT/CanViT-specialize/scripts/pretrain_ckpt_to_hf_format.py"
-L="$ROOT/CanViT-pretrain/logs/jon_exp21_modulation"
+L="$ROOT/CanViT-train/logs/jon_exp21_modulation"
 
 RUNS=(
   exp21-uniform8 exp21-uniform16-grid4 exp21-uniform16-repro exp21-uniform16-L

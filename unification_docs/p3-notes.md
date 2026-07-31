@@ -16,7 +16,7 @@ New `[policy]` extra (timm). 5 CPU tests incl. hub round-trip + legacy config.
   z), `entropy_floor_step` (SAC-style dual ascent), `qreg_loss`/`pg_loss`
   (+ exact discrete Q-Prop variant). Task-agnostic.
 - `ade20k/rl_train.py` — the frozen-model policy trainer recreating the RL-repo
-  flagship (`python -m canvit_pretrain.ade20k.rl_train`, tyro): frozen
+  flagship (`python -m canvit_train.ade20k.rl_train`, tyro): frozen
   `from_pretrained_with_probe` stack, **in-graph rollout** (§4.3 — the selecting
   forward IS the training forward; one forward per state), ε-greedy DAgger (QReg)
   / on-policy sampling (PG), per-depth RunningNorm, fractional-CE reward at
@@ -69,7 +69,7 @@ run dir under `checkpoints/canvit-ade20k-policies/`). Pass = final best val CE
 1. **Published-ckpt load check**: `ViewpointScorer.from_pretrained(DEFAULT_POLICY_REPO)`
    through the CORE class (needs network; mechanism covered by round-trip test).
 2. **Statistical parity**: one seed of the default QReg recipe on this cluster
-   (`python -m canvit_pretrain.ade20k.rl_train --run-name qband-port-s0`) must land
+   (`python -m canvit_train.ade20k.rl_train --run-name qband-port-s0`) must land
    inside the documented 8-seed qband band (mean val CE t1–t4; the RL repo's
    `docs/qband_results.md`). Note: no local reference runs exist (qband ran on the
    m2b3 machine), so the band comes from the docs. A SLURM launcher for this run

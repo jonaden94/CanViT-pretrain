@@ -6,7 +6,7 @@
 #SBATCH -C inet                  # required for HuggingFace Hub access
 #SBATCH --delay-boot=1
 #
-# Unified-harness training launcher: the `python -m canvit_pretrain.harness.run`
+# Unified-harness training launcher: the `python -m canvit_train.harness.run`
 # counterpart of base_train.sbatch. ONE script for all three tasks — the task is
 # chosen by the TASK env var (distill | ade20k | in1k), which is the whole point
 # of the harness.
@@ -30,7 +30,7 @@
 # Launch via: SBATCH_SCRIPT=slurm_nhr/harness_train.sbatch bash slurm_nhr/submit.sh
 # or directly: TASK=ade20k sbatch --export=ALL ... slurm_nhr/harness_train.sbatch
 
-cd /user/henrich1/u25995/jonathan/repos/CanViT-pretrain
+cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 source /user/henrich1/u25995/.bashrc
 
 set -eu
@@ -64,11 +64,11 @@ _CODE_DIR="$TMPDIR/canvit_src"
 if [ -n "${PRETRAIN_COMMIT:-}" ] || [ -n "${PYTORCH_COMMIT:-}" ] || [ -n "${FOVI_COMMIT:-}" ]; then
     mkdir -p "$_CODE_DIR"
     if [ -n "${PRETRAIN_COMMIT:-}" ]; then
-        mkdir -p "$_CODE_DIR/CanViT-pretrain"
-        git -C "$_REPO_BASE/CanViT-pretrain" archive "$PRETRAIN_COMMIT" \
-            | tar -x -C "$_CODE_DIR/CanViT-pretrain"
-        export PYTHONPATH="$_CODE_DIR/CanViT-pretrain${PYTHONPATH:+:$PYTHONPATH}"
-        log "Pinned canvit_pretrain → $PRETRAIN_COMMIT"
+        mkdir -p "$_CODE_DIR/CanViT-train"
+        git -C "$_REPO_BASE/CanViT-train" archive "$PRETRAIN_COMMIT" \
+            | tar -x -C "$_CODE_DIR/CanViT-train"
+        export PYTHONPATH="$_CODE_DIR/CanViT-train${PYTHONPATH:+:$PYTHONPATH}"
+        log "Pinned canvit_train → $PRETRAIN_COMMIT"
     fi
     if [ -n "${PYTORCH_COMMIT:-}" ]; then
         mkdir -p "$_CODE_DIR/CanViT-PyTorch"
@@ -83,6 +83,18 @@ if [ -n "${PRETRAIN_COMMIT:-}" ] || [ -n "${PYTORCH_COMMIT:-}" ] || [ -n "${FOVI
         export PYTHONPATH="$_CODE_DIR/fovi${PYTHONPATH:+:$PYTHONPATH}"
         log "Pinned fovi → $FOVI_COMMIT"
     fi
+fi
+
+# The package was renamed canvit_pretrain -> canvit_train on 2026-07-31. This launcher is
+# shared between NEW runs (post-rename code, package canvit_train) and the exp23/exp27
+# arms, which pin PRE-rename commits whose git-archive snapshot still contains
+# canvit_pretrain/. Hardcoding either name silently breaks half of them, so derive it from
+# what the snapshot actually holds. No pin => no snapshot => the venv's editable install,
+# which is always the current name.
+_PKG=canvit_train
+if [ -d "$_CODE_DIR/CanViT-train/canvit_pretrain" ]; then
+    _PKG=canvit_pretrain
+    log "Pinned commit predates the canvit_train rename → entry point is $_PKG.harness.run"
 fi
 
 export TORCHINDUCTOR_CACHE_DIR="$TMPDIR/torchinductor"
@@ -165,7 +177,7 @@ exec srun env TMPDIR="$TMPDIR" \
     TRITON_CACHE_DIR="$TRITON_CACHE_DIR" \
     CUDA_CACHE_PATH="$CUDA_CACHE_PATH" \
     TORCHINDUCTOR_FX_GRAPH_CACHE=1 \
-    "$VENV/bin/python" -m canvit_pretrain.harness.run "$TASK" \
+    "$VENV/bin/python" -m "$_PKG.harness.run" "$TASK" \
     "${_TASK_ARGS[@]}" \
     "${_ARGS[@]}" \
     $EXTRA_ARGS \

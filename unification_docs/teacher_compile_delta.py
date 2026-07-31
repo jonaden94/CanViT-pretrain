@@ -28,8 +28,8 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import torch
 
-from canvit_pretrain.train.config import Config
-from canvit_pretrain.train.model import load_teacher
+from canvit_train.train.config import Config
+from canvit_train.train.model import load_teacher
 
 _B, _RES = 4, 512
 
@@ -58,7 +58,7 @@ def main() -> int:
     p_eager, c_eager = _feats(eager, images)
 
     compiled = load_teacher(cfg)
-    from canvit_pretrain.train.model import compile_teacher
+    from canvit_train.train.model import compile_teacher
     compile_teacher(compiled)
     p_comp, c_comp = _feats(compiled, images)
 

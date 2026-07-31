@@ -21,7 +21,7 @@ CFG_NUM_WORKERS=4
 EXTRA_ARGS="--model.patcher-name uniform"
 # =================
 
-cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-pretrain
+cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
 mkdir -p "logs/$RUN_GROUP/$RUN_NAME/log"
 export RUN_GROUP RUN_NAME NGPU EXTRA_ARGS
 for v in $(compgen -v); do [[ "$v" == CFG_* ]] && export "$v"; done

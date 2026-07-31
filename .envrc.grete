@@ -8,7 +8,7 @@ export TORCH_HOME="/user/henrich1/u25995/.cache/torch"
 export TORCH_COMPILE_CACHE_DIR="/user/henrich1/u25995/.cache/torch_compile"
 
 # Storage
-export LOGS_DIR="/user/henrich1/u25995/jonathan/repos/CanViT-pretrain/logs"
+export LOGS_DIR="/user/henrich1/u25995/jonathan/repos/CanViT-train/logs"
 # export WEBDATASET_DIR="/user/henrich1/u25995/jonathan/datasets/webdataset-imagenet-1k"  # vast NFS copy; superseded by lustre below to avoid NFS contention
 # export WEBDATASET_DIR="/mnt/lustre-rzg/workspaces/ws/nib00021/u25995-canvit-data/webdataset-imagenet-1k"  # in1k with precomputed features; superseded by in21k below (2026-07-10)
 export WEBDATASET_DIR="/mnt/lustre-rzg/workspaces/ws/nib00021/u25995-inet21k-feat/webdataset-imagenet-21k-with-features"  # in21k, 13.15M imgs, precomputed dinov3_vitb16 features; training only; must contain train-shuffled/
@@ -18,7 +18,7 @@ export VAL_DIR="/user/henrich1/u25995/jonathan/datasets/imagenet1k-val"
 export VAL_INDEX_DIR="/user/henrich1/u25995/jonathan/repos/_data_cache"
 
 # Tracker config
-export WANDB_PROJECT="canvit-pretrain"   # TODO: change as needed
+export WANDB_PROJECT="canvit-train"   # TODO: change as needed
 export WANDB_ENTITY=""                   # leave empty to use your default account
 export WANDB_DIR="/mnt/vast-nhr/projects/nib00021/jonathan"
 

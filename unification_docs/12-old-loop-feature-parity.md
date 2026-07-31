@@ -7,7 +7,7 @@ functionality not reimplemented? This is the STATIC counterpart to the productio
 nothing is *silently dropped* — including features a given A/B config never exercises.
 
 **Method:** read the old production path end to end — `slurm_nhr/base_train.sbatch`,
-`canvit_pretrain/train/__main__.py`, `canvit_pretrain/train/loop.py` (1035 lines) — and
+`canvit_train/train/__main__.py`, `canvit_train/train/loop.py` (1035 lines) — and
 cross-check each operational feature against the harness (`harness/run.py` + `harness/loop.py`
 + `harness/cli.py` + `tasks/distill/task.py`). Not a grep-map; the loop was read (this
 session's pass-4 read + this checklist pass). Verified runtime facts where a docstring was
