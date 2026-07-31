@@ -8,7 +8,9 @@ Layout matches the other two tasks (``ade20k/``, ``in1k/``):
 - ``config.py`` — ``Config``, distill's own knobs (teacher, canvas/glimpse sizes, schedule)
 - ``model.py``  — student construction / teacher wiring
 - ``probe.py``  — the frozen IN1k probes used to score distill validation
-- ``data/``     — the in21k feature webdataset, shard bookkeeping, tar readers
+- ``data/``     — the in21k feature webdataset, shard bookkeeping, tar readers, and
+  ``IndexedImageFolder`` (the parquet-indexed raw-image dataset behind distill's val
+  loader — distill is its only consumer; in1k's val uses torchvision's plain ImageFolder)
 - ``viz/``      — distill's validation figures
 
 Anything shared with ade20k/in1k (viewpoint sampling, selectors, RL objectives,

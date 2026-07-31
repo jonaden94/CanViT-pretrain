@@ -25,7 +25,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import tyro
 
-from canvit_train.datasets import IndexedImageFolder
+from canvit_train.distill.data import IndexedImageFolder
 
 
 @dataclass

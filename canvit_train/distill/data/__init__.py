@@ -14,7 +14,7 @@ import torch
 from canvit_pytorch.preprocess import preprocess
 from torch.utils.data import DataLoader, Dataset, Subset
 
-from canvit_train.datasets import IndexedImageFolder
+from .indexed_image_folder import IndexedImageFolder
 
 from .shards import ShardedFeatureLoader
 from .webdataset import WebDatasetTrainLoader

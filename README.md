@@ -101,8 +101,7 @@ canvit_train/
 ├── distill/          DINOv3 latent distillation (pretraining)
 ├── ade20k/           ADE20K segmentation probe / finetune
 ├── in1k/             ImageNet-1k linear probe / full finetune
-├── checkpoint/       to_hf — publish a trained checkpoint to the HF layout
-└── datasets/         small dataset helpers
+└── checkpoint/       to_hf — publish a trained checkpoint to the HF layout
 ```
 
 The five flat files in `harness/` are the ones to read first; the subpackages are the
