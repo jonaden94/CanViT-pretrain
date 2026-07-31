@@ -59,3 +59,29 @@ teacher-init flag — was copied value-for-value from the exp22 launchers.
 
 ~1,420 GPU-h. At `%1` per array: `exp28-fovi` ~20 days, the three drop parents ~12/15/6 days.
 Raise `%1` or split the arrays if that is too slow.
+
+## Verification: exp22's step-8192 loss (the first comparable checkpoint)
+
+Each exp22 parent's FIRST array job ended at step 8192 with these `train_loss` values, read
+from that run's earliest job log (so unaffected by array ordering). exp28's step-8192 losses
+should land near them; a systematic offset quantifies the 4-shard-vs-1-shard normalizer effect.
+
+| arm | exp22 @ step 8192 (1 shard, `shard-001751`) |
+|---|---|
+| `uniform16` | 1.8945 |
+| `uniform16-teacherinit` | 1.6106 |
+| `fovi` | 1.8885 |
+| `fovi-teacherinit` | 1.8377 |
+
+Note the normalizer differs in **identity as well as count**: exp22 drew its single shard from
+the seed-dependent shuffled order (`shard-001751`), while current code globs the sorted head
+(`shard-000000..000003`) for a seed-independent pick.
+
+## Submitted job IDs (2026-07-31)
+
+| run | job |
+|---|---|
+| `exp28-uniform16-teacherinit` | 15113377 |
+| `exp28-fovi-teacherinit` | 15113378 |
+| `exp28-uniform16` | 15113379 |
+| `exp28-fovi` | 15113380 |

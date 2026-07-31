@@ -54,3 +54,7 @@ finetune starts from a RANDOM classifier and the loss opens near `ln(1000) ~= 6.
 chance-level accuracy. That was a live bug once (fixed `8f780ba`), which is why
 `CFG_PROBE_REPO` is load-bearing here rather than cosmetic. Check the first logged
 `train/full/loss` is well below 6.9.
+
+## Submitted job IDs (2026-07-31)
+
+`in1k-uni16ti-803k` 15113362 · `in1k-uni16-1516k` 15113363 · `in1k-fovi-ti-1196k` 15113364 · `in1k-fovi-1901k` 15113365

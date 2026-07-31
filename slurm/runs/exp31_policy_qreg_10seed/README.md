@@ -64,3 +64,10 @@ Expect the 10 seeds to cluster with best `ce_mean` ~0.685-0.686 and `miou_final`
 has occurred here: `1a0b452` changed the resize default to `center_crop` and an arm landed
 0.6693 — 0.016 "better" than the band, ~20x the seed spread — purely from the protocol change.
 A result that beats the reference is evidence of a broken protocol until proven otherwise.
+
+## Submitted job IDs (2026-07-31)
+
+Seeds 0-9 = jobs **15113367-15113376** in order.
+
+Second reference seed: exp27 `lossfix-s1` best `ce_mean` 0.68657 @2000, best `miou_final`
+0.44939 @2000 (both seeds inside the qband).

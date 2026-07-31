@@ -50,3 +50,21 @@ ade20k config has no `seed` field at all; the harness added `seed: int = 0`), an
 `uni16ti > fovi-ti > uni16` should hold, all four should sit in the 0.41-0.45 band, and the
 four exp30 runs are mutually comparable because they share code and a seed. exp30 is the FIRST
 ade20k probe set on the corrected mIoU basis — it becomes the reference for what follows.
+
+## Finding exp24's runs in wandb: they are all named `ade20k`
+
+exp24 predates the run-naming fix, so **every** exp24 ade20k run appears in wandb literally as
+`ade20k`. Identify them by id, not name:
+
+| source | wandb id | `miou_final` last / max |
+|---|---|---|
+| `ade20k-uni16ti-803k` | `t32oc3x1` | 0.44443 / 0.44479 |
+| `ade20k-uni16-1516k` | `n6gw2xoi` | 0.41953 / 0.42321 |
+| `ade20k-fovi-ti-1196k` | `pkq5lpyc` | 0.43838 / 0.43997 |
+
+(A fourth run `aa4dtxg6`, correctly named `ade20k-fovi-ti-1196k`, is a later CRASHED retry with
+no metrics — ignore it.) All three finished at step 39,500.
+
+## Submitted job IDs (2026-07-31)
+
+`ade20k-uni16ti-803k` 15113358 · `ade20k-fovi-ti-1196k` 15113359 · `ade20k-uni16-1516k` 15113360 · `ade20k-fovi-1901k` 15113361
