@@ -38,8 +38,8 @@ def _stub_loaders(monkeypatch, *, samples_per_shard=_SPS):
     loader = object.__new__(WebDatasetTrainLoader)  # no tar shards needed for these tests
     loader.samples_per_shard = samples_per_shard
 
-    def fake(cfg, start_step, *, job_index, world_size, rank):
-        seen.update(start_step=start_step, job_index=job_index, world_size=world_size)
+    def fake(cfg, *, job_index, world_size, rank):
+        seen.update(job_index=job_index, world_size=world_size)
         return SimpleNamespace(train=loader, val=None)
 
     monkeypatch.setattr("canvit_train.distill.data.create_loaders", fake)
@@ -60,7 +60,7 @@ def test_fresh_job_reads_slice_zero_and_records_it(monkeypatch):
     seen = _stub_loaders(monkeypatch)
     t = _task()
     t.build_loaders(world_size=1, rank=0)
-    assert seen["job_index"] == 0 and seen["start_step"] == 0
+    assert seen["job_index"] == 0
     assert _ckpt(t)["metadata"]["resume_state"] == {
         "job_index": 0, "ddp_world_size": 1, "batch_size_per_gpu": _BS,
         "steps_per_job": _SPJ, "samples_per_shard": _SPS,
@@ -80,7 +80,9 @@ def test_second_leg_starts_at_the_next_job_slice(monkeypatch):
     assert start_step == (0 + 1) * _SPJ
     leg2.build_loaders(world_size=1, rank=0)
     assert seen["job_index"] == 1, "leg 2 must consume the shard slice after leg 1's"
-    assert seen["start_step"] == _SPJ
+    # `start_step` is no longer passed to create_loaders (it only ever positioned the
+    # deleted sharded loader's cursor); the resume step itself is asserted above and is
+    # consumed by harness/run.py, not by the loader.
     assert leg2.resume_state()["job_index"] == 1  # leg 3 would then get 2
 
 

@@ -11,7 +11,7 @@ The actual `num_workers` is derived from `cfg.num_workers`, capped at
 `shards_per_gpu`, and rounded down to a divisor of `shards_per_gpu` so every
 worker gets the same number of shards.
 
-Loader interface matches the existing `ShardedFeatureLoader` so `loop.py` can
+Loader interface is the one `loop.py` drives (`next()` returning a Batch), so it can
 call `train_loader.next()` without modification.
 """
 
@@ -125,7 +125,7 @@ class WebDatasetTrainLoader:
     """Streams training samples from one rank's slice of the shard schedule.
 
     Yields `(images, raw_patches, raw_cls, labels)` per call to `next()`,
-    matching the existing `ShardedFeatureLoader.next()` contract.
+    matching the `next()` contract `loop.py` expects.
     """
 
     def __init__(

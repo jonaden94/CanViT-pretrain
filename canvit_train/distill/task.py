@@ -270,8 +270,8 @@ class DistillRunTask:
             init_normalizer_stats_from_tar,
             init_normalizer_stats_from_tar_raw,
         )
-        loaders = create_loaders(self.cfg, self._start_job_index * self.cfg.steps_per_job,
-                                 job_index=self._start_job_index, world_size=world_size, rank=rank)
+        loaders = create_loaders(self.cfg, job_index=self._start_job_index,
+                                 world_size=world_size, rank=rank)
         train, val = loaders.train, loaders.val
         assert isinstance(train, WebDatasetTrainLoader), (
             "DistillRunTask currently supports the webdataset path only (set cfg.webdataset_dir)"

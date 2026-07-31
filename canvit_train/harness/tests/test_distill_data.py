@@ -60,7 +60,7 @@ def _stub_init(monkeypatch, task, loader):
     """Patch create_loaders + both normalizer initialisers; return the call records."""
     seen: dict = {"tar": [], "raw": []}
     monkeypatch.setattr("canvit_train.distill.data.create_loaders",
-                        lambda cfg, start_step, **kw: SimpleNamespace(train=loader, val=None))
+                        lambda cfg, **kw: SimpleNamespace(train=loader, val=None))
     monkeypatch.setattr("canvit_train.distill.data.webdataset.init_normalizer_stats_from_tar",
                         lambda *a, **k: seen["tar"].append((a, k)))
     monkeypatch.setattr("canvit_train.distill.data.webdataset.init_normalizer_stats_from_tar_raw",

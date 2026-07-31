@@ -60,25 +60,24 @@ class Config:
     grad_clip: float = 1.0
     steps_per_job: int = 4_992  # Steps this job does before exiting (for SLURM arrays)
     # Data
-    train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/user/henrich1/u25995/jonathan/datasets/imagenet1k-val")
     """IN1k val ImageFolder (raw images) for distill validation — glimpse rollouts scored
     by the frozen IN1k probes need actual pixels, so this is NOT the feature webdataset.
     Every launcher passes `--cfg.val-dir "$VAL_DIR"` from `.envrc.grete`, so this default
     only applies to ad-hoc local runs; `harness_train.sbatch` fails at launch if VAL_DIR
     is unset. Was a Nibi path (`/datasets/ILSVRC/...`) that does not exist on Grete."""
-    train_index_dir: Path | None = None  # Required for raw image training
-    val_index_dir: Path | None = None  # Required for validation
-    # Precomputed features (skips teacher inference on train images)
-    # If feature_base_dir is set, shards path is auto-constructed:
-    #   {feature_base_dir}/{teacher_name}/{scene_resolution}/shards/
-    feature_base_dir: Path | None = None
-    feature_image_root: Path | None = None  # Required with feature_base_dir
-    tar_dir: Path | None = None  # images read directly from mmap'd tars
-    # WebDataset path (alternative to feature_base_dir). When set, training
-    # reads pre-shuffled WebDataset tar shards under {webdataset_dir}/train-shuffled
-    # and validates against {webdataset_dir}/val.
+    train_index_dir: Path | None = None
+    """Fallback source for ``val_index_dir`` when that is unset — despite the name this
+    feeds VALIDATION's parquet index, not training (training reads WebDataset shards)."""
+    val_index_dir: Path | None = None  # parquet index cache for the val ImageFolder
     webdataset_dir: Path | None = None
+    """THE training data source: pre-shuffled WebDataset tar shards under
+    ``{webdataset_dir}/train-shuffled``. Required in practice — ``create_loaders``
+    asserts it is set. Typed optional only so ``Config()`` stays constructible in tests.
+
+    Shards may carry precomputed teacher features (cls.npy + ptch.npy) or be RAW
+    (jpg+json only), in which case the frozen teacher computes targets on the fly — the
+    exp21/exp22 path. Both go through ``WebDatasetTrainLoader``."""
     seed: int = 0  # for reproducibility (shard schedule permutations)
     # Run identification and checkpointing
     run_group: str | None = None

@@ -1,4 +1,6 @@
-"""Data loading for CanViT pretraining: shard loaders + batch types."""
+"""Data loading for CanViT pretraining: the WebDataset train loader, the ImageFolder val
+loader, and the batch types.
+"""
 
 import logging
 import tempfile
@@ -15,8 +17,6 @@ from canvit_pytorch.preprocess import preprocess
 from torch.utils.data import DataLoader, Dataset, Subset
 
 from .indexed_image_folder import IndexedImageFolder
-
-from .shards import ShardedFeatureLoader
 from .webdataset import WebDatasetTrainLoader
 
 log = logging.getLogger(__name__)
@@ -102,7 +102,7 @@ class FixedValLoader:
 class Loaders(NamedTuple):
     """Train and validation data loaders."""
 
-    train: ShardedFeatureLoader | WebDatasetTrainLoader
+    train: WebDatasetTrainLoader
     val: FixedValLoader
 
 
@@ -112,7 +112,6 @@ def scene_size_px(grid_size: int, patch_size: int) -> int:
 
 def create_loaders(
     cfg: "Config",
-    start_step: int,
     *,
     job_index: int = 0,
     world_size: int = 1,
@@ -120,32 +119,29 @@ def create_loaders(
 ) -> Loaders:
     """Train + val loaders.
 
-    Validation ALWAYS reads the raw ImageNet-1k val ImageFolder at ``cfg.val_dir``
-    (synset-named class subfolders), independent of the training data source —
-    teacher targets are computed live during validation.
+    Training reads WebDataset shards from ``cfg.webdataset_dir`` (rank-aware,
+    ``job_index``-driven shard schedule, resumable). Shards may carry precomputed teacher
+    features or be raw jpg+json, in which case the teacher runs on the fly — both go
+    through ``WebDatasetTrainLoader``.
 
-    The training loader dispatches on ``cfg.webdataset_dir``:
-      - set: WebDataset path (rank-aware, job_index-driven shard schedule).
-      - unset: precomputed-features path (ShardedFeatureLoader).
-    ``start_step`` positions the shard cursor on resume (sharded path); ``job_index``
-    plays the analogous role for the WebDataset path.
+    Validation ALWAYS reads the raw ImageNet-1k val ImageFolder at ``cfg.val_dir``
+    (synset-named class subfolders), independent of the training data source — teacher
+    targets are computed live during validation.
     """
     from ..config import Config
     assert isinstance(cfg, Config)
-    log.info(
-        f"=== CREATE_LOADERS: start_step={start_step}, job_index={job_index}, "
-        f"rank={rank}/{world_size} ==="
+    assert cfg.webdataset_dir is not None, (
+        "cfg.webdataset_dir is required: it is the only training data source. Pass "
+        "--cfg.webdataset-dir (launchers pass $WEBDATASET_DIR from .envrc.grete). The "
+        "precomputed-feature tar path that used to serve cfg.webdataset_dir=None was "
+        "removed 2026-07-31."
     )
+    log.info(f"=== CREATE_LOADERS: job_index={job_index}, rank={rank}/{world_size} ===")
 
     val_loader = _create_imagefolder_val_loader(cfg)
-
-    if cfg.webdataset_dir is not None:
-        train_loader: ShardedFeatureLoader | WebDatasetTrainLoader = _create_webdataset_train_loader(
-            cfg, job_index=job_index, world_size=world_size, rank=rank
-        )
-    else:
-        train_loader = _create_sharded_train_loader(cfg, start_step=start_step)
-
+    train_loader = _create_webdataset_train_loader(
+        cfg, job_index=job_index, world_size=world_size, rank=rank
+    )
     return Loaders(train=train_loader, val=val_loader)
 
 
@@ -197,37 +193,6 @@ def _create_imagefolder_val_loader(cfg: "Config") -> FixedValLoader:
         num_workers=cfg.num_workers, pin_memory=True, drop_last=False, persistent_workers=persistent,
     )
     return FixedValLoader(loader, n_samples=n)
-
-
-def _create_sharded_train_loader(cfg: "Config", *, start_step: int) -> ShardedFeatureLoader:
-    """Build the precomputed-features training loader (ShardedFeatureLoader)."""
-    sz = cfg.scene_resolution
-    assert cfg.feature_base_dir is not None, "feature_base_dir required"
-    assert (cfg.feature_image_root is None) != (cfg.tar_dir is None), \
-        "Exactly one of feature_image_root or tar_dir required"
-    log.info("Train: using PRECOMPUTED FEATURES (ShardedFeatureLoader)")
-    shards_dir = cfg.feature_base_dir / cfg.teacher_name / str(sz) / "shards"
-    log.info(f"  feature_base_dir: {cfg.feature_base_dir}")
-    log.info(f"  teacher_name: {cfg.teacher_name}")
-    log.info(f"  resolution: {sz}")
-    log.info(f"  → shards_dir: {shards_dir}")
-    if cfg.tar_dir is not None:
-        log.info(f"  tar_dir: {cfg.tar_dir} (images read directly from tar)")
-    else:
-        log.info(f"  image_root: {cfg.feature_image_root}")
-    assert shards_dir.is_dir(), f"shards_dir not found: {shards_dir}"
-    train_loader = ShardedFeatureLoader(
-        shards_dir=shards_dir,
-        image_size=sz,
-        batch_size=cfg.batch_size_per_gpu,
-        num_workers=cfg.num_workers,
-        start_step=start_step,
-        image_root=cfg.feature_image_root,
-        tar_dir=cfg.tar_dir,
-        steps_per_job=cfg.steps_per_job,
-    )
-    log.info(f"  {len(train_loader.shard_files)} shards, start_shard={train_loader.start_shard}")
-    return train_loader
 
 
 def _create_webdataset_train_loader(
