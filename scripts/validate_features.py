@@ -1,7 +1,7 @@
 """Validate exported features against fresh inference.
 
 Usage (in interactive session):
-    source slurm/env.sh
+    source slurm_nhr/env.sh
     uv run python scripts/validate_features.py \
         --shard $FEATURES_DIR/dinov3_vitb16/512/shards/00000.pt \
         --image-root $IN21K_IMAGE_DIR \

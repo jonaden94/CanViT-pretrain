@@ -20,7 +20,7 @@ log() { echo "[$(date '+%H:%M:%S')] $*"; }
 log "=== Scan Failed Indices ==="
 log "Job: $SLURM_JOB_ID on $(hostname), CPUs: $SLURM_CPUS_PER_TASK"
 
-source slurm/env.sh
+source slurm_nhr/env.sh
 
 mkdir -p logs
 

@@ -315,8 +315,9 @@ eval batch size (§A2).
 ### A4 results — the Figure-4B comparison (2026-07-30, 5 harness-trained seeds)
 
 Full ADE20K val, c64, squish-512, ONE process at eval batch 32. Produced by
-`plot_policy_curves.py`; artifacts `band_harness_5seed.{png,json}` in the repo root
-(PNG is gitignored, so the numbers live here).
+`plot_policy_curves.py`; the JSON is `unification_docs/band_harness_5seed.json` (moved out
+of the repo root 2026-07-31). The PNG was untracked and has been deleted — regenerate with
+`plot_policy_curves.py --out <path>`; the numbers below are the durable record.
 
 | policy | t0 | t1 | t2 | t3 | t4 |
 |---|---|---|---|---|---|

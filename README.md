@@ -112,13 +112,18 @@ it rather than guessing, and regenerate it with
 On SLURM, use `slurm_nhr/harness_train.sbatch` and copy an existing launcher from
 `slurm_nhr/runs/<group>/` as your template.
 
-Export DINOv3 teacher features once (only needed for `distill` on raw shards):
+The in21k feature webdataset is already built (`$WEBDATASET_DIR`), so nothing below is
+needed for normal runs. To build one from scratch:
 
 ```bash
 uv run python scripts/build_shuffled_index.py \
   --image-root $IN21K_IMAGE_DIR --index-dir $INDEX_DIR --dataset in21k
-sbatch --array=0-99%20 slurm/export_features.sh
+uv run python scripts/export_in21k_features.py --help   # then drive it as an array job
 ```
+
+The SLURM wrapper that used to drive the export (`slurm/export_features.sh`) was deleted
+2026-07-31 with the rest of the Nibi-cluster tooling; the Python script it called remains.
+Write a `slurm_nhr`-style launcher for it if you need to re-export.
 
 Publish a trained checkpoint to the local HF layout (never automatic — always explicit):
 

@@ -6,7 +6,13 @@ via mmap slicing. Forked DataLoader workers share mmap'd pages (copy-on-write).
 scan_tar_headers(tar_path) — slow header scan; for export/bench.
 load_tar_index(tar_path)   — instant load from .idx file; for training.
 
-.idx files are produced by sa1b/build_tar_indexes.py with SHA256 + size.
+.idx files carry SHA256 + size. They used to be produced by `sa1b/build_tar_indexes.py`,
+deleted 2026-07-31 along with the rest of the SA-1B pipeline: no .idx data exists on the
+cluster any more and `slurm_nhr/harness_train.sbatch` REQUIRES `WEBDATASET_DIR`, so the
+sharded-tar path this module serves is unreachable from any production launcher. The
+module is kept because `train/data/__init__.py` still exposes the path (`create_loaders`
+falls back to it when `cfg.webdataset_dir` is unset) — but building a fresh index now
+means restoring that script from git history (see commit deleting sa1b/).
 """
 
 import io
@@ -47,13 +53,15 @@ def scan_tar_headers(tar_path: Path) -> TarIndex:
 def load_tar_index(tar_path: Path) -> TarIndex:
     """Load pre-built .idx file for a tar. Crashes if missing or stale.
 
-    .idx files are built by sa1b/build_tar_indexes.py. Verifies tar file
-    size matches (instant stat() check, no full read).
+    Verifies the tar file size matches (instant stat() check, no full read). The builder
+    was `sa1b/build_tar_indexes.py`, deleted with the SA-1B pipeline — see the module
+    docstring.
     """
     idx_path = tar_path.parent / f"{tar_path.name}.idx"
     assert idx_path.exists(), (
-        f"No .idx for {tar_path.name}. "
-        f"Run: uv run python sa1b/build_tar_indexes.py --tar-dir {tar_path.parent}"
+        f"No .idx for {tar_path.name}. The index builder (sa1b/build_tar_indexes.py) was "
+        f"deleted 2026-07-31 with the SA-1B pipeline; restore it from git history to build "
+        f"one, or use the webdataset path (--cfg.webdataset-dir) instead."
     )
 
     t0 = time.perf_counter()
@@ -63,8 +71,9 @@ def load_tar_index(tar_path: Path) -> TarIndex:
     actual_size = tar_path.stat().st_size
     assert data["tar_size"] == actual_size, (
         f"Tar size mismatch: {tar_path.name} "
-        f"(index={data['tar_size']}, actual={actual_size}). "
-        f"Re-run: uv run python sa1b/build_tar_indexes.py --tar-dir {tar_path.parent} --force"
+        f"(index={data['tar_size']}, actual={actual_size}). The index is stale and its "
+        f"builder (sa1b/build_tar_indexes.py) was deleted 2026-07-31 — restore it from git "
+        f"history to rebuild, or use the webdataset path instead."
     )
 
     index = data["index"]
