@@ -18,3 +18,35 @@ Note: ADE20K train-mIoU (`train_miou_mean`, `best_val_miou_t{t}`) is **deliberat
 logged** by the harness (owner decision, 2026-07-31 — see
 `unification_docs/17-harness-consolidation.md`). Train loss and per-timestep val mIoU are
 unaffected. Old pre-2026-07-31 ade20k wandb runs have `train_miou_mean` panels these will not.
+
+## How to judge these results — mIoU is NOT directly comparable to exp24
+
+**exp24's pin (`24a8500`) PREDATES `68b635f` "ade20k: fix the mIoU reduction order (RE-BASES
+all ADE20K mIoU)" (2026-07-29).** exp30 pins `455bdae`, which includes it. The old path took
+argmax at the 64x64 probe grid then nearest-upsampled, locking every label into an 8x8 pixel
+block; the fix upsamples logits bilinearly and argmaxes at full resolution. The old order is
+strictly coarser — a bug, not an alternative convention.
+
+Measured gain (full 2000-image ADE20K val, both reductions from the same logits):
+**+0.15 / +0.17 / +0.18 / +0.19 pp at t1..t4**, growing with t because the segmentation
+sharpens. Reproducible to 0.01 pp across seeds. CE is unchanged (it has its own bilinear path).
+
+So exp30's mIoU should come out **above** exp24's by roughly +0.2 pp at late timesteps — and
+that is a metric-definition change, **not** an improvement from the unification. Do not read it
+as one. The gain beyond t4 was never measured, so for t9 treat +0.2 pp as a lower bound.
+
+| exp24 reference (STALE basis) | miou_final | miou_mean | exp30 expectation |
+|---|---|---|---|
+| `ade20k-uni16ti-803k` | 0.44443 | 0.43305 | ~0.446 |
+| `ade20k-uni16-1516k` | 0.41953 | 0.40769 | ~0.421 |
+| `ade20k-fovi-ti-1196k` | 0.43838 | 0.41877 | ~0.440 |
+| `ade20k-fovi-1901k` | — | — | no reference (new arm) |
+
+Two further reasons not to expect equality: exp24's probe runs were **unseeded** (`24a8500`'s
+ade20k config has no `seed` field at all; the harness added `seed: int = 0`), and exp24 logged
+**no CE at all**, so there is no re-basing-immune metric to fall back on.
+
+**Therefore the meaningful checks here are relative, not absolute:** the ordering
+`uni16ti > fovi-ti > uni16` should hold, all four should sit in the 0.41-0.45 band, and the
+four exp30 runs are mutually comparable because they share code and a seed. exp30 is the FIRST
+ade20k probe set on the corrected mIoU basis — it becomes the reference for what follows.

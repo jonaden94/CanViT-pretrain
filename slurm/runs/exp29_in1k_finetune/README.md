@@ -24,3 +24,24 @@ the rollout views at the pretrain scale. Both choices follow exp25.
 
 Uses the pretrained probe (`CFG_PROBE_REPO`) fused into the head — a random head here was a
 real bug once (`8f780ba`), so this flag is load-bearing, not cosmetic.
+
+## How to judge these results
+
+in1k reports top-1, which the ADE20K mIoU re-basing does not touch, so **exp25 is a valid
+reference**:
+
+| exp25 reference | top-1 | top-5 |
+|---|---|---|
+| `in1k-uni16ti-803k` | 0.84026 | 0.97222 |
+| `in1k-fovi-ti-1196k` | 0.82786 | — |
+| `in1k-uni16-1516k` | 0.82482 | — |
+| `in1k-fovi-1901k` | — | no reference (new arm) |
+
+Same source checkpoints, same recipe, only the pins differ — so these three should land close
+to those numbers. A large miss is a real signal, not noise.
+
+**The specific failure to watch for:** if the pretrained probe is not fused into the head, the
+finetune starts from a RANDOM classifier and the loss opens near `ln(1000) ~= 6.9` with
+chance-level accuracy. That was a live bug once (fixed `8f780ba`), which is why
+`CFG_PROBE_REPO` is load-bearing here rather than cosmetic. Check the first logged
+`train/full/loss` is well below 6.9.
