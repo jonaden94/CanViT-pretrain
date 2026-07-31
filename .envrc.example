@@ -1,40 +1,49 @@
-# Copy to .envrc and tailor for your machine or cluster:
+# Template for a new machine or cluster. Copy and tailor:
 #   cp .envrc.example .envrc && direnv allow
 #
-# Values below are placeholders. Set PROJECT_STORAGE to a persistent directory
-# where checkpoints, feature shards, and optional local datasets can live.
+# Every variable below is read either by this project or by one of its libraries.
+# PROJECT_STORAGE is the single knob: point it at a persistent directory that can
+# hold run artifacts and, if you keep them locally, the datasets.
+#
+# NOTE: every line must be safe under `set -e`. A bare `cmd1 && cmd2` that
+# evaluates to false kills the shell. Use `if` or `|| true`.
 export PROJECT_STORAGE=${PROJECT_STORAGE:-$HOME/canvit-storage}
 
 # Caches
-export HF_HOME="$SCRATCH/.huggingface"
-export TORCH_HOME="$SCRATCH/.torch"
-export TORCH_COMPILE_CACHE_DIR="$SCRATCH/.torch_compile_cache"
+export HF_HOME="$PROJECT_STORAGE/.cache/huggingface"
+export TORCH_HOME="$PROJECT_STORAGE/.cache/torch"
+export TORCH_COMPILE_CACHE_DIR="$PROJECT_STORAGE/.cache/torch_compile"
 
-# Datasets
-export IN21K_IMAGE_DIR=/path/to/imagenet21k
-export IN1K_VAL_IMAGE_DIR=/path/to/ILSVRC2012/val
-export ADE20K_ZIP=$PROJECT_STORAGE/datasets/ade20k/ADEChallengeData2016.zip
-export SA1B_TAR_DIR=$PROJECT_STORAGE/datasets/sa1b/tars
-export SA1B_LINKS="sa1b/sa1b_links.tsv"
+# Datasets. distill + in1k read WebDataset tar shards; ade20k and the in1k
+# validation set read ordinary directories.
+export WEBDATASET_DIR=/path/to/webdataset-imagenet-21k-with-features   # distill training shards (must contain train-shuffled/)
+export VAL_DIR=/path/to/imagenet1k-val                                # distill validation, synset-named class subfolders
+export VAL_INDEX_DIR="$PROJECT_STORAGE/dataset_indexes"               # cache for the validation-image parquet index (scanned once, then reused)
+export ADE20K_ROOT=/path/to/ADEChallengeData2016                       # extracted, not the zip
+export IN1K_TRAIN_DIR=/path/to/webdataset-imagenet-1k/train-shuffled   # in1k training shards
+export IN1K_VAL_DIR=/path/to/imagenet1k-val                            # in1k validation ImageFolder
 
-# Storage
-export INDEX_DIR="$SCRATCH/dataset_indexes"
-export LOGS_DIR=$PROJECT_STORAGE/logs                    # training run artifacts: {run_group}/{run_name}/{checkpoints,log}/
-export CHECKPOINTS_DIR=$PROJECT_STORAGE/checkpoints      # static model snapshots (teacher weights, etc.)
-export FEATURES_DIR=$PROJECT_STORAGE/dinov3_dense_features
-export SA1B_FEATURES_DIR=$PROJECT_STORAGE/sa1b_dense_features
+# Where runs write
+export LOGS_DIR=$PROJECT_STORAGE/logs               # run artifacts: {run_group}/{run_name}/{checkpoints,log,visualization}/
+export CHECKPOINTS_DIR=$PROJECT_STORAGE/checkpoints # published probe / classifier snapshots
 
-# Known checkpoints
-export DINOV3_VITB16_CKPT="$CHECKPOINTS_DIR/dinov3/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth"
-export CANVIT_FLAGSHIP_CKPT="$CHECKPOINTS_DIR/CanViT-flagship.pt"
+# Tracker: Weights & Biases by default (--cfg.tracker comet|none to switch)
+export WANDB_PROJECT=canvit-train
+export WANDB_ENTITY=""                              # leave empty to use your default account
+export WANDB_DIR=$PROJECT_STORAGE                   # where wandb writes its run files
 
-# Comet
-export COMET_WORKSPACE=your-workspace
-export COMET_PROJECT_NAME=canvit-train
+# Only if you set --cfg.tracker comet
+# export COMET_WORKSPACE=your-workspace
+# export COMET_PROJECT_NAME=canvit-train
+# if [ -f ~/comet_api_key.txt ]; then export COMET_API_KEY=$(cat ~/comet_api_key.txt); fi
 
-# Credentials (optional)
-# NOTE: every line must be safe under `set -e`. A bare `cmd1 && cmd2` that
-# evaluates to false kills the shell.  Use `if` or `|| true`.
-if [ -f ~/comet_api_key.txt ]; then export COMET_API_KEY=$(cat ~/comet_api_key.txt); fi
+# HuggingFace credentials — needed to pull the DINOv3 teacher
+# (facebook/dinov3-vitb16-pretrain-lvd1689m) and pretrained CanViT / probe
+# checkpoints. `hf auth login` writes $HF_HOME/token, which the last line picks up.
 if [ -f ~/hf_token.txt ]; then export HF_TOKEN=$(cat ~/hf_token.txt); fi
 if [ -f "${HF_HOME:-}/token" ] && [ -z "${HF_TOKEN:-}" ]; then export HF_TOKEN=$(cat "$HF_HOME/token"); fi
+
+# Only for the feature-export helpers in scripts/ (not used by training)
+# export IN21K_IMAGE_DIR=/path/to/imagenet21k
+# export INDEX_DIR="$PROJECT_STORAGE/dataset_indexes"
+# export FEATURES_DIR=$PROJECT_STORAGE/dinov3_dense_features
