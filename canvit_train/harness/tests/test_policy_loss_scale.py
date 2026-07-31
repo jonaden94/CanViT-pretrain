@@ -13,7 +13,7 @@ qband band while `rl_train` landed on it (doc 15 §A5).
 import torch
 from torch import Tensor
 
-from canvit_train.train.rl import qreg_loss
+from canvit_train.harness.rl import qreg_loss
 
 H, B, A, N_GLIMPSES = 4, 6, 32, 5  # horizon 4 policy glimpses => t0 + 4 = 5 total
 

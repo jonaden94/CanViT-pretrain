@@ -33,11 +33,11 @@ from typing import Annotated, Any, Literal
 import tyro
 
 from canvit_train.ade20k.config import Ade20kConfig
+from canvit_train.distill.config import Config
+from canvit_train.harness.config import JointPolicyConfig
 from canvit_train.harness.run import RunSettings, run
-from canvit_train.harness.spec import (
-    BpttSpec, GroupOptim, ScheduleSpec, TrainSpec, fixed_horizon_bptt)
+from canvit_train.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TrainSpec, fixed_horizon_bptt
 from canvit_train.in1k.config import In1kConfig
-from canvit_train.train.config import Config, JointPolicyConfig
 
 log = logging.getLogger(__name__)
 
@@ -155,7 +155,7 @@ class DistillCmd:
     opts: HarnessOpts = field(default_factory=HarnessOpts)
 
     def build(self) -> tuple[Any, RunSettings]:
-        from canvit_train.tasks.distill.task import DistillRunTask
+        from canvit_train.distill.task import DistillRunTask
 
         settings = RunSettings(
             # The shard-schedule window IS the job length for distill: a job trains
@@ -200,7 +200,7 @@ class Ade20kCmd:
     opts: HarnessOpts = field(default_factory=HarnessOpts)
 
     def build(self) -> tuple[Any, RunSettings]:
-        from canvit_train.tasks.ade20k.task import Ade20kRunTask
+        from canvit_train.ade20k.task import Ade20kRunTask
 
         settings = RunSettings(
             n_steps=self.opts.n_steps if self.opts.n_steps is not None else self.cfg.max_steps,
@@ -232,7 +232,7 @@ class In1kCmd:
     opts: HarnessOpts = field(default_factory=HarnessOpts)
 
     def build(self) -> tuple[Any, RunSettings]:
-        from canvit_train.tasks.in1k.task import In1kRunTask
+        from canvit_train.in1k.task import In1kRunTask
 
         # Per-job step budget = the shard-schedule window (cfg.steps_per_job; None => one
         # job of max_steps). The LR-cosine horizon is always the FULL run (cfg.max_steps),

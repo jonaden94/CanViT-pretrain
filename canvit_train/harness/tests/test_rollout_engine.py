@@ -15,11 +15,11 @@ from canvit_pytorch import create_backbone
 from torch import nn
 
 from canvit_train import CanViTForPretraining, CanViTForPretrainingConfig
+from canvit_train.harness.config import FoveatedScaleConfig
 from canvit_train.harness.rollout import GlimpseOut, run_rollout, sample_n_glimpses
+from canvit_train.harness.selector import RandomSelector
 from canvit_train.harness.spec import BpttSpec
-from canvit_train.train.config import FoveatedScaleConfig
-from canvit_train.train.selector import RandomSelector
-from canvit_train.train.viewpoint import ViewpointType
+from canvit_train.harness.viewpoint import ViewpointType
 
 _B, _G, _D = 2, 8, 384
 _DEVICE = torch.device("cpu")

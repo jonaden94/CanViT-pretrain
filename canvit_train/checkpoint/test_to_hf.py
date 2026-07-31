@@ -92,8 +92,9 @@ def _harness_raw(patcher: str, *, patch_stride: int | None = None) -> dict:
     """
     from types import SimpleNamespace
 
-    from canvit_train.tasks.distill.task import DistillRunTask
-    from canvit_train.train.config import Config, FoveatedScaleConfig
+    from canvit_train.distill.config import Config
+    from canvit_train.distill.task import DistillRunTask
+    from canvit_train.harness.config import FoveatedScaleConfig
 
     cfg = Config(webdataset_dir=Path("/nonexistent"), patch_stride=patch_stride)
     cfg.model.patcher_name = patcher

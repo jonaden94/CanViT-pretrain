@@ -101,8 +101,6 @@ exclude = ["throwaway", "misc"]
 select = ["E", "F", "I", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
-# Sets torch._functorch.config before imports (required).
-"canvit_train/train/loop.py" = ["E402"]
 # Harness entry point: sets MPLCONFIGDIR + Agg before matplotlib is imported (DDP-safety).
 "canvit_train/harness/run.py" = ["E402"]
 

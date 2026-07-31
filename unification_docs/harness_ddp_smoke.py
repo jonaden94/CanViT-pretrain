@@ -30,13 +30,13 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 import torch
 from canvit_pytorch import CanViTForSemanticSegmentation
 
+from canvit_train.ade20k.task import POLICY_FEATURE_GROUPS, BoundAde20kTask
 from canvit_train.harness import ddp
+from canvit_train.harness.config import FoveatedScaleConfig, JointPolicyConfig
 from canvit_train.harness.loop import apply_requires_grad, run_training_loop
 from canvit_train.harness.optim import build_optimizer_and_scheduler
 from canvit_train.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TrainSpec
-from canvit_train.tasks.ade20k.task import POLICY_FEATURE_GROUPS, BoundAde20kTask
-from canvit_train.train.config import FoveatedScaleConfig, JointPolicyConfig
-from canvit_train.train.viewpoint import Viewpoint, ViewpointType
+from canvit_train.harness.viewpoint import Viewpoint, ViewpointType
 
 OUT = Path("/mnt/vast-nhr/projects/nib00021/jonathan/_harness_smoke_ckpts/ddp")
 G, IMG, CLASSES, PER_RANK, STEPS = 8, 224, 20, 2, 6

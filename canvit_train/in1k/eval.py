@@ -10,7 +10,7 @@ import logging
 import torch
 import torch.distributed as tdist
 
-from ..train import dist as ddp
+from ..harness import dist as ddp
 from .config import In1kConfig
 from .metrics import TopKAccuracy
 from .rollout import consumes_full_image, rollout_cls_tokens
@@ -25,7 +25,7 @@ def _policy_rollout_cls(*, clf, images, joint, n, canvas_grid, glimpse_px, amp_c
     from canvit_pytorch import sample_at_viewpoint
 
     from ..harness.eval_viewpoints import deploy_rollout_viewpoints
-    from ..train.viewpoint import ViewpointType
+    from ..harness.viewpoint import ViewpointType
     from .rollout import derive_glimpse_px
 
     B = images.shape[0]

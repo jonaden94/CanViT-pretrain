@@ -18,16 +18,16 @@ import torch
 from canvit_pytorch import create_backbone
 
 from canvit_train import CanViTForPretraining, CanViTForPretrainingConfig
+from canvit_train.distill.data.webdataset import WebDatasetTrainLoader, init_normalizer_stats_from_tar
+from canvit_train.distill.loss import DistillTask
+from canvit_train.distill.task import BoundDistillTask
 from canvit_train.harness.checkpoint import find_latest, load_checkpoint, restore_into
+from canvit_train.harness.config import FoveatedScaleConfig
 from canvit_train.harness.loop import apply_requires_grad, run_training_loop
 from canvit_train.harness.optim import build_optimizer_and_scheduler
+from canvit_train.harness.selector import RandomSelector
 from canvit_train.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TaskCaps, TrainSpec
-from canvit_train.tasks.distill.task import BoundDistillTask
-from canvit_train.train.config import FoveatedScaleConfig
-from canvit_train.train.data.webdataset import WebDatasetTrainLoader, init_normalizer_stats_from_tar
-from canvit_train.train.selector import RandomSelector
-from canvit_train.train.task import DistillTask
-from canvit_train.train.viewpoint import ViewpointType
+from canvit_train.harness.viewpoint import ViewpointType
 
 TRAIN_DIR = Path("/mnt/lustre-rzg/workspaces/ws/nib00021/u25995-inet21k-feat/"
                   "webdataset-imagenet-21k-with-features/train-shuffled")

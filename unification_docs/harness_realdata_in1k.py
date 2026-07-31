@@ -29,16 +29,16 @@ import torch
 from canvit_pytorch import CanViTForImageClassification
 
 from canvit_train.harness.checkpoint import find_latest, load_checkpoint, restore_into
+from canvit_train.harness.config import FoveatedScaleConfig
 from canvit_train.harness.loop import apply_requires_grad, run_training_loop
 from canvit_train.harness.optim import build_optimizer_and_scheduler
+from canvit_train.harness.selector import RandomSelector
 from canvit_train.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TaskCaps, TrainSpec
+from canvit_train.harness.viewpoint import ViewpointType
 from canvit_train.in1k.config import NUM_CLASSES, In1kConfig
 from canvit_train.in1k.data import make_train_loader
 from canvit_train.in1k.rollout import consumes_full_image
-from canvit_train.tasks.in1k.task import BoundIn1kTask
-from canvit_train.train.config import FoveatedScaleConfig
-from canvit_train.train.selector import RandomSelector
-from canvit_train.train.viewpoint import ViewpointType
+from canvit_train.in1k.task import BoundIn1kTask
 
 TRAIN_DIR = Path("/user/henrich1/u25995/jonathan/datasets/"
                  "webdataset-imagenet-1k-no-features/train-shuffled")

@@ -23,14 +23,15 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import torch
 
+from canvit_train.ade20k.config import Ade20kConfig
+from canvit_train.ade20k.task import Ade20kRunTask
+from canvit_train.distill.config import Config
+from canvit_train.distill.task import DistillRunTask
+from canvit_train.harness.config import JointPolicyConfig
 from canvit_train.harness.run import RunSettings, run
 from canvit_train.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TrainSpec
-from canvit_train.tasks.ade20k.task import Ade20kRunTask
-from canvit_train.tasks.distill.task import DistillRunTask
-from canvit_train.tasks.in1k.task import In1kRunTask
-from canvit_train.ade20k.config import Ade20kConfig
 from canvit_train.in1k.config import In1kConfig
-from canvit_train.train.config import Config, JointPolicyConfig
+from canvit_train.in1k.task import In1kRunTask
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 

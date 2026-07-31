@@ -80,6 +80,32 @@ it runs. The three vars are optional and independent; omit them to fall back to
 the venv's (editable, local) install. See
 `slurm/archive/runs/jon_exp21_modulation/*.sh` for examples.
 
+## Package layout
+
+One rule: **`harness/` holds the orchestrator and everything shared; each task folder
+holds only what is specific to that task.**
+
+```
+canvit_train/
+├── harness/      the single entry point + every shared primitive
+│                 run cli loop rollout spec optim checkpoint ddp policy eval_viewpoints
+│                 config viewpoint selector rl joint scheduler ema dist tracker schedule viz/
+├── distill/      DINOv3 latent distillation (pretraining)
+├── ade20k/       ADE20K segmentation probe / finetune
+├── in1k/         ImageNet-1k linear probe / full finetune
+├── checkpoint/   to_hf — publish a trained checkpoint to the HF layout
+└── datasets/     small dataset helpers
+```
+
+Each task folder has the same shape: `task.py` (the harness adapter — build model,
+loaders, eval, viz hooks), `config.py` (that task's knobs), plus its own data / metrics /
+rollout helpers.
+
+> Before 2026-07-31 the shared primitives lived in a folder called `train/`, mixed in
+> with distill's own code — distill was once the whole repo, so its files never needed a
+> task-name prefix. Nothing about that was intentional design; see
+> `unification_docs/18-package-restructure.md`.
+
 ## Run
 
 **There is one training entry point.** Every task and every training configuration goes

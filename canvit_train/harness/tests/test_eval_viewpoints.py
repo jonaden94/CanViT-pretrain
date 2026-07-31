@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from canvit_train.harness.config import FoveatedScaleConfig
 from canvit_train.harness.eval_viewpoints import (
     HISTORICAL_DEFAULTS,
     OPEN_LOOP,
@@ -23,7 +24,6 @@ from canvit_train.harness.eval_viewpoints import (
     open_loop_viewpoints,
     resolve,
 )
-from canvit_train.train.config import FoveatedScaleConfig
 
 _B, _N, _DEV = 3, 5, torch.device("cpu")
 _FS = FoveatedScaleConfig()
@@ -45,8 +45,8 @@ def test_auto_resolves_to_each_tasks_historical_trajectory(task, is_fov, expecte
 def test_every_task_config_still_defaults_to_auto():
     """A task whose config drifted off "auto" would silently change its own history."""
     from canvit_train.ade20k.config import Ade20kConfig
+    from canvit_train.distill.config import Config
     from canvit_train.in1k.config import In1kConfig
-    from canvit_train.train.config import Config
 
     assert Config().eval_policy == "auto"
     assert Ade20kConfig().eval_policy == "auto"
@@ -54,7 +54,7 @@ def test_every_task_config_still_defaults_to_auto():
 
 
 def test_distill_uniform_is_bit_identical_to_the_old_generator():
-    from canvit_train.train.viewpoint import make_eval_viewpoints
+    from canvit_train.harness.viewpoint import make_eval_viewpoints
 
     torch.manual_seed(0)
     old = make_eval_viewpoints(_B, _DEV, n_viewpoints=_N)
@@ -65,7 +65,7 @@ def test_distill_uniform_is_bit_identical_to_the_old_generator():
 
 
 def test_distill_foveated_is_bit_identical_to_the_old_generator():
-    from canvit_train.train.viewpoint import make_eval_viewpoints_foveated
+    from canvit_train.harness.viewpoint import make_eval_viewpoints_foveated
 
     old = make_eval_viewpoints_foveated(_B, _DEV, n_viewpoints=_N, scale=2.0)
     new = open_loop_viewpoints("fixation_grid", batch_size=_B, device=_DEV, n=_N,
@@ -144,7 +144,7 @@ def test_deploy_forces_pure_argmax():
 
 
 def test_deploy_requires_a_full_t0_anchor():
-    from canvit_train.train.viewpoint import ViewpointType
+    from canvit_train.harness.viewpoint import ViewpointType
 
     with pytest.raises(AssertionError, match="FULL t0 anchor"):
         deploy_rollout_viewpoints(joint=_tiny_joint(), advance=lambda vp, st, t: st,
@@ -156,7 +156,7 @@ def test_deploy_rollout_is_closed_loop_and_restores_train_mode():
     """Each glimpse must be chosen from the state the previous one produced (that is
     what 'closed loop' means), and a validation must not leave the scorer in eval mode
     — the next training step would then update no BatchNorm statistics."""
-    from canvit_train.train.viewpoint import ViewpointType
+    from canvit_train.harness.viewpoint import ViewpointType
 
     joint = _tiny_joint()
     joint.scorer.train()
@@ -188,8 +188,8 @@ def _tiny_joint(prime_on_policy: float = 1.0):
 
     import torch.nn as nn
 
-    from canvit_train.train.config import FoveatedScaleConfig
-    from canvit_train.train.selector import PolicySelector, RandomSelector
+    from canvit_train.harness.config import FoveatedScaleConfig
+    from canvit_train.harness.selector import PolicySelector, RandomSelector
 
     class _Scorer(nn.Module):
         def __init__(self):
@@ -235,7 +235,7 @@ def test_ade20k_best_metric_follows_the_eval_policy(eval_policy, expected):
     from dataclasses import replace
 
     from canvit_train.ade20k.config import Ade20kConfig
-    from canvit_train.tasks.ade20k.task import Ade20kRunTask
+    from canvit_train.ade20k.task import Ade20kRunTask
 
     task = Ade20kRunTask(replace(Ade20kConfig(), eval_policy=eval_policy))
     assert task.best_metric == expected

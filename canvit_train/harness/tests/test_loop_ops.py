@@ -4,13 +4,17 @@ resume start-step hook. The full run()-level resume (find_latest -> restore -> c
 is validated on real data by the GPU resume smoke.
 """
 
-import canvit_train.harness.loop as L
 import torch
 from canvit_pytorch import CanViTForSemanticSegmentation
 from torch import nn
 
+import canvit_train.harness.loop as L
 from canvit_train.ade20k.config import Ade20kConfig
 from canvit_train.ade20k.data import IGNORE_LABEL, NUM_CLASSES
+from canvit_train.ade20k.task import Ade20kRunTask, BoundAde20kTask
+from canvit_train.distill.config import Config
+from canvit_train.distill.task import DistillRunTask
+from canvit_train.harness.config import FoveatedScaleConfig
 from canvit_train.harness.loop import (
     apply_requires_grad,
     grad_norms_by_module,
@@ -18,12 +22,9 @@ from canvit_train.harness.loop import (
     run_training_loop,
 )
 from canvit_train.harness.optim import build_optimizer_and_scheduler
+from canvit_train.harness.selector import RandomSelector
 from canvit_train.harness.spec import BpttSpec, GroupOptim, ScheduleSpec, TrainSpec
-from canvit_train.tasks.ade20k.task import Ade20kRunTask, BoundAde20kTask
-from canvit_train.tasks.distill.task import DistillRunTask
-from canvit_train.train.config import Config, FoveatedScaleConfig
-from canvit_train.train.selector import RandomSelector
-from canvit_train.train.viewpoint import ViewpointType
+from canvit_train.harness.viewpoint import ViewpointType
 
 _B, _G, _IMG = 2, 8, 224
 
@@ -186,9 +187,9 @@ def test_checkpoint_metadata_history_accumulates_and_carries_view_scale():
     """run() accumulates training_config_history/provenance_history across resumes
     (to_hf reads them to recover pretrain_view_scale). Here we pin the distill task's
     view-scale stamping + the accumulation rule run() applies."""
-    from canvit_train.train.config import FoveatedScaleConfig
-
     from types import SimpleNamespace
+
+    from canvit_train.harness.config import FoveatedScaleConfig
 
     cfg = Config(webdataset_dir="/nonexistent", patch_stride=8)
     cfg.model.patcher_name = "foveated"
@@ -266,9 +267,9 @@ def test_joint_clips_model_and_scorer_separately(monkeypatch):
     """train/loop.py clips `trainable` and `joint.scorer.parameters()` in TWO independent
     calls, each to grad_clip. One joint norm over the union would couple their magnitudes
     (a big scorer gradient would shrink the model's update), so the split is load-bearing."""
+    from canvit_train.ade20k.task import POLICY_FEATURE_GROUPS as ADE_GROUPS
+    from canvit_train.harness.config import JointPolicyConfig
     from canvit_train.harness.policy import build_policy
-    from canvit_train.tasks.ade20k.task import POLICY_FEATURE_GROUPS as ADE_GROUPS
-    from canvit_train.train.config import JointPolicyConfig
 
     seg, _, _, _, sel = _setup()
     gen = torch.Generator(device="cpu").manual_seed(0)

@@ -22,9 +22,9 @@ from canvit_pytorch.policies import random_viewpoints
 from canvit_pytorch.viewpoint import Viewpoint
 from torch import Tensor
 
-from ..train.config import FoveatedScaleConfig
-from ..train.selector import RandomSelector
-from ..train.viewpoint import ViewpointType
+from ..harness.config import FoveatedScaleConfig
+from ..harness.selector import RandomSelector
+from ..harness.viewpoint import ViewpointType
 
 
 def consumes_full_image(seg: CanViTForSemanticSegmentation) -> bool:

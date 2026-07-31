@@ -27,10 +27,10 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from canvit_train.ade20k.config import Ade20kConfig  # noqa: E402
 from canvit_train.ade20k.data import make_ade20k_loaders  # noqa: E402
+from canvit_train.ade20k.task import Ade20kRunTask  # noqa: E402
 from canvit_train.harness.eval_viewpoints import PAPER_TABLE4_C64  # noqa: E402
 from canvit_train.harness.loop import apply_requires_grad  # noqa: E402
 from canvit_train.harness.spec import TrainSpec  # noqa: E402
-from canvit_train.tasks.ade20k.task import Ade20kRunTask  # noqa: E402
 
 p = argparse.ArgumentParser()
 p.add_argument("--policy-ckpts", nargs="*", default=[], help="harness *.policy.pt files")

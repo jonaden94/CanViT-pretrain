@@ -20,7 +20,7 @@ from canvit_pytorch.viewpoint import Viewpoint
 from torch import Tensor
 
 from ..ade20k.rollout import consumes_full_image, derive_glimpse_px, make_random_viewpoints
-from ..train.config import FoveatedScaleConfig
+from ..harness.config import FoveatedScaleConfig
 
 __all__ = [
     "consumes_full_image",

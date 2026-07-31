@@ -34,10 +34,10 @@ from canvit_pytorch.policy import (
     fixation_candidates,
 )
 
-from canvit_train.train.config import FoveatedScaleConfig, JointPolicyConfig
-from canvit_train.train.joint import JointPolicy
-from canvit_train.train.rl import PG, VPG, Objective, QReg
-from canvit_train.train.selector import PolicySelector, RandomSelector
+from canvit_train.harness.config import FoveatedScaleConfig, JointPolicyConfig
+from canvit_train.harness.joint import JointPolicy
+from canvit_train.harness.rl import PG, VPG, Objective, QReg
+from canvit_train.harness.selector import PolicySelector, RandomSelector
 
 log = logging.getLogger(__name__)
 

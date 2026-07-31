@@ -20,7 +20,7 @@ Run: ``.venv-cu126/bin/python -m pytest canvit_train/harness/tests/test_vpg.py``
 import torch
 import torch.nn.functional as F
 
-from canvit_train.train.rl import PG, VPG, QReg, vpg_loss
+from canvit_train.harness.rl import PG, VPG, QReg, vpg_loss
 
 # --- 1. faithfulness to autoreg's _reinforce_loss ---------------------------------
 
@@ -190,7 +190,7 @@ def test_advantage_uses_a_detached_baseline():
 def test_only_vpg_defers_credit():
     """`defers_credit` is the single switch the rollout branches on; if QReg/PG ever
     returned True their inline path (and the parity digest) would silently change."""
-    from canvit_train.train.joint import JointPolicy
+    from canvit_train.harness.joint import JointPolicy
 
     def _jp(obj):
         return JointPolicy(
@@ -219,7 +219,7 @@ def test_vpg_defaults_are_autoreg_exp12s_values():
 
 
 def test_config_exposes_vpg_and_keeps_the_old_default():
-    from canvit_train.train.config import JointPolicyConfig
+    from canvit_train.harness.config import JointPolicyConfig
 
     c = JointPolicyConfig()
     assert c.objective == "qreg", "adding vpg must not change the default objective"
@@ -234,9 +234,9 @@ def test_chunked_plus_coupled_policy_is_refused_for_vpg():
     trajectory loss still needs. Caught at setup, not as an autograd error at step 0."""
     import pytest
 
+    from canvit_train.harness.joint import JointPolicy
     from canvit_train.harness.policy import check_credit_regime
     from canvit_train.harness.spec import BpttSpec, GroupOptim, TrainSpec
-    from canvit_train.train.joint import JointPolicy
 
     def _jp(obj):
         return JointPolicy(
@@ -272,8 +272,8 @@ def test_legacy_distill_loop_refuses_vpg_rather_than_silently_building_pg():
     training a different algorithm."""
     import pytest
 
-    from canvit_train.train.config import FoveatedScaleConfig, JointPolicyConfig
-    from canvit_train.train.joint import build_joint_policy
+    from canvit_train.harness.config import FoveatedScaleConfig, JointPolicyConfig
+    from canvit_train.harness.joint import build_joint_policy
 
     with pytest.raises(NotImplementedError, match="harness"):
         build_joint_policy(

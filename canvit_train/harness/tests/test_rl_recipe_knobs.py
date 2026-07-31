@@ -17,9 +17,9 @@ from types import SimpleNamespace
 import pytest
 from torch import nn
 
+from canvit_train.harness.config import JointPolicyConfig
 from canvit_train.harness.optim import build_optimizer_and_scheduler
 from canvit_train.harness.spec import GroupOptim, ScheduleSpec, TrainSpec
-from canvit_train.train.config import JointPolicyConfig
 
 # The reference values, transcribed from UPSTREAM CanViT-PyTorch-RL —
 # src/canvit_pytorch_rl/training/config.py: lr=2e-4 (:81), weight_decay=1e-2 (:85),
@@ -75,11 +75,11 @@ def test_policy_group_gets_the_rl_optimizer_recipe_on_every_task(task_name):
 
     if task_name == "ade20k":
         from canvit_train.ade20k.config import Ade20kConfig
-        from canvit_train.tasks.ade20k.task import Ade20kRunTask
+        from canvit_train.ade20k.task import Ade20kRunTask
         task = Ade20kRunTask(replace(Ade20kConfig(), max_steps=8000))
     else:
         from canvit_train.in1k.config import In1kConfig
-        from canvit_train.tasks.in1k.task import In1kRunTask
+        from canvit_train.in1k.task import In1kRunTask
         task = In1kRunTask(replace(In1kConfig(), max_steps=8000), total_steps=8000)
 
     spec = resolve_spec(task, "policy_only", lr=1e-3, wd=1e-4)
@@ -96,8 +96,8 @@ def test_distill_has_no_config_time_total_so_the_frac_warns_instead_of_vanishing
     i.e. reintroduced gap #2 on exactly the task the owner asked me to keep in mind."""
     import logging
 
+    from canvit_train.distill.config import Config
     from canvit_train.harness.cli import _policy_warmup_steps
-    from canvit_train.train.config import Config
 
     task = SimpleNamespace(cfg=Config(), name="distill")
     assert not hasattr(Config(), "max_steps"), "if distill gains max_steps, drop this test"
@@ -107,8 +107,8 @@ def test_distill_has_no_config_time_total_so_the_frac_warns_instead_of_vanishing
 
 
 def test_absolute_warmup_steps_win_and_need_no_total():
+    from canvit_train.distill.config import Config
     from canvit_train.harness.cli import _policy_warmup_steps
-    from canvit_train.train.config import Config
 
     task = SimpleNamespace(cfg=Config(), name="distill")
     pol = JointPolicyConfig(policy_warmup_steps=1000)
@@ -119,8 +119,8 @@ def test_policy_warmup_frac_zero_disables_the_ramp():
     from dataclasses import replace
 
     from canvit_train.ade20k.config import Ade20kConfig
+    from canvit_train.ade20k.task import Ade20kRunTask
     from canvit_train.harness.cli import resolve_spec
-    from canvit_train.tasks.ade20k.task import Ade20kRunTask
 
     task = Ade20kRunTask(replace(Ade20kConfig(), max_steps=8000),
                          rl=JointPolicyConfig(policy_warmup_frac=0.0))
@@ -208,7 +208,7 @@ def test_frozen_mode_honours_probe_repo():
     from dataclasses import replace
 
     from canvit_train.ade20k.config import Ade20kConfig
-    from canvit_train.tasks.ade20k.task import Ade20kRunTask
+    from canvit_train.ade20k.task import Ade20kRunTask
 
     src = inspect.getsource(Ade20kRunTask.build_model)
     assert "if self.cfg.probe_repo:" in src, "must not be gated on mode any more"
@@ -226,7 +226,7 @@ def test_policy_without_a_probe_warns(caplog):
     import torch
 
     from canvit_train.ade20k.config import Ade20kConfig
-    from canvit_train.tasks.ade20k.task import Ade20kRunTask
+    from canvit_train.ade20k.task import Ade20kRunTask
 
     task = Ade20kRunTask(replace(Ade20kConfig(), mode="frozen", probe_repo=None, canvas_grid=8))
     with caplog.at_level(logging.WARNING):
@@ -268,7 +268,7 @@ def test_harness_policy_run_warns_when_not_band_comparable(caplog):
     import torch
 
     from canvit_train.ade20k.config import Ade20kConfig
-    from canvit_train.tasks.ade20k.task import Ade20kRunTask
+    from canvit_train.ade20k.task import Ade20kRunTask
 
     cfg = replace(Ade20kConfig(), mode="frozen", probe_repo="canvit/probe-x",
                   canvas_grid=8, resize_mode="center_crop")

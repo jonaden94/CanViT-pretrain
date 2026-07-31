@@ -31,10 +31,10 @@ import torch
 
 from canvit_train.harness import ddp
 from canvit_train.harness.checkpoint import save_checkpoint
+from canvit_train.harness.ema import EMATracker
 from canvit_train.harness.rollout import run_rollout
 from canvit_train.harness.spec import TrainSpec
-from canvit_train.train.ema import EMATracker
-from canvit_train.train.viewpoint import ViewpointType
+from canvit_train.harness.viewpoint import ViewpointType
 
 log = logging.getLogger(__name__)
 

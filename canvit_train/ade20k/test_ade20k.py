@@ -96,7 +96,7 @@ def test_foveated_viewpoints_use_pretraining_scale() -> None:
     law, not the uniform safe-box one. exp22-fovi pretrained at fixed_scale=2.0;
     feeding it safe-box scales (<=1) made mIoU DROP with each glimpse (0.217 ->
     0.198) because every glimpse was out of distribution."""
-    from ..train.config import FoveatedScaleConfig
+    from ..harness.config import FoveatedScaleConfig
 
     fs = FoveatedScaleConfig(mode="fixed", fixed_scale=2.0)
     vps = make_random_viewpoints(

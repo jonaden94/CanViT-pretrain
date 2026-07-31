@@ -20,12 +20,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
+from canvit_pytorch.preprocess import imagenet_denormalize
 from matplotlib.figure import Figure
 from torch import Tensor
 
-from canvit_pytorch.preprocess import imagenet_denormalize
-
-from ..train.viz.pca import fit_pca
+from ..harness.viz.pca import fit_pca
 from .data import IGNORE_LABEL, NUM_CLASSES
 from .metrics import upsample_preds
 

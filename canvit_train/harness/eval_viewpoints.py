@@ -32,7 +32,7 @@ import torch
 from canvit_pytorch.viewpoint import Viewpoint
 
 if TYPE_CHECKING:  # the task configs import EvalPolicy from here, so stay dependency-light
-    from canvit_train.train.config import FoveatedScaleConfig
+    from canvit_train.harness.config import FoveatedScaleConfig
 
 EvalPolicy = Literal["auto", "coarse_to_fine", "random", "full", "fixation_grid",
                      "entropy_coarse_to_fine", "policy"]
@@ -124,7 +124,7 @@ def open_loop_viewpoints(
     from canvit_pytorch.policies import repeated_full_scene
 
     from canvit_train.ade20k.rollout import make_random_viewpoints
-    from canvit_train.train.viewpoint import make_eval_viewpoints, make_eval_viewpoints_foveated
+    from canvit_train.harness.viewpoint import make_eval_viewpoints, make_eval_viewpoints_foveated
 
     if policy == "coarse_to_fine":
         return make_eval_viewpoints(batch_size, device, n_viewpoints=n)
@@ -134,7 +134,7 @@ def open_loop_viewpoints(
     if policy == "full":
         return repeated_full_scene(batch_size, device, n)
     if policy == "random":
-        from canvit_train.train.config import FoveatedScaleConfig
+        from canvit_train.harness.config import FoveatedScaleConfig
         # Only the foveated branch reads it, and there a WRONG scale is not a soft
         # mismatch — `fix_size = scale * H` puts every glimpse out of distribution and
         # mIoU falls as glimpses accumulate (job 15025338). So silently defaulting it for
@@ -190,7 +190,7 @@ def deploy_rollout_viewpoints(
     into training. Train mode is restored on the way out.
     """
     from canvit_train.harness.rollout import _to_vp
-    from canvit_train.train.viewpoint import ViewpointType
+    from canvit_train.harness.viewpoint import ViewpointType
 
     # t0 must be the FULL anchor: the scorer needs a canvas to read, and at t=0 there is
     # no state yet. FULL delegates to the RandomSelector fallback, which needs none. This

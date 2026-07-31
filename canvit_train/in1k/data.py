@@ -3,7 +3,7 @@
 TRAIN: WebDataset shards of ``jpg`` + ``json`` (``{"label": int}``) — the
 CanViT-train repo's IN1k-no-features set (images pre-resized to scene_size).
 Decoded with train augmentation (RandomResizedCrop + flip). Uses the SAME resumable,
-shard-aligned schedule as distill pretraining (``canvit_train.train.data.schedule``):
+shard-aligned schedule as distill pretraining (``canvit_train.harness.schedule``):
 a seeded global shard permutation, each SLURM-array job consuming a contiguous block so
 the next job resumes at the next shard slice. A seeded within-stream shuffle buffer adds
 cross-shard mixing (the shards are already globally pre-shuffled at creation). This
@@ -28,7 +28,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from torchvision import transforms as T
 from torchvision.datasets import ImageFolder
 
-from ..train.data.schedule import compute_schedule_slice, compute_shards_per_gpu
+from ..harness.schedule import compute_schedule_slice, compute_shards_per_gpu
 from .config import In1kConfig
 
 log = logging.getLogger(__name__)

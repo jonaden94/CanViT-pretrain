@@ -25,12 +25,12 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import torch
 
+from canvit_train.distill.config import Config
 from canvit_train.harness import ddp
+from canvit_train.harness.cli import DistillCmd, resolve_spec
 from canvit_train.harness.loop import apply_requires_grad
 from canvit_train.harness.optim import build_optimizer_and_scheduler
 from canvit_train.harness.rollout import run_rollout
-from canvit_train.harness.cli import DistillCmd, resolve_spec
-from canvit_train.train.config import Config
 
 OUT = Path("/mnt/vast-nhr/projects/nib00021/jonathan/_harness_smoke_ckpts/ddp_datagrad")
 WDS = Path("/mnt/lustre-rzg/workspaces/ws/nib00021/u25995-inet21k-feat/"

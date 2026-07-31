@@ -61,7 +61,7 @@ def test_the_harness_task_uses_the_same_function_at_128_by_default():
     import inspect
 
     from canvit_train.ade20k.config import Ade20kConfig
-    from canvit_train.tasks.ade20k.task import BoundAde20kTask
+    from canvit_train.ade20k.task import BoundAde20kTask
 
     assert Ade20kConfig().reward_score_res == 128, "must match the reference's score_res"
     src = inspect.getsource(BoundAde20kTask.per_image_loss)
