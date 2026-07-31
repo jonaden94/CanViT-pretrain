@@ -73,7 +73,7 @@ run dir under `checkpoints/canvit-ade20k-policies/`). Pass = final best val CE
    inside the documented 8-seed qband band (mean val CE t1–t4; the RL repo's
    `docs/qband_results.md`). Note: no local reference runs exist (qband ran on the
    m2b3 machine), so the band comes from the docs. A SLURM launcher for this run
-   still needs writing (small; pattern = slurm_nhr/ade20k/train_ade20k.sbatch).
+   still needs writing (small; pattern = slurm/archive/ade20k/train_ade20k.sbatch).
 
 ## P4 pointers (what this unlocks)
 

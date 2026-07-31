@@ -7,7 +7,7 @@ All work here is on `main`, committed together; the big-bang cutover is still ga
 
 The harness `RunSettings.resume` used to default `True` for every task. That is right for
 **distill** (SLURM array jobs must continue across tasks) but a footgun for the **ade20k/
-in1k probes**, whose launchers (`slurm_nhr/{ade20k,in1k}/train_*.sbatch`) are **single-job,
+in1k probes**, whose launchers (`slurm/{ade20k,in1k}/train_*.sbatch`) are **single-job,
 non-array**, and whose standalone counterparts have **no resume at all** — so resume-by-
 default silently *continues* a one-shot probe re-run into a populated dir (this is what
 contaminated the first ade20k gate run in doc 10).
@@ -133,7 +133,7 @@ re-seed means stochastic ops aren't a continuous stream (not bit-identical to mo
 
 The one remaining hole before deleting `train/loop.py` is **production-scale** fidelity
 (everything so far is component / short / probe scale). Ready-to-fire launchers now live in
-`slurm_nhr/runs/harness_repro/` (see its README): they re-run existing old-loop configs
+`slurm/runs/harness_repro/` (see its README): they re-run existing old-loop configs
 THROUGH THE HARNESS so the curves overlay on results you already have —
 `distill-uniform16`, `distill-fovi`, `distill-fovi-teacherinit` (~100k steps each), and an
 `ade20k-finetune` template. Pinned `PRETRAIN=bc63eee`. NOT submitted (owner's call;

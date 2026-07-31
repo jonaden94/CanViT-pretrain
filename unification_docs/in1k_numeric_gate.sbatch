@@ -31,7 +31,7 @@ cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 source /user/henrich1/u25995/.bashrc
 set -euo pipefail
 
-source slurm_nhr/env.sh
+source slurm/env.sh
 mkdir -p logs/in1k_gate
 
 # Commit pinning (offline git archive -> PYTHONPATH, PYTHONSAFEPATH=1 authoritative).

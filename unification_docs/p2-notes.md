@@ -18,7 +18,7 @@ below) — a SLURM job the user submits. Suite: 65 passed; parity digest unchang
 - **Tests** (`ade20k/test_ade20k.py`, 3): uniform pre-crop rollout trains probe /
   frozen backbone untouched; **foveated full-image rollout trains probe — the NEW
   capability specialize never had**; glimpse_px token-count guard fails loudly.
-- **Launcher**: `slurm_nhr/ade20k/train_ade20k.sbatch` — single A100, MODEL_REPO
+- **Launcher**: `slurm/archive/ade20k/train_ade20k.sbatch` — single A100, MODEL_REPO
   (hub id or local HF dir) + ADE20K_ROOT env, **commit pinning included** (closes
   unification-status §5.6 for ADE runs; specialize never had it).
 
@@ -49,7 +49,7 @@ Reference: the specialize ADE probe run on exp22-uniform16 best checkpoint
 export MODEL_REPO=/user/henrich1/u25995/jonathan/repos/CanViT-train/logs/jon_exp22_full_runs/exp22-uniform16/checkpoints/step-1515520-hf
 export ADE20K_ROOT=/user/henrich1/u25995/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016
 export PRETRAIN_COMMIT=<this commit>  PYTORCH_COMMIT=<core HEAD>  # optional pin
-sbatch --export=ALL slurm_nhr/ade20k/train_ade20k.sbatch
+sbatch --export=ALL slurm/archive/ade20k/train_ade20k.sbatch
 ```
 
 Pass criterion: per-timestep val mIoU within run-to-run noise of the specialize
@@ -91,7 +91,7 @@ on an exp22-fovi checkpoint must train end-to-end (no reference numbers — new)
 3. **CPU smoke tests** in pretrain: uniform (pre-crop) + foveated (full-image)
    tiny-model rollouts through the new task; foveated is the NEW capability —
    assert it runs end-to-end and the probe gets grads.
-4. **Launcher**: `slurm_nhr/` sbatch for ADE probe training with commit pinning
+4. **Launcher**: `slurm/` sbatch for ADE probe training with commit pinning
    (specialize never had pinning — this closes unification-status §5.6).
 5. **Gate**: reproduce specialize's exp22 ADE probe numbers (uniform checkpoint)
    within run-to-run noise — needs a SLURM run (user submits); foveated probe

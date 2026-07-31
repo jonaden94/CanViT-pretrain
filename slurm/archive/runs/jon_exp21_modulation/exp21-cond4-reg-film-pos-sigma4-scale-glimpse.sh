@@ -1,0 +1,38 @@
+#!/bin/bash
+# cond4-reg + positional FiLM (fourier 256/sigma4) + per-glimpse sampled scale,
+# uniform[0.25,1.41]. Scale-BLIND FiLM (encode_scale off) -> baseline arm of the
+# 2x2 {per_rollout,per_glimpse} x {film-scale off,on}.
+set -euo pipefail
+
+# === ESSENTIALS ===
+RUN_GROUP=jon_exp21_modulation
+RUN_NAME=exp21-cond4-reg-film-pos-sigma4-scale-glimpse
+ARRAY=0-7%1                                    # RESUME: 8 remaining chunks (41/49 = 167936 steps done; deleted FAILED token from wandb-init crash) -> reaches 200,704
+TIME=0-01:30:00
+MEM=128G
+NGPU=1
+
+# === OPTIONAL ===
+CFG_WANDB_PROJECT=jon_exp21_modulation
+CFG_PEAK_LR=0.0004
+CFG_BATCH_SIZE_PER_GPU=64
+CFG_STEPS_PER_JOB=4096
+CFG_VAL_EVERY=4096  # validate once per job (= steps_per_job)
+CFG_LOG_EVERY=512
+CFG_NUM_WORKERS=4
+EXTRA_ARGS="--model.patcher-name square --model.square-patcher.method fovi_regularized --model.square-patcher.resolution 64 --model.square-patcher.cart-patch-size 8 --model.square-patcher.no-force-patches-less-than-matched --model.square-patcher.m-override 10 --model.square-patcher.strict-nest-when-possible --model.square-patcher.conditioning.mode film --model.square-patcher.conditioning.film.fourier.num-features 256 --model.square-patcher.conditioning.film.fourier.sigma 4 --foveated-scale.mode per_glimpse --foveated-scale.distribution uniform --foveated-scale.min-scale 0.25 --foveated-scale.max-scale 1.41 --webdataset-dir /mnt/lustre-rzg/workspaces/ws/nib00021/u25995-canvit-data-no-features/webdataset-imagenet-1k-no-features"
+# =================
+
+# Pin all pretraining code to exact commits. base_train.sbatch extracts these
+# via offline `git archive` from the local clones (no network/SSH), snapshotting
+# the run against any future `git pull` on the originals while the array is in flight.
+PRETRAIN_COMMIT=ab578c4   # includes fcdc405 (FULL-start glimpse follows scale mode)
+PYTORCH_COMMIT=f853eca   # patcher: optional scale-aware FiLM (encode_scale)
+FOVI_COMMIT=763bf7a
+
+cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
+mkdir -p "logs/$RUN_GROUP/$RUN_NAME/log"
+export RUN_GROUP RUN_NAME NGPU EXTRA_ARGS PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
+for v in $(compgen -v); do [[ "$v" == CFG_* ]] && export "$v"; done
+
+sbatch     --gpus-per-node=A100:$NGPU     --ntasks-per-node=$NGPU     --mem=$MEM     --time=$TIME     --array="$ARRAY"     --output="logs/$RUN_GROUP/$RUN_NAME/log/job-%A_%a.log"     --error="logs/$RUN_GROUP/$RUN_NAME/log/job-%A_%a.log"     --export=ALL     slurm/archive/base_train.sbatch

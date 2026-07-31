@@ -37,7 +37,7 @@ cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 # would abort the job (same ordering as base_train.sbatch).
 source /user/henrich1/u25995/.bashrc
 set -uo pipefail
-source slurm_nhr/env.sh
+source slurm/env.sh
 
 export WANDB_PROJECT=canvit-train
 ADE20K_ROOT=/user/henrich1/u25995/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016

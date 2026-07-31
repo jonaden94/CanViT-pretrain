@@ -25,7 +25,7 @@ cd /user/henrich1/u25995/jonathan/repos/CanViT-train
 source /user/henrich1/u25995/.bashrc
 set -euo pipefail
 
-source slurm_nhr/env.sh
+source slurm/env.sh
 mkdir -p logs/in1k_gate
 
 VENV=.venv-cu126

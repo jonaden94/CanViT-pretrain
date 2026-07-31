@@ -260,7 +260,7 @@ canvit_train/
     distill/         __main__.py (defaults) + task.py  (moved from train/{step,task}.py)
     ade20k/          __main__.py (defaults) + task.py  (readout/loss/eval from ade20k/)
     in1k/            __main__.py (defaults) + task.py
-  slurm_nhr/         launchers unchanged in shape (one per task, or one param'd by --task)
+  slurm/         launchers unchanged in shape (one per task, or one param'd by --task)
 ```
 
 Each `tasks/<name>/__main__.py` is thin: it assembles the task's *default* `Config` +

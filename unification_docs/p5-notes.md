@@ -44,7 +44,7 @@ uses via `IMAGENET_VAL`).
 
 ## Remaining (NOT done)
 
-- **SLURM launcher** (`slurm_nhr/in1k/…`) with commit pinning, `IN1K_TRAIN_DIR`/`IN1K_VAL_DIR`.
+- **SLURM launcher** (`slurm/archive/in1k/…`) with commit pinning, `IN1K_TRAIN_DIR`/`IN1K_VAL_DIR`.
 - **Val data** wired on-cluster + the **GPU acceptance run**: frozen-probe top-1/5 sane vs
   canvit_eval's frozen-probe baseline (`dinov3-vitb16-...-in1k-512x512-linear-clf-probe`).
 - Single-GPU smoke first (amp/compile/rollout) before multi-GPU, same caveat as P4b.

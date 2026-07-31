@@ -97,7 +97,7 @@ exists?" rather than by the tests:
    replaying training. Fixed with `update_latest=False`; `test_loop_e2e.py` now asserts
    `find_latest()` still resolves to `step-4.pt` after a best write.
 
-## 2. `slurm_nhr/harness_train.sbatch`
+## 2. `slurm/harness_train.sbatch`
 
 One launcher for all three tasks (`TASK=distill|ade20k|in1k`) — the operational payoff of
 having one entry point. Modeled directly on `base_train.sbatch`: same commit pinning
@@ -114,7 +114,7 @@ Env → flag mapping:
 foveated`) and to boolean flags, because `FOO_BAR → foo-bar` cannot encode a dot. That
 limitation is inherited from `base_train.sbatch`, not new.
 
-`submit.sh` gained one line — `SBATCH_SCRIPT=${SBATCH_SCRIPT:-slurm_nhr/base_train.sbatch}`
+`submit.sh` gained one line — `SBATCH_SCRIPT=${SBATCH_SCRIPT:-slurm/archive/base_train.sbatch}`
 — so the same config can be sent through either path. Default behaviour is unchanged.
 
 One real bug was caught while writing it: ade20k/in1k must **not** receive the

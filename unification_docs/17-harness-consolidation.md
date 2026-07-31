@@ -114,8 +114,8 @@ reason to want the biased gradient. Pinned by
 
 ## Launchers: left in place ON PURPOSE
 
-166 scripts reference `slurm_nhr/base_train.sbatch`. `base_train.sbatch`,
-`slurm_nhr/{ade20k,in1k}/`, and the `*-oldloop*.sh` / `policy-{bneval,oldloop,pooled}-s0.sh`
+166 scripts reference `slurm/archive/base_train.sbatch`. `base_train.sbatch`,
+`slurm/{ade20k,in1k}/`, and the `*-oldloop*.sh` / `policy-{bneval,oldloop,pooled}-s0.sh`
 runs invoke entry points that no longer exist — and still work, because each pins
 pre-consolidation commits that offline `git archive` restores into the job's `TMPDIR`. That
 is exactly how the exp22/exp23/exp27 comparisons stay reproducible. Moving them would break

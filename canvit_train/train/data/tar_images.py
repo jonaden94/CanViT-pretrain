@@ -8,7 +8,7 @@ load_tar_index(tar_path)   — instant load from .idx file; for training.
 
 .idx files carry SHA256 + size. They used to be produced by `sa1b/build_tar_indexes.py`,
 deleted 2026-07-31 along with the rest of the SA-1B pipeline: no .idx data exists on the
-cluster any more and `slurm_nhr/harness_train.sbatch` REQUIRES `WEBDATASET_DIR`, so the
+cluster any more and `slurm/harness_train.sbatch` REQUIRES `WEBDATASET_DIR`, so the
 sharded-tar path this module serves is unreachable from any production launcher. The
 module is kept because `train/data/__init__.py` still exposes the path (`create_loaders`
 falls back to it when `cfg.webdataset_dir` is unset) — but building a fresh index now

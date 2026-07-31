@@ -262,7 +262,7 @@ launcher sets both at the cutover.
 4. **(Needs owner GREEN LIGHT — destructive) big-bang cutover:** repoint `python -m canvit_train.train`
    at `harness.run`, flip `train/step.py`→`run_rollout` (re-confirm the REAL parity probe
    `9a0100a1a3de3acd` + the 93-test pretrain suite), delete the old loops (`ade20k.train`,
-   `ade20k.rl_train`, `in1k.train`, distill `train/loop.py`+`step.py`), rewrite `slurm_nhr/` launchers.
+   `ade20k.rl_train`, `in1k.train`, distill `train/loop.py`+`step.py`), rewrite `slurm/` launchers.
    Then the GPU acceptance gate. Everything above is additive scaffolding that makes this mechanical.
 
 ## GUARDRAILS (still in force)

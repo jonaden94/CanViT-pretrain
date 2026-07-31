@@ -14,7 +14,7 @@ artifact that should be gotten rid of."*
 **Method:** read end to end — `harness/cli.py`, `harness/run.py`, `harness/loop.py`,
 `harness/rollout.py`, `harness/checkpoint.py`, all three `tasks/*/task.py`, all three
 configs, both standalone trainers (`ade20k/train.py`, `in1k/train.py`), the old distill
-loop's identity block, `slurm_nhr/harness_train.sbatch`, and the exp24/exp25 launchers —
+loop's identity block, `slurm/harness_train.sbatch`, and the exp24/exp25 launchers —
 then cross-tabulate every user-facing knob and every logged series per task. Runtime facts
 verified where a docstring was ambiguous (tyro duplicate-flag precedence, strictness of
 `restore_into`, whether `make_ade20k_loaders` shards by rank).

@@ -64,13 +64,13 @@ A training run can take days, during which you may keep editing the local clones
 therefore pin each repo to an exact commit:
 
 ```bash
-# in slurm_nhr/runs/<group>/<run>.sh
+# in slurm/runs/<group>/<run>.sh
 PRETRAIN_COMMIT=bc2db02
 PYTORCH_COMMIT=d864b83
 FOVI_COMMIT=763bf7a
 ```
 
-`slurm_nhr/base_train.sbatch` extracts those commits from the local clones with
+`slurm/archive/base_train.sbatch` extracts those commits from the local clones with
 offline `git archive` (reads the local object store only — no network, no SSH,
 works with private repos) into the job's `TMPDIR` and prepends them to
 `PYTHONPATH` (with `PYTHONSAFEPATH=1`), so they **override** the venv's editable
@@ -78,7 +78,7 @@ install for that job. The array job is thus snapshotted against the pinned
 commits and is unaffected by any later edits or `git pull` on the originals while
 it runs. The three vars are optional and independent; omit them to fall back to
 the venv's (editable, local) install. See
-`slurm_nhr/runs/jon_exp21_modulation/*.sh` for examples.
+`slurm/archive/runs/jon_exp21_modulation/*.sh` for examples.
 
 ## Run
 
@@ -111,8 +111,8 @@ lists exactly which task/preset combinations exist and what spec each resolves t
 it rather than guessing, and regenerate it with
 `unification_docs/capability_matrix.py` after touching a `default_spec`.
 
-On SLURM, use `slurm_nhr/harness_train.sbatch` and copy an existing launcher from
-`slurm_nhr/runs/<group>/` as your template.
+On SLURM, use `slurm/harness_train.sbatch` and copy an existing launcher from
+`slurm/runs/<group>/` as your template.
 
 The in21k feature webdataset is already built (`$WEBDATASET_DIR`), so nothing below is
 needed for normal runs. To build one from scratch:
@@ -123,9 +123,10 @@ uv run python scripts/build_shuffled_index.py \
 uv run python scripts/export_in21k_features.py --help   # then drive it as an array job
 ```
 
-The SLURM wrapper that used to drive the export (`slurm/export_features.sh`) was deleted
-2026-07-31 with the rest of the Nibi-cluster tooling; the Python script it called remains.
-Write a `slurm_nhr`-style launcher for it if you need to re-export.
+The SLURM wrapper that used to drive the export was deleted 2026-07-31 along with the rest
+of the Nibi-cluster tooling — that lived in a *different*, now-deleted folder that was also
+called `slurm/` (this `slurm/` is the former `slurm_nhr/`, renamed into the vacated name).
+The Python script it called remains; write a launcher for it if you need to re-export.
 
 Publish a trained checkpoint to the local HF layout (never automatic — always explicit):
 
@@ -139,7 +140,7 @@ CanViT-eval's `in1k_clf` task loads.
 
 ### Historical launchers — do not use for new work
 
-`slurm_nhr/base_train.sbatch`, `slurm_nhr/ade20k/`, `slurm_nhr/in1k/`, and the
+`slurm/archive/base_train.sbatch`, `slurm/archive/ade20k/`, `slurm/archive/in1k/`, and the
 `*-oldloop*.sh` / `policy-{bneval,oldloop,pooled}-s0.sh` run scripts drive entry points
 that **no longer exist in this repo** (`canvit_pretrain.train`, `canvit_pretrain.ade20k`,
 `canvit_pretrain.in1k`, `canvit_pretrain.ade20k.rl_train`). They still run correctly,

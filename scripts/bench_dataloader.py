@@ -1,7 +1,7 @@
 """Benchmark ShardedFeatureLoader throughput.
 
 Run on cluster:
-    source slurm_nhr/env.sh
+    source slurm/env.sh
     uv run python scripts/bench_dataloader.py --n-batches 500 --num-workers 16
 
 For interactive exploration:

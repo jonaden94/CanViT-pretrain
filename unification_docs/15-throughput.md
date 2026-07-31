@@ -94,5 +94,5 @@ branch meant to report which arm failed.
 
 Tools: `unification_docs/throughput_ab.py` (harness, in-process, times the per-step log
 record `run.py:358` already emits), `throughput_oldloop.py` (old loop, subprocess, times
-the tqdm counter), `slurm_nhr/runs/perf/throughput_matrix.sh` + `submit.sh` (interleaved,
+the tqdm counter), `slurm/archive/runs/perf/throughput_matrix.sh` + `submit.sh` (interleaved,
 commit-pinned — note it pins the invoked SCRIPTS too, not just the importable package).

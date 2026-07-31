@@ -6,7 +6,7 @@ functionality not reimplemented? This is the STATIC counterpart to the productio
 (doc 11 §6): the runs prove what's reimplemented matches *numerically*; this proves
 nothing is *silently dropped* — including features a given A/B config never exercises.
 
-**Method:** read the old production path end to end — `slurm_nhr/base_train.sbatch`,
+**Method:** read the old production path end to end — `slurm/archive/base_train.sbatch`,
 `canvit_train/train/__main__.py`, `canvit_train/train/loop.py` (1035 lines) — and
 cross-check each operational feature against the harness (`harness/run.py` + `harness/loop.py`
 + `harness/cli.py` + `tasks/distill/task.py`). Not a grep-map; the loop was read (this

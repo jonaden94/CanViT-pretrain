@@ -121,6 +121,6 @@ Also added `torch.set_float32_matmul_precision("high")` in the CLI entry (TF32 �
 
 - **Numeric quality gate through the harness** (harness ade20k probe mIoU vs the
   standalone's reference numbers). This was blocked by the CLI gap and is now runnable.
-- Dedicated `slurm_nhr/` launchers pointing at `harness.run` — cutover work, still gated.
+- Dedicated `slurm/` launchers pointing at `harness.run` — cutover work, still gated.
 - ade20k `warmup_onecycle` (`NotImplementedError`) so harness ade20k can reproduce
   specialize's LR schedule exactly.

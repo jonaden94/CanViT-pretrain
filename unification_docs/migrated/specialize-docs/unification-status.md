@@ -57,7 +57,7 @@ Three consequences that matter for planning:
 | Viewpoints | own `train/viewpoint.py` (+`random_fixation`) | delegates to `canvit_pytorch.policies` |
 | Figures | **disk sink** (`viz/disk.py`) | **wandb images** (`tracker.log_image`) |
 | Commit pinning | yes (`PRETRAIN/PYTORCH/FOVI_COMMIT` + `git archive`) | **none** |
-| Launchers | `slurm_nhr/runs/` — 6 experiment groups | `exp01` + `jon_exp22_full_runs` (added today) |
+| Launchers | `slurm/runs/` — 6 experiment groups | `exp01` + `jon_exp22_full_runs` (added today) |
 | Test files | 6 | **1** (`tests/test_metrics.py`, no training tests) |
 
 ---
@@ -192,7 +192,7 @@ re-introduces the matplotlib/wandb leak pretrain already escaped.
 
 ### 5.6 🟡 Commit pinning — absent in specialize
 
-Pretrain's `slurm_nhr/base_train.sbatch` pins `PRETRAIN_COMMIT` / `PYTORCH_COMMIT` /
+Pretrain's `slurm/archive/base_train.sbatch` pins `PRETRAIN_COMMIT` / `PYTORCH_COMMIT` /
 `FOVI_COMMIT` and `git archive`s a frozen snapshot into `$TMPDIR`, so in-flight jobs are immune
 to later edits. **Specialize has none of this** — its jobs run straight off the editable
 working tree.
@@ -224,9 +224,9 @@ break in seconds and will catch the next one.
 
 ### 5.9 🟢 Launcher hygiene (fixed today)
 
-`slurm_nhr/exp01/train_ade20k_canvit.sbatch` hardcodes `VENV=".venv"`, which does not exist
+`slurm/exp01/train_ade20k_canvit.sbatch` hardcodes `VENV=".venv"`, which does not exist
 (only `.venv-cu126`) — it would exit immediately. The new
-`slurm_nhr/jon_exp22_full_runs/train_ade20k_uniform16_best.sbatch` uses the correct venv.
+`slurm/jon_exp22_full_runs/train_ade20k_uniform16_best.sbatch` uses the correct venv.
 The exp01 script is still stale.
 
 ### 5.10 🟢 Probe → eval handoff (fixed today)

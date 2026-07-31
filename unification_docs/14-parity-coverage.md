@@ -171,7 +171,7 @@ Root cause is uncontrolled execution nondeterminism, not configuration. The runs
 **functionally equivalent** — verified exhaustively: all 151 wandb config keys match
 except `seed` + 4 identity keys; launcher `CFG_*`/`OPT_*` lines diff clean (and exp22's are
 unchanged since its original commit `7ded881`); `WORLD_SIZE=1` in every task;
-`slurm_nhr/base_train.sbatch` has no commits since before 2026-07-08 (it is NOT
+`slurm/archive/base_train.sbatch` has no commits since before 2026-07-08 (it is NOT
 commit-pinned, so this had to be checked); venv `.venv-cu126` / torch `2.11.0+cu126`
 installed Jun 24 and untouched; `canvit_pytorch 3277048` + `fovi c399d3b` on every single
 array task. What is *not* controlled: the A100 40GB/80GB mix (exp22 149/8, exp23 18/7,

@@ -93,7 +93,7 @@ canvit_train (the merged training repo)
       ade20k.py            seg probe on the stable wrapper (D3), from specialize
       in1k.py              CUDA classification task (new, late phase; D2)
   datasets/                webdataset (existing) + unified ADE20K (+ IN1k later)
-  slurm_nhr/               launchers; commit pinning simplifies to PRETRAIN/PYTORCH/FOVI
+  slurm/               launchers; commit pinning simplifies to PRETRAIN/PYTORCH/FOVI
   unification_docs/        this plan + per-phase implementation notes
 
 canvit_eval                unchanged in v1; later gains policy benchmarking
