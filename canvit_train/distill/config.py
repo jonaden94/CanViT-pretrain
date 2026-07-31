@@ -60,7 +60,7 @@ class Config:
     grad_clip: float = 1.0
     steps_per_job: int = 4_992  # Steps this job does before exiting (for SLURM arrays)
     # Data
-    val_dir: Path = Path("/user/henrich1/u25995/jonathan/datasets/imagenet1k-val")
+    val_dir: Path = Path("/mnt/vast-nhr/projects/nib00021/jonathan/datasets/imagenet1k-val")
     """IN1k val ImageFolder (raw images) for distill validation — glimpse rollouts scored
     by the frozen IN1k probes need actual pixels, so this is NOT the feature webdataset.
     Every launcher passes `--cfg.val-dir "$VAL_DIR"` from `.envrc.grete`, so this default
@@ -175,8 +175,12 @@ class Config:
     what a hand-run job does: land in the default project instead of asserting."""
     wandb_entity: str | None = field(default_factory=lambda: os.environ.get("WANDB_ENTITY") or None)
     """W&B entity (team or user). Falls back to $WANDB_ENTITY, then your default account."""
-    wandb_dir: Path | None = Path("/mnt/vast-nhr/projects/nib00021/jonathan")
-    """Directory wandb writes its run files into. None = wandb's own default (./wandb)."""
+    wandb_dir: Path | None = field(
+        default_factory=lambda: Path(d) if (d := os.environ.get("WANDB_DIR")) else None)
+    """Directory wandb writes its run files into. Defaults to $WANDB_DIR (.envrc.grete
+    sets it), then to wandb's own default (./wandb). Same rule as
+    Ade20kConfig/In1kConfig; this used to be one user's absolute path, which no other
+    project member can write to."""
     # Compilation and precision
     compile: bool = True
     combo_kernels: bool = False  # torch._inductor.config.combo_kernels (experimental)

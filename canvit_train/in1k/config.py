@@ -26,7 +26,7 @@ def _default_in1k_train_dir() -> Path:
     if root := os.environ.get("IN1K_TRAIN_DIR"):
         return Path(root)
     # WebDataset shards (jpg + json label), pre-resized to 512²; see p5-notes.md.
-    return Path("/user/henrich1/u25995/jonathan/datasets/webdataset-imagenet-1k-no-features/train-shuffled")
+    return Path("/mnt/vast-nhr/projects/nib00021/jonathan/datasets/webdataset-imagenet-1k-no-features/train-shuffled")
 
 
 def _default_in1k_val_dir() -> Path:
@@ -34,7 +34,7 @@ def _default_in1k_val_dir() -> Path:
         return Path(root)
     # Synset-folder ImageFolder (n01440764/, …) — the same val + ordering canvit_eval
     # uses, so ImageFolder's alphabetical class_idx matches the webdataset's int labels.
-    return Path("/user/henrich1/u25995/jonathan/datasets/imagenet1k-val")
+    return Path("/mnt/vast-nhr/projects/nib00021/jonathan/datasets/imagenet1k-val")
 
 
 def _default_clf_ckpt_dir() -> Path:

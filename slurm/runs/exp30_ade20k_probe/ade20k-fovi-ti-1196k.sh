@@ -26,7 +26,7 @@ TASK=ade20k
 
 # === config (exp24 recipe) ===
 CFG_WANDB_PROJECT=exp30_ade20k_probe
-CFG_MODEL_REPO=/user/henrich1/u25995/jonathan/repos/CanViT-train/logs/jon_exp22_full_runs/exp22-fovi-teacherinit-lrdrop-1196k/checkpoints/step-155648-hf
+CFG_MODEL_REPO=/mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train/logs/jon_exp22_full_runs/exp22-fovi-teacherinit-lrdrop-1196k/checkpoints/step-155648-hf
 CFG_RESIZE_MODE=squish
 EXTRA_ARGS="--cfg.foveated-scale.fixed-scale 2.0"
 # =================
@@ -35,9 +35,11 @@ PRETRAIN_COMMIT=455bdae
 PYTORCH_COMMIT=1f5121b
 FOVI_COMMIT=c399d3b
 
-cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
+# Repo root, derived from this script's own location (slurm/runs/<group>/<run>.sh),
+# so the run submits from YOUR clone rather than one hardcoded checkout.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 mkdir -p "logs/$RUN_GROUP/$RUN_NAME/log"
-export ADE20K_ROOT=/user/henrich1/u25995/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016
+export ADE20K_ROOT=/mnt/vast-nhr/projects/nib00021/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016
 export TASK RUN_GROUP RUN_NAME NGPU EXTRA_ARGS PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
 for v in $(compgen -v); do [[ "$v" == CFG_* || "$v" == OPT_* ]] && export "$v"; done
 

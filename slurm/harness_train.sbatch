@@ -30,8 +30,11 @@
 # Launch via: SBATCH_SCRIPT=slurm/harness_train.sbatch bash slurm/submit.sh
 # or directly: TASK=ade20k sbatch --export=ALL ... slurm/harness_train.sbatch
 
-cd /user/henrich1/u25995/jonathan/repos/CanViT-train
-source /user/henrich1/u25995/.bashrc
+# Repo root = the directory the run script submitted from (SLURM's default WorkDir),
+# so any project member's own clone works. A hardcoded path here would silently make
+# everyone else's job train from ONE user's checkout.
+cd "${SLURM_SUBMIT_DIR:-$PWD}"
+source "$HOME/.bashrc"
 
 set -eu
 
@@ -50,16 +53,18 @@ source slurm/env.sh
 # TMPDIR fallback + commit pinning + per-job compile caches: identical to
 # base_train.sbatch (see its comments for why each is needed).
 TMPDIR_NEED_GB=2
-ERSATZ_BASE=/mnt/vast-nhr/projects/nib00021/jonathan/ersatz_local
+# Under the project root, which is group-writable + setgid: a per-user subdir here
+# works for every project member (one user's own folder would not be writable).
+ERSATZ_BASE=/mnt/vast-nhr/projects/nib00021/ersatz_local
 tmpdir_avail_gb=$(df -BG --output=avail "$TMPDIR" 2>/dev/null | tail -1 | tr -dc '0-9')
 if [ "${tmpdir_avail_gb:-0}" -lt "$TMPDIR_NEED_GB" ]; then
     log "WARN: $TMPDIR on $(hostname) has ${tmpdir_avail_gb:-?}G free (<${TMPDIR_NEED_GB}G); falling back to NFS"
-    export TMPDIR="$ERSATZ_BASE/u25995_${SLURM_JOB_ID}"
+    export TMPDIR="$ERSATZ_BASE/${USER}_${SLURM_JOB_ID}"
     mkdir -p "$TMPDIR"
 fi
 log "TMPDIR=$TMPDIR"
 
-_REPO_BASE=/user/henrich1/u25995/jonathan/repos
+_REPO_BASE="$(dirname "$PWD")"   # the 4 repos are siblings, so this is their parent
 _CODE_DIR="$TMPDIR/canvit_src"
 if [ -n "${PRETRAIN_COMMIT:-}" ] || [ -n "${PYTORCH_COMMIT:-}" ] || [ -n "${FOVI_COMMIT:-}" ]; then
     mkdir -p "$_CODE_DIR"

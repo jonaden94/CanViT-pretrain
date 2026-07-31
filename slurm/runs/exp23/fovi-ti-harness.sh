@@ -34,7 +34,9 @@ PRETRAIN_COMMIT=24a8500
 PYTORCH_COMMIT=017ce9b
 FOVI_COMMIT=c399d3b
 
-cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
+# Repo root, derived from this script's own location (slurm/runs/<group>/<run>.sh),
+# so the run submits from YOUR clone rather than one hardcoded checkout.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 mkdir -p "logs/$RUN_GROUP/$RUN_NAME/log"
 export TASK RUN_GROUP RUN_NAME NGPU EXTRA_ARGS PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
 for v in $(compgen -v); do [[ "$v" == CFG_* ]] && export "$v"; done

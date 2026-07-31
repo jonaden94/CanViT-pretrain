@@ -1,26 +1,44 @@
-# Grete cluster environment variables.
-# Copy to .envrc: cp .envrc.grete .envrc && direnv allow
-# (or it will be sourced directly by slurm_jonathan/env.sh in SLURM jobs)
+# Grete cluster (GWDG) environment for CanViT-train.
+#
+# SLURM jobs source this file directly (slurm/env.sh) — submitting needs no setup.
+# For interactive use: `cp .envrc.grete .envrc && direnv allow`, or just
+# `source .envrc.grete`.
+#
+# Paths come in two kinds:
+#   SHARED   — under /mnt/vast-nhr/projects/nib00021 or the project's lustre
+#              workspace, both group HPC_nib00021 and group-readable, so every
+#              member of the project can use them unchanged.
+#   PER-USER — caches and run outputs. The caches derive from $HOME and need no
+#              edit; the two output paths are marked below and DO need one, since
+#              they are writable only by their owner.
 
-# Caches
-export HF_HOME="/user/henrich1/u25995/.cache/huggingface"
-export TORCH_HOME="/user/henrich1/u25995/.cache/torch"
-export TORCH_COMPILE_CACHE_DIR="/user/henrich1/u25995/.cache/torch_compile"
+# Caches (per-user; no edit needed)
+export HF_HOME="$HOME/.cache/huggingface"
+export TORCH_HOME="$HOME/.cache/torch"
+export TORCH_COMPILE_CACHE_DIR="$HOME/.cache/torch_compile"
 
-# Storage
-export LOGS_DIR="/user/henrich1/u25995/jonathan/repos/CanViT-train/logs"
-# export WEBDATASET_DIR="/user/henrich1/u25995/jonathan/datasets/webdataset-imagenet-1k"  # vast NFS copy; superseded by lustre below to avoid NFS contention
+# Datasets (SHARED — readable project-wide)
+# export WEBDATASET_DIR="/mnt/vast-nhr/projects/nib00021/jonathan/datasets/webdataset-imagenet-1k"  # vast NFS copy; superseded by lustre below to avoid NFS contention
 # export WEBDATASET_DIR="/mnt/lustre-rzg/workspaces/ws/nib00021/u25995-canvit-data/webdataset-imagenet-1k"  # in1k with precomputed features; superseded by in21k below (2026-07-10)
 export WEBDATASET_DIR="/mnt/lustre-rzg/workspaces/ws/nib00021/u25995-inet21k-feat/webdataset-imagenet-21k-with-features"  # in21k, 13.15M imgs, precomputed dinov3_vitb16 features; training only; must contain train-shuffled/
 # Validation always reads this raw ImageNet-1k val ImageFolder (synset-named class subfolders), independent of WEBDATASET_DIR.
-export VAL_DIR="/user/henrich1/u25995/jonathan/datasets/imagenet1k-val"
-# Cache dir for the IndexedImageFolder parquet index (directory scan runs once, then reused across runs).
-export VAL_INDEX_DIR="/user/henrich1/u25995/jonathan/repos/_data_cache"
+export VAL_DIR="/mnt/vast-nhr/projects/nib00021/jonathan/datasets/imagenet1k-val"
+# ADE20K. The `:-` form lets a run script's own `export ADE20K_ROOT=...` win, since
+# slurm/env.sh sources this file AFTER the launcher's environment is inherited.
+export ADE20K_ROOT="${ADE20K_ROOT:-/mnt/vast-nhr/projects/nib00021/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016}"
+# Cache dir for the IndexedImageFolder parquet index (directory scan runs once, then reused across
+# runs). The index for the val dir above is already built here and group-readable.
+export VAL_INDEX_DIR="/mnt/vast-nhr/projects/nib00021/jonathan/repos/_data_cache"
+
+# Run outputs (PER-USER — repoint both). The defaults below are group-readable but
+# writable only by u25995. /mnt/vast-nhr/projects/nib00021 itself IS group-writable,
+# so create your own subdirectory there and point these at it.
+export LOGS_DIR="/mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train/logs"
+export WANDB_DIR="/mnt/vast-nhr/projects/nib00021/jonathan"
 
 # Tracker config
 export WANDB_PROJECT="canvit-train"   # TODO: change as needed
 export WANDB_ENTITY=""                   # leave empty to use your default account
-export WANDB_DIR="/mnt/vast-nhr/projects/nib00021/jonathan"
 
-# Credentials
+# Credentials (per-user)
 if [ -f "${HF_HOME:-}/token" ] && [ -z "${HF_TOKEN:-}" ]; then export HF_TOKEN=$(cat "$HF_HOME/token"); fi

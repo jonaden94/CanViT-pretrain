@@ -26,7 +26,7 @@ RUN_NAME=exp27-policy-oldloop-s$SEED
 TIME=0-03:00:00
 MEM=64G
 
-export ADE20K_ROOT=/user/henrich1/u25995/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016
+export ADE20K_ROOT=/mnt/vast-nhr/projects/nib00021/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016
 export WANDB_PROJECT=exp27
 
 # Pin the reference implementation. 4db7c3f restores rl_train's resize_mode default
@@ -36,7 +36,9 @@ PRETRAIN_COMMIT=4db7c3f
 PYTORCH_COMMIT=017ce9b
 FOVI_COMMIT=c399d3b
 
-cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
+# Repo root, derived from this script's own location (slurm/runs/<group>/<run>.sh),
+# so the run submits from YOUR clone rather than one hardcoded checkout.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 mkdir -p "logs/$RUN_GROUP"
 export PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
 

@@ -78,9 +78,11 @@ PYTORCH_COMMIT=1f5121b
 FOVI_COMMIT=c399d3b
 
 # NOT in env.sh — every exp24 ade20k script exports it explicitly.
-export ADE20K_ROOT=/user/henrich1/u25995/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016
+export ADE20K_ROOT=/mnt/vast-nhr/projects/nib00021/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016
 
-cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
+# Repo root, derived from this script's own location (slurm/runs/<group>/<run>.sh),
+# so the run submits from YOUR clone rather than one hardcoded checkout.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 mkdir -p "logs/$RUN_GROUP/$RUN_NAME/log"
 export TASK RUN_GROUP RUN_NAME NGPU EXTRA_ARGS ADE20K_ROOT PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
 for v in $(compgen -v); do [[ "$v" == CFG_* ]] && export "$v"; done

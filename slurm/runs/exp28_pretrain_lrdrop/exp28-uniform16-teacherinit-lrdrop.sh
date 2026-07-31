@@ -31,7 +31,7 @@ MEM=128G
 NGPU=1
 TASK=distill
 
-SEED_CKPT=/user/henrich1/u25995/jonathan/repos/CanViT-train/logs/exp28_pretrain_lrdrop/exp28-uniform16-teacherinit/checkpoints/step-630784.pt
+SEED_CKPT=/mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train/logs/exp28_pretrain_lrdrop/exp28-uniform16-teacherinit/checkpoints/step-630784.pt
 if [ ! -f "$SEED_CKPT" ]; then
     echo "REFUSING: $SEED_CKPT does not exist yet."
     echo "Phase A (exp28-uniform16-teacherinit) has not reached step 630784."
@@ -56,7 +56,9 @@ PRETRAIN_COMMIT=455bdae
 PYTORCH_COMMIT=1f5121b
 FOVI_COMMIT=c399d3b
 
-cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
+# Repo root, derived from this script's own location (slurm/runs/<group>/<run>.sh),
+# so the run submits from YOUR clone rather than one hardcoded checkout.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 mkdir -p "logs/$RUN_GROUP/$RUN_NAME/log"
 export TASK RUN_GROUP RUN_NAME NGPU EXTRA_ARGS PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
 for v in $(compgen -v); do [[ "$v" == CFG_* || "$v" == OPT_* ]] && export "$v"; done

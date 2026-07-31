@@ -55,7 +55,7 @@ Pins: pretrain `8f780ba`, pytorch `017ce9b`, fovi `c399d3b` (same stack as exp23
 
 Submit:
 ```bash
-cd /user/henrich1/u25995/jonathan/repos/CanViT-train
+cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
 bash slurm/runs/exp25/in1k-uni16ti-803k.sh
 bash slurm/runs/exp25/in1k-uni16-1516k.sh
 bash slurm/runs/exp25/in1k-fovi-ti-1196k.sh

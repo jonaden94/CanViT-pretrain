@@ -65,7 +65,7 @@ Overlay each pair (`*-oldloop` vs `*-harness`) in wandb project `exp23`:
 ## Submit (owner runs these; nothing here submits on its own)
 
 ```bash
-cd /user/henrich1/u25995/jonathan/repos/CanViT-train
+cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
 bash slurm/runs/exp23/uniform16-ti-oldloop.sh
 bash slurm/runs/exp23/uniform16-ti-harness.sh
 # then, once the uniform pair looks right:

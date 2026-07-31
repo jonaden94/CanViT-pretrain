@@ -24,7 +24,7 @@ number. `resize_mode` affects the val/eval resize only, not training.
 
 Each run is a single 8h job (frozen probe → no cross-job resume). Submit:
 ```bash
-cd /user/henrich1/u25995/jonathan/repos/CanViT-train
+cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
 bash slurm/runs/exp24/ade20k-uni16ti-803k.sh
 bash slurm/runs/exp24/ade20k-uni16-1516k.sh
 bash slurm/runs/exp24/ade20k-fovi-ti-1196k.sh

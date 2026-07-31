@@ -18,7 +18,7 @@ TASK=ade20k
 
 # ade20k reads its data root from ADE20K_ROOT (Ade20kConfig._default_ade20k_root); it has
 # no run_group (harness_train.sbatch requires RUN_GROUP for distill only).
-export ADE20K_ROOT=/user/henrich1/u25995/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016
+export ADE20K_ROOT=/mnt/vast-nhr/projects/nib00021/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016
 
 CFG_WANDB_PROJECT=harness_repro
 CFG_MAX_STEPS=40000          # TODO: match the specialize finetune length you A/B against
@@ -31,7 +31,9 @@ PRETRAIN_COMMIT=bc63eee
 PYTORCH_COMMIT=017ce9b
 FOVI_COMMIT=c399d3b
 
-cd /mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train
+# Repo root, derived from this script's own location (slurm/runs/<group>/<run>.sh),
+# so the run submits from YOUR clone rather than one hardcoded checkout.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 mkdir -p logs/ade20k
 export TASK NGPU EXTRA_ARGS ADE20K_ROOT PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
 for v in $(compgen -v); do [[ "$v" == CFG_* ]] && export "$v"; done
