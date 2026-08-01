@@ -315,7 +315,10 @@ what they train, how to launch them, and how to judge the results:
 - [`readme_docs/verification_runs.md`](readme_docs/verification_runs.md) — the
   exp32–exp35 campaign: pretraining with a learning-rate drop, ImageNet-1k
   finetunes, ADE20K probes, and 10 seeds of viewpoint-policy training, each
-  checked against an earlier reference result.
+  checked against an established expected result.
+- [`readme_docs/policy_on_own_model.md`](readme_docs/policy_on_own_model.md) —
+  training the viewpoint policy on a backbone and probe you trained yourself,
+  and the three settings that fail silently if they do not match that pair.
 
 `unification_docs/` holds design notes and the generated capability matrix.
 

@@ -2,33 +2,19 @@
 
 Four groups of runs that verify, at full scale, that the three training objectives plus the
 viewpoint policy behave as expected on the current code base. Each reproduces a campaign
-that ran earlier and is judged against that earlier result, so a deviation is evidence of a
-code change rather than of noise.
+with an established expected result, so a deviation is evidence of a code change rather
+than of noise.
 
-| group | what it trains | runs | reference | comparable on |
-|---|---|---|---|---|
-| `exp32_pretrain_lrdrop` | `distill` pretraining from scratch, one ×0.1 LR drop | 4 | exp22 / exp28 | train loss; the normalizer shifts the scale vs exp22 |
-| `exp33_in1k_finetune` | `in1k` full finetunes from the exp22 models | 4 | exp25 | **yes**, top-1 |
-| `exp34_ade20k_probe` | `ade20k` frozen probes from the exp22 models | 4 | exp30 | **yes**, CE and mIoU |
-| `exp35_policy_qreg_10seed` | ADE20K viewpoint policy (Q-regression), 10 seeds | 10 | exp27 / exp31 | **yes**, CE and mIoU |
+| group | what it trains | runs | judged on |
+|---|---|---|---|
+| `exp32_pretrain_lrdrop` | `distill` pretraining from scratch, one ×0.1 LR drop | 4 | train loss and `val/scene_cos_norm_t9` |
+| `exp33_in1k_finetune` | `in1k` full finetunes from the exp22 models | 4 | top-1 |
+| `exp34_ade20k_probe` | `ade20k` frozen probes from the exp22 models | 4 | CE and mIoU |
+| `exp35_policy_qreg_10seed` | ADE20K viewpoint policy (Q-regression), 10 seeds | 10 | CE and mIoU |
 
 Each group's `slurm/runs/<group>/README.md` carries the detail — recipe provenance, source
 checkpoints, reference tables, and the traps specific to that group. This document is the
 overview and the shared procedure.
-
-## Relationship to exp28–exp31
-
-exp32–35 are **1:1 replications** of exp28–31 on the current code: rewriting the group
-number back and removing the two pin lines makes every launcher byte-identical to its
-predecessor. Only the run identity and the pinned commits differ.
-
-Why they were re-run:
-
-- **exp28 and exp29 were cancelled** part-way (22 and 1 array tasks completed respectively)
-  to restart cleanly on current code.
-- **exp30 and exp31 completed.** Their results stand and are now the *references* for exp34
-  and exp35. Re-running them is a check that the loader/config refactor did not perturb
-  training, not a recovery.
 
 ## Status at a glance
 
@@ -38,8 +24,8 @@ bash slurm/status.sh
 
 One-shot, local job logs only, no network, changes nothing. It prints each run's current
 step and best metric beside its reference, whether each `exp32` LR-drop phase is ready, and
-an in-band verdict per policy seed. Note it still tracks the exp28–31 group names; point it
-at exp32–35 before relying on it for this campaign.
+an in-band verdict per policy seed. It still tracks the previous group names; point it at
+exp32–35 before relying on it for this campaign.
 
 Training logs contain the **full evaluation dictionaries inline** — every metric is in the
 job log, not only in the tracker.
@@ -80,25 +66,24 @@ succeed. If tasks fail, phase A ends below target — resubmit the remainder bef
 
 **Judge on** `val/scene_cos_norm_t9`, not `eval/val_metric`. The latter is the single scalar
 the framework tracks for checkpoint selection (raw scene cosine at the last eval timestep);
-the former is what selected exp22's and exp28's best checkpoints. First comparable point is
-step 8192; exp22's values there were 1.8945 / 1.6106 / 1.8885 / 1.8377 (uniform16 /
-uniform16-ti / fovi / fovi-ti), with a systematic offset expected from the 4-shard
-normalizer.
+the former is what best checkpoints are selected on. First comparable point is step 8192,
+where the expected train losses are 1.8945 / 1.6106 / 1.8885 / 1.8377 (uniform16 /
+uniform16-ti / fovi / fovi-ti), with a systematic offset from the 4-shard normalizer.
 
 **Evaluation policy** is `auto`, which resolves per patcher: uniform arms validate under
 coarse-to-fine, foveated arms under a fixation grid.
 
 ## exp33 — ImageNet-1k full finetunes
 
-Four finetunes, one per exp22 pretrained source, recipe from exp25 (the TPU recipe
-batch-adapted for one A100). 49 array jobs each. `n_timesteps=4`, not the task default of
-10. Foveated arms evaluate under `random` (coarse-to-fine is uniform-only and OOD for a
+Four finetunes, one per exp22 pretrained source; the TPU recipe batch-adapted for one
+A100. 49 array jobs each. `n_timesteps=4`, not the task default of 10. Foveated arms
+evaluate under `random` (coarse-to-fine is uniform-only and OOD for a
 fixed-scale foveated model) with `--cfg.foveated-scale.fixed-scale 2.0`.
 
-exp25's best `eval/top1` is the reference, and top-1 is untouched by the ADE20K mIoU
-re-basing: **0.84954** (`uni16ti-803k`), **0.83692** (`fovi-ti-1196k`, an INCOMPLETE
-reference — that run stopped at 320k of 401,408 steps), **0.83522** (`uni16-1516k`). The
-fourth arm, `fovi-1901k`, has no earlier counterpart.
+Expected best `eval/top1` (top-1 is untouched by the ADE20K mIoU re-basing): **0.84954**
+(`uni16ti-803k`), **0.83692** (`fovi-ti-1196k` — that figure comes from a run that stopped
+at 320k of 401,408 steps, so it is a floor, not a target), **0.83522** (`uni16-1516k`).
+`fovi-1901k` has no established value.
 
 **Only one number is reported and it is measured at the final timestep** — the classifier
 reads the CLS token of the last glimpse only, so there is no per-timestep top-1 series.
@@ -121,30 +106,30 @@ the ADE20K task does not support DDP.
 earlier CanViT number was measured under. It distorts aspect ratio, so it is not the right
 choice for a human-viewing comparison; whichever is used must be reported with the number.
 
-exp30 is a valid reference on both CE and mIoU — it already included the mIoU
-reduction-order fix. Best `miou_final`: 0.44479 (`uni16ti-803k`), 0.4434
-(`fovi-ti-1196k`), 0.42321 (`uni16-1516k`); `fovi-1901k` has no earlier counterpart.
-Ordering to expect: `uni16ti > fovi-ti > uni16`, all in the 0.41–0.45 band.
+Expected best `miou_final`: 0.44479 (`uni16ti-803k`), 0.4434 (`fovi-ti-1196k`), 0.42321
+(`uni16-1516k`); `fovi-1901k` has no established value. Ordering to expect:
+`uni16ti > fovi-ti > uni16`, all in the 0.41–0.45 band.
 
 **The per-timestep `eval/miou_t*` are measured under *random* viewpoints, not
 coarse-to-fine** — `eval_policy` is `auto` and ADE20K's default is IID random from a
 full-scene anchor, matching how the probe trains. ADE20K train-mIoU is deliberately not
 logged.
 
-**Do not compare against exp24 or anything older**: those predate the mIoU reduction-order
-fix and read ~0.2 pp lower by metric definition, not by quality.
+**Any ADE20K mIoU predating the reduction-order fix reads ~0.2 pp lower** by metric
+definition, not by quality — do not mix the two bases.
 
 ## exp35 — ADE20K viewpoint policy, 10 seeds
 
 A `ViewpointScorer` trained against a frozen backbone and probe so segmentation improves as
-fast as possible per glimpse, deployed by argmax over its candidate grid. Recipe is exp27's
-`lossfix` arm. `--preset policy_only`, 8000 steps, 5 timesteps, batch 16, canvas grid 64.
+fast as possible per glimpse, deployed by argmax over its candidate grid. Recipe is the
+validated Q-regression arm:
+`--preset policy_only`, 8000 steps, 5 timesteps, batch 16, canvas grid 64.
 
 The frozen backbone needs no flag: `Ade20kConfig.model_repo`'s default already IS the
 published model every policy checkpoint records. `CFG_MODEL_REPO` is deliberately unset,
 which also makes this group independent of exp32–34.
 
-| exp27 `lossfix`-s0 reference | value |
+| expected | value |
 |---|---|
 | best `eval/ce_mean` (mean t1–t4) | **0.68577** |
 | `eval/miou_final` | 0.44848 |
@@ -159,8 +144,8 @@ contract.
 
 **Free bit-identity check:** `ce_t0` / `miou_t0` are the full-image glimpse taken *before*
 any policy action, so they depend only on the frozen backbone, probe, resize and eval path.
-Matching exp31's to every printed digit isolates any difference to the policy itself —
-which is exactly what this re-run tests.
+Matching a probe-only evaluation to every printed digit isolates any difference to the
+policy itself.
 
 ## Using the results afterwards
 

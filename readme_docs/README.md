@@ -6,7 +6,8 @@ training campaigns, how to launch them, and how to judge their results.
 
 | document | contents |
 |---|---|
-| [`verification_runs.md`](verification_runs.md) | The exp32–exp35 campaign: four groups of runs that verify pretraining, ImageNet-1k finetuning, ADE20K probing and viewpoint-policy training at full scale against earlier reference results. Replicates exp28–31 on the current code base. |
+| [`policy_on_own_model.md`](policy_on_own_model.md) | Training the ADE20K viewpoint policy on a backbone and probe you trained yourself: the two halves a policy run needs, the three settings that fail silently if mismatched, and the ready-made launcher. |
+| [`verification_runs.md`](verification_runs.md) | The exp32–exp35 campaign: four groups of runs that verify pretraining, ImageNet-1k finetuning, ADE20K probing and viewpoint-policy training at full scale against earlier reference results. |
 
 ## Assets
 
