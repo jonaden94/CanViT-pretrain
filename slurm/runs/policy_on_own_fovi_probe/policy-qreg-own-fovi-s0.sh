@@ -39,6 +39,7 @@
 # dimension. (per_rollout/per_glimpse differ: there t0 falls back to scale 1, a true
 # full-image anchor.)
 #
+# Full procedure: readme_docs/q_policy_foveated.md
 # 10 seeds: for s in 0 1 2 3 4 5 6 7 8 9; do SEED=$s bash slurm/runs/policy_on_own_fovi_probe/policy-qreg-own-fovi-s0.sh; done
 set -euo pipefail
 
@@ -60,7 +61,9 @@ CFG_PROBE_REPO=$_PROBE_RUN/best.pt   # the training checkpoint itself; no conver
 # === config (exp31 lossfix recipe; only the grid follows the probe) ===
 CFG_WANDB_PROJECT=policy_on_own_fovi_probe
 CFG_SEED=$SEED
-CFG_MAX_STEPS=8000
+CFG_MAX_STEPS=9000           # 9000, not 8000: the loop evaluates on step % val_every == 0
+                             # and never reaches max_steps, so an 8000-step run's last eval
+                             # is at 7000. Matches the exp35 arm this is compared against.
 CFG_N_TIMESTEPS=5
 CFG_BATCH_SIZE=16
 CFG_CANVAS_GRID=32           # matches the exp30 probe -- see header

@@ -70,8 +70,16 @@ The grid is the one most easily got wrong by copying: the standard policy recipe
 
 ## The ready-made launcher
 
-`slurm/runs/policy_on_own_fovi_probe/` runs this on the exp22 foveated-teacherinit backbone
-with the ADE20K probe trained on it:
+`slurm/runs/policy_on_own_fovi_probe/policy-qreg-own-fovi-s0.sh` runs this on the exp22
+foveated-teacherinit backbone with the ADE20K probe trained on it:
+
+| flag | value |
+|---|---|
+| `--cfg.model-repo` | `logs/jon_exp22_full_runs/exp22-fovi-teacherinit-lrdrop-1196k/checkpoints/step-155648.pt` |
+| `--cfg.probe-repo` | `logs/exp34_ade20k_probe/ade20k-fovi-ti-1196k/checkpoints/best.pt` |
+
+9000 steps (so the run is evaluated at 8000, matching the arm it is compared against), one
+A100 per seed, ~1.5 h each.
 
 ```bash
 for s in 0 1 2 3 4 5 6 7 8 9; do
