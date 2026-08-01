@@ -417,6 +417,7 @@ class Ade20kRunTask:
                     foveated_scale=self.cfg.foveated_scale, min_scale=self.cfg.min_vp_scale,
                     max_scale=self.cfg.max_vp_scale,
                     foveated_eval_scale=getattr(self.cfg.foveated_scale, "fixed_scale", 1.0),
+                    override_scale=self.cfg.eval_override_scale,
                 )
                 with amp:
                     hidden = rollout_canvas_hidden(seg=model, images=vi, viewpoints=vps,

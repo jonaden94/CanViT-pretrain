@@ -122,6 +122,16 @@ class Ade20kConfig:
     but never validated, and it was the last known config difference from the reference
     (doc 15 §A gap #5, closed 2026-07-30). None = the masks' own resolution.
     """
+    eval_override_scale: float | None = None
+    """Pin every eval glimpse to this scale while keeping the policy's CENTERS. Mirrors
+    ``canvit_eval``'s ``EpisodeConfig.override_scale``. ``None`` (default) = off.
+
+    For a FIXED-SCALE FOVEATED backbone under ``coarse_to_fine``: the quadtree's scales
+    ({1.0, 0.5, 0.25}) are ones the model never trained on, and ``fix_size = scale * H``
+    makes every such glimpse out of distribution, so mIoU decays as glimpses accumulate.
+    Set this to the pretraining view scale to evaluate "C2F's fixation sequence at the
+    model's own scale" instead. Leave unset for uniform backbones, where the quadtree's
+    scales are the point."""
     eval_policy: EvalPolicy = "auto"
     """Validation trajectory. ``"auto"`` = this task's historical one, IID random from a
     full-scene anchor — inherited from the specialize probe, which TRAINED on random

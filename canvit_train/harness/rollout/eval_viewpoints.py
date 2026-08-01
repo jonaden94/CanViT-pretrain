@@ -26,6 +26,7 @@ every existing config is a no-op through this module.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -115,24 +116,46 @@ def open_loop_viewpoints(
     min_scale: float = 0.05,
     max_scale: float = 1.0,
     foveated_eval_scale: float = 1.0,
+    override_scale: float | None = None,
 ) -> list[Viewpoint]:
     """The precomputed trajectory for every policy except ``"policy"``.
 
     Delegates to the existing, tested generators rather than reimplementing them, so
     each option is bit-identical to the task that used to own it.
+
+    ``override_scale`` replaces every generated scale while keeping the generated
+    CENTERS, the same knob ``canvit_eval``'s ``EpisodeConfig.override_scale`` provides.
+    It exists for one case: deploying a FIXED-SCALE FOVEATED backbone under a policy
+    whose scales it never trained on. C2F is a quadtree over {1.0, 0.5, 0.25}, and a
+    foveated model sets ``fix_size = scale * H``, so without pinning every glimpse is out
+    of distribution and mIoU decays as glimpses accumulate. Pinning turns "C2F" into
+    "C2F's fixation sequence at the model's own scale", which is the comparable
+    measurement.
+
+    Defaults to ``None`` = exact no-op. Deliberately NOT automatic for foveated models:
+    ``HISTORICAL_DEFAULTS["in1k"]`` sends foveated runs to C2F unpinned on purpose (see
+    that table's notes), and silently pinning would make exp25/exp29 non-comparable.
     """
     from canvit_pytorch.policies import repeated_full_scene
 
     from canvit_train.ade20k.rollout import make_random_viewpoints
     from canvit_train.harness.rollout.viewpoint import make_eval_viewpoints, make_eval_viewpoints_foveated
 
+    def _pin(vps: list[Viewpoint]) -> list[Viewpoint]:
+        # `replace` rather than `Viewpoint(...)`: the generators return two different
+        # Viewpoint classes (the harness one carries a debugging `name`, canvit_pytorch's
+        # does not), so naming fields here would break for one of them.
+        if override_scale is None:
+            return vps
+        return [replace(v, scales=torch.full_like(v.scales, override_scale)) for v in vps]
+
     if policy == "coarse_to_fine":
-        return make_eval_viewpoints(batch_size, device, n_viewpoints=n)
+        return _pin(make_eval_viewpoints(batch_size, device, n_viewpoints=n))
     if policy == "fixation_grid":
-        return make_eval_viewpoints_foveated(batch_size, device, n_viewpoints=n,
-                                             scale=foveated_eval_scale)
+        return _pin(make_eval_viewpoints_foveated(batch_size, device, n_viewpoints=n,
+                                                  scale=foveated_eval_scale))
     if policy == "full":
-        return repeated_full_scene(batch_size, device, n)
+        return _pin(repeated_full_scene(batch_size, device, n))
     if policy == "random":
         from canvit_train.harness.config import FoveatedScaleConfig
         # Only the foveated branch reads it, and there a WRONG scale is not a soft
@@ -142,11 +165,11 @@ def open_loop_viewpoints(
         assert not (is_foveated and foveated_scale is None), (
             "eval_policy='random' on a foveated/square model needs the pretraining "
             "foveated_scale; defaulting it would put every glimpse out of distribution.")
-        return make_random_viewpoints(
+        return _pin(make_random_viewpoints(
             batch_size, device, n, min_scale=min_scale, max_scale=max_scale,
             start_with_full_scene=True, is_foveated=is_foveated,
             foveated_scale=foveated_scale or FoveatedScaleConfig(),
-        )
+        ))
     if policy in CLOSED_LOOP:
         raise ValueError(
             f"eval_policy={policy!r} is closed-loop: the next viewpoint depends on the "
