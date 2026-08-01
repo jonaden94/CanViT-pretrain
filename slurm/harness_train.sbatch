@@ -26,6 +26,8 @@
 #       EXTRA_ARGS         verbatim extra flags, the only way to reach NESTED
 #                          config trees (`--cfg.model.patcher-name foveated`),
 #                          since FOO_BAR→foo-bar cannot encode a dot.
+#       TRAIN_COMMIT / PYTORCH_COMMIT / FOVI_COMMIT
+#                          pin each repo to an exact commit for the run (see below)
 #
 # Launch via: SBATCH_SCRIPT=slurm/harness_train.sbatch bash slurm/submit.sh
 # or directly: TASK=ade20k sbatch --export=ALL ... slurm/harness_train.sbatch
@@ -66,14 +68,26 @@ log "TMPDIR=$TMPDIR"
 
 _REPO_BASE="$(dirname "$PWD")"   # the 4 repos are siblings, so this is their parent
 _CODE_DIR="$TMPDIR/canvit_src"
-if [ -n "${PRETRAIN_COMMIT:-}" ] || [ -n "${PYTORCH_COMMIT:-}" ] || [ -n "${FOVI_COMMIT:-}" ]; then
+
+# This repo's pin is TRAIN_COMMIT, matching the repo name. It was PRETRAIN_COMMIT before the
+# CanViT-pretrain -> CanViT-train rename, and ~48 launchers under slurm/ still set that name
+# to reproduce older experiments. Accepting the old name keeps them pinned; dropping it would
+# leave them running the venv's editable install (i.e. today's code) with NO error at all --
+# a silent loss of reproducibility, which is the one failure this whole mechanism exists to
+# prevent. New launchers should use TRAIN_COMMIT.
+TRAIN_COMMIT="${TRAIN_COMMIT:-${PRETRAIN_COMMIT:-}}"
+if [ -z "${TRAIN_COMMIT:-}" ] && [ -n "${PRETRAIN_COMMIT:-}" ]; then
+    log "NOTE: PRETRAIN_COMMIT is the pre-rename name for TRAIN_COMMIT; honouring it."
+fi
+
+if [ -n "${TRAIN_COMMIT:-}" ] || [ -n "${PYTORCH_COMMIT:-}" ] || [ -n "${FOVI_COMMIT:-}" ]; then
     mkdir -p "$_CODE_DIR"
-    if [ -n "${PRETRAIN_COMMIT:-}" ]; then
+    if [ -n "${TRAIN_COMMIT:-}" ]; then
         mkdir -p "$_CODE_DIR/CanViT-train"
-        git -C "$_REPO_BASE/CanViT-train" archive "$PRETRAIN_COMMIT" \
+        git -C "$_REPO_BASE/CanViT-train" archive "$TRAIN_COMMIT" \
             | tar -x -C "$_CODE_DIR/CanViT-train"
         export PYTHONPATH="$_CODE_DIR/CanViT-train${PYTHONPATH:+:$PYTHONPATH}"
-        log "Pinned canvit_train → $PRETRAIN_COMMIT"
+        log "Pinned canvit_train → $TRAIN_COMMIT"
     fi
     if [ -n "${PYTORCH_COMMIT:-}" ]; then
         mkdir -p "$_CODE_DIR/CanViT-PyTorch"

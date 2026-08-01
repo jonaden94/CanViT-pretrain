@@ -124,8 +124,7 @@ W&B account, and every dataset path is already shared.
 `IN1K_TRAIN_DIR` / `IN1K_VAL_DIR` are unset — so outside project `nib00021`, set
 all of them.
 
-Metrics go to Weights & Biases by default; `--cfg.tracker comet` and
-`--cfg.tracker none` are the alternatives.
+Metrics go to Weights & Biases by default; `--cfg.tracker none` is also possible.
 
 ## Datasets
 
@@ -245,7 +244,7 @@ fallback; each launcher sets `CFG_WANDB_PROJECT` to its own run group, so a
 campaign's runs stay together and separate from everything else:
 
 ```bash
-CFG_WANDB_PROJECT=exp30_ade20k_probe   # in slurm/runs/exp30_ade20k_probe/*.sh
+CFG_WANDB_PROJECT=my_ablation_study   # set in slurm/runs/<group>/*.sh
 ```
 
 Note the W&B entity may be a **shared** one. If so, pick a project name nobody
@@ -267,9 +266,9 @@ but a single run must use **one** fixed version of the code. The launchers
 therefore pin each repo to an exact commit:
 
 ```bash
-PRETRAIN_COMMIT=455bdae   # CanViT-train
-PYTORCH_COMMIT=1f5121b    # CanViT-PyTorch
-FOVI_COMMIT=c399d3b       # fovi
+TRAIN_COMMIT=<sha>     # CanViT-train
+PYTORCH_COMMIT=<sha>   # CanViT-PyTorch
+FOVI_COMMIT=<sha>      # fovi
 ```
 
 `harness_train.sbatch` extracts those commits with an offline `git archive`
@@ -278,6 +277,11 @@ job's `TMPDIR` and prepends them to `PYTHONPATH` with `PYTHONSAFEPATH=1`, so the
 snapshot **overrides** the editable install for that job. A submitted job is
 therefore immune to later edits or pulls of the clones. The three variables are
 optional and independent; omit them to use the environment's editable install.
+
+`TRAIN_COMMIT` was called `PRETRAIN_COMMIT` before this repo was renamed, and
+`harness_train.sbatch` still accepts that spelling — around 48 launchers under
+`slurm/` use it to reproduce older experiments, and dropping it would leave them
+running the editable install with no error at all.
 
 ## Publishing a checkpoint
 
@@ -309,7 +313,7 @@ loudly instead of silently.
 what they train, how to launch them, and how to judge the results:
 
 - [`readme_docs/verification_runs.md`](readme_docs/verification_runs.md) — the
-  exp28–exp31 campaign: pretraining with a learning-rate drop, ImageNet-1k
+  exp32–exp35 campaign: pretraining with a learning-rate drop, ImageNet-1k
   finetunes, ADE20K probes, and 10 seeds of viewpoint-policy training, each
   checked against an earlier reference result.
 
