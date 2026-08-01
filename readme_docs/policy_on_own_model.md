@@ -18,7 +18,7 @@ Both flags accept a **training `.pt`**, a local HF directory, or a Hub id, so a 
 just trained can be passed as the checkpoint the run wrote — no conversion step:
 
 ```bash
---cfg.model-repo logs/jon_exp22_full_runs/<pretrain>/checkpoints/step-N-hf \
+--cfg.model-repo logs/jon_exp22_full_runs/<pretrain>/checkpoints/step-N.pt \
 --cfg.probe-repo logs/<probe-run>/checkpoints/best.pt
 ```
 
@@ -56,9 +56,14 @@ checkpoint rather than for `best.pt` — the latter appears at the first evaluat
 rewritten whenever the metric improves, so it would otherwise hand the policy a probe a few
 hundred steps old.
 
-The backbone is passed as its HF export rather than its `.pt` for a permissions reason, not
-a technical one: the pretraining `.pt` files are mode 600 (owner only) while the exported
-directories are group-readable, so the export is what a colleague can actually open.
+Both halves are the training checkpoints themselves — nothing is exported first. The HF
+layout is for publishing, not for feeding one of your own runs into another.
+
+If a checkpoint turns out to be unreadable by a colleague, check its mode rather than its
+path: permissions live on the inode, so reaching a file through a different spelling of the
+same directory changes nothing. Runs write `640` (group-readable) under the project's
+current umask, but older trees may hold `600` files from a job that ran under a stricter
+one; `chmod g+r` fixes those in place.
 
 ## Status
 

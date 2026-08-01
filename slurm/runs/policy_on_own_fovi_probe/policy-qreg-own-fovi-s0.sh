@@ -11,9 +11,8 @@
 # Both flags take a training .pt, a local HF directory, or a Hub id, so the probe is passed
 # as the checkpoint the probe run wrote. No conversion step.
 #
-# The backbone stays the HF export rather than its .pt for a permissions reason, not a
-# technical one: the exp22 .pt files are mode 600 (owner only), while the -hf directories
-# are group-readable, so the export is what a colleague can actually open.
+# Both halves are the training checkpoints themselves. Nothing is exported first; the HF
+# layout is for publishing, not for feeding one of our own runs into another.
 #
 # CANVAS_GRID 32 IS NOT OPTIONAL. The probe was trained at canvas_grid 32, so a policy run
 # at another grid feeds the reward model a canvas resolution it never saw and the reward
@@ -47,7 +46,7 @@ TASK=ade20k
 
 # === the two halves of the model ===
 _PROBE_RUN=/mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train/logs/exp34_ade20k_probe/ade20k-fovi-ti-1196k/checkpoints
-CFG_MODEL_REPO=/mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train/logs/jon_exp22_full_runs/exp22-fovi-teacherinit-lrdrop-1196k/checkpoints/step-155648-hf
+CFG_MODEL_REPO=/mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train/logs/jon_exp22_full_runs/exp22-fovi-teacherinit-lrdrop-1196k/checkpoints/step-155648.pt
 CFG_PROBE_REPO=$_PROBE_RUN/best.pt   # the training checkpoint itself; no conversion
 
 # === config (exp31 lossfix recipe; only the grid follows the probe) ===

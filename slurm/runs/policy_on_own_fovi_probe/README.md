@@ -12,11 +12,11 @@ are explained there.
 
 | flag | value |
 |---|---|
-| `--cfg.model-repo` | `logs/jon_exp22_full_runs/exp22-fovi-teacherinit-lrdrop-1196k/checkpoints/step-155648-hf` |
+| `--cfg.model-repo` | `logs/jon_exp22_full_runs/exp22-fovi-teacherinit-lrdrop-1196k/checkpoints/step-155648.pt` |
 | `--cfg.probe-repo` | `logs/exp34_ade20k_probe/ade20k-fovi-ti-1196k/checkpoints/best.pt` |
 
-The probe is the training checkpoint itself — `--cfg.probe-repo` reads a `.pt` directly, so
-there is no conversion step.
+Both are the training checkpoints themselves — both flags read a `.pt` directly, so there
+is no conversion step.
 
 ## Run
 
