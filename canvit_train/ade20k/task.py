@@ -464,8 +464,19 @@ class Ade20kRunTask:
         return (per_px * valid).flatten(1).sum(1) / valid.flatten(1).sum(1).clamp_min(1.0)
 
     def model_config(self, model):
+        from dataclasses import asdict
+
+        # `model_repo` alone is a POINTER, and a pointer is not a description: it can move,
+        # be unreadable by someone else, or -- for a finetune -- no longer describe the
+        # model that was trained. So record the architecture too, as exactly the
+        # constructor arguments CanViTForSemanticSegmentation.from_checkpoint needs. Read
+        # off the model rather than the config, so it cannot disagree with the weights.
+        core = getattr(model, "module", model)
         return {"task": "ade20k", "num_classes": self._num_classes(),
-                "canvas_grid": self.canvas_grid(model), "model_repo": self.cfg.model_repo}
+                "canvas_grid": self.canvas_grid(model), "model_repo": self.cfg.model_repo,
+                "backbone_name": core.backbone_name, "canvit": asdict(core.canvit.cfg),
+                "glimpse_grid_size": core.glimpse_grid_size,
+                "dropout": core.head.dropout_p, "use_ln": core.head.use_ln}
 
     def checkpoint_metadata(self, model):
         return {"task": "ade20k", "scene_size": self.cfg.scene_size,

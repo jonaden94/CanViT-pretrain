@@ -279,9 +279,20 @@ class In1kRunTask:
         return {"top1": accs[1], "top5": accs[5]}
 
     def model_config(self, model):
+        from dataclasses import asdict
+
         from canvit_train.in1k.config import NUM_CLASSES
+
+        # Record the architecture, not just the `model_repo` pointer — a FINETUNE changes
+        # the backbone, so this checkpoint is the only place its weights exist and the
+        # pointer describes the model it started from. These are exactly the constructor
+        # arguments CanViTForImageClassification.from_checkpoint needs, read off the model
+        # so they cannot disagree with the weights.
+        core = getattr(model, "module", model)
         return {"task": "in1k", "n_classes": NUM_CLASSES, "canvas_grid": self.canvas_grid(model),
-                "model_repo": self.cfg.model_repo, "mode": self.cfg.mode}
+                "model_repo": self.cfg.model_repo, "mode": self.cfg.mode,
+                "backbone_name": core.backbone_name, "canvit": asdict(core.canvit.cfg),
+                "glimpse_grid_size": core.glimpse_grid_size}
 
     def checkpoint_metadata(self, model):
         return {"task": "in1k", "mode": self.cfg.mode, "scene_size": self.cfg.scene_size,

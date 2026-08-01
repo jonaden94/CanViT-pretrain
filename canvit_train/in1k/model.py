@@ -7,7 +7,6 @@ point left, it belongs in a module of its own rather than inside a trainer.
 """
 
 import logging
-from pathlib import Path
 
 from canvit_pytorch import CanViTForImageClassification
 
@@ -18,19 +17,19 @@ log = logging.getLogger(__name__)
 
 def _resolve_probe_repo(cfg: In1kConfig) -> str:
     """The DINOv3 in1k linear probe fused into the finetune head. ``cfg.probe_repo``
-    wins; otherwise derive from the pretrained checkpoint's ``backbone_name`` (read from
-    the HF ``config.json`` — no model load)."""
+    wins; otherwise derive from the pretrained checkpoint's ``backbone_name`` (metadata
+    only — no model load). Works for a ``.pt`` as well as an HF dir / Hub id, or passing a
+    checkpoint to ``--cfg.model-repo`` would fail here, before any weights are touched."""
     if cfg.probe_repo:
         return cfg.probe_repo
-    import json
-
+    from canvit_pytorch.model_source import read_backbone_name
     from dinov3_in1k_probes.repos import probe_repo
-    p = Path(cfg.model_repo)
-    cfg_path = p / "config.json"
-    if not cfg_path.is_file():
-        from huggingface_hub import hf_hub_download
-        cfg_path = Path(hf_hub_download(str(cfg.model_repo), "config.json"))
-    backbone = json.loads(cfg_path.read_text())["backbone_name"]
+
+    backbone = read_backbone_name(cfg.model_repo)
+    if backbone is None:
+        raise KeyError(
+            f"could not read backbone_name from {cfg.model_repo} to pick the DINOv3 probe; "
+            f"pass --cfg.probe-repo explicitly")
     return probe_repo(backbone)
 
 

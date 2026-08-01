@@ -14,7 +14,8 @@ from .config import FoveatedScaleConfig
 from .metrics import TopKAccuracy, ce_loss, topk_correct
 from .rollout import consumes_full_image, eval_viewpoints, make_random_viewpoints, rollout_cls_tokens
 
-_IN1K_SHARDS = Path("/mnt/vast-nhr/projects/nib00021/jonathan/datasets/webdataset-imagenet-1k-no-features/train-shuffled")
+_IN1K_SHARDS = Path("/mnt/vast-nhr/projects/nib00021/jonathan/datasets") \
+    / "webdataset-imagenet-1k-no-features/train-shuffled"
 
 _B, _G, _T, _IMG, _C = 2, 8, 3, 224, 10
 _DEVICE = torch.device("cpu")
