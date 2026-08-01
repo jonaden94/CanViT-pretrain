@@ -27,9 +27,17 @@
 # grid matched to the probe. That arm runs against the published UNIFORM backbone; this one
 # is foveated, so the policy`s action space becomes the fixation grid rather than the
 # safe-box grid. The config is validated (tyro parse + spec resolution) but no training step
-# has been taken with it. Treat the first run as a smoke test: eval/miou_t0 is the pre-policy
-# full-image glimpse, so it should match a probe-only eval before later timesteps are
-# trusted.
+# has been taken with it. Treat the first run as a smoke test: eval/miou_t0 is the
+# pre-policy glimpse -- for a foveated model at a FIXED scale that is the CENTRED foveation,
+# not a full-image view -- so it should match a probe-only eval of the same pair before
+# later timesteps are trusted.
+#
+# WHAT THE POLICY CHOOSES HERE. With foveated_scale.mode=fixed every glimpse is the same
+# foveation pattern and only the fixation centre changes, t0 included; the window is
+# fix_size = scale * H, so at 2.0 it spans twice the image side. The policy picks where to
+# spend resolution, not what is visible -- hence an action space of centres with no scale
+# dimension. (per_rollout/per_glimpse differ: there t0 falls back to scale 1, a true
+# full-image anchor.)
 #
 # 10 seeds: for s in 0 1 2 3 4 5 6 7 8 9; do SEED=$s bash slurm/runs/policy_on_own_fovi_probe/policy-qreg-own-fovi-s0.sh; done
 set -euo pipefail

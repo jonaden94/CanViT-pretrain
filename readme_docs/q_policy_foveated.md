@@ -9,6 +9,28 @@ it.
 > and one bug specific to it has already been found and fixed, but no training run has
 > completed on it. See [Status](#status) before trusting a number from it.
 
+## What the policy actually chooses here
+
+For a foveated model at a fixed view scale — the configuration below — **every glimpse is
+the same foveation pattern and only the fixation centre changes**, t0 included. There is no
+full-image glimpse anywhere in the rollout:
+
+| | uniform model | foveated model, `mode=fixed` |
+|---|---|---|
+| t0 ("full") | whole image at scale 1 | **centred** foveation at `fixed_scale` — identical in kind to every other glimpse |
+| later glimpses | a crop: position **and** scale | same foveation, different fixation centre |
+| policy action space | safe-box grid, centres × scales | fixation heatmap, centres only — **no scale dimension** |
+
+The window is `fix_size = scale × H`, so at `fixed_scale 2.0` it spans twice the image side.
+The policy is therefore choosing where to point the fovea — where resolution is spent — not
+which part of the scene is visible at all. That is a genuinely different decision problem
+from the uniform case, which is the substantive reason this combination deserves its own
+first run rather than being assumed equivalent.
+
+`per_rollout` / `per_glimpse` behave differently: there t0 falls back to scale 1, a true
+full-image anchor, and the random glimpses draw their own scale. Only `fixed` makes t0 match
+the rest.
+
 A policy run needs **two** things, and neither alone is enough:
 
 | flag | what it is |
@@ -93,10 +115,11 @@ What is **not** covered: a completed training run. The Q objective, its ε-greed
 and its reward standardisation have only ever been driven by the safe-box action space. They
 are action-space agnostic by construction, but that is an argument, not evidence.
 
-Treat the first run as a smoke test. `eval/miou_t0` is the full-image glimpse taken *before*
-any policy action, so it depends only on the frozen backbone, the probe, the resize and the
-eval path. It should match a probe-only evaluation; if it does not, something in the pairing
-is wrong and the later timesteps mean nothing.
+Treat the first run as a smoke test. `eval/miou_t0` is taken *before* any policy action, so
+it depends only on the frozen backbone, the probe, the resize and the eval path. It should
+match a probe-only evaluation of the same pair; if it does not, something in the pairing is
+wrong and the later timesteps mean nothing. (For a foveated model at a fixed scale, t0 is
+the **centred** foveated glimpse — not a full-image view. See below.)
 
 Expected scale for a working run, from the published band: best `eval/ce_mean` ≈ 0.685–0.686
 and `miou_final` ≈ 0.445–0.450. **A result materially better than that is evidence of a
