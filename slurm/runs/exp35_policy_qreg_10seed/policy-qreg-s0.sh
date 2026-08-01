@@ -43,7 +43,10 @@ TASK=ade20k
 #     stops being the ported reference) ===
 CFG_WANDB_PROJECT=exp35_policy_qreg_10seed
 CFG_SEED=$SEED
-CFG_MAX_STEPS=8000
+CFG_MAX_STEPS=9000           # 9000, not 8000: the loop evaluates when step % val_every == 0
+                             # and never reaches max_steps itself, so an 8000-step run's last
+                             # eval is at 7000. One extra 1000-step block buys the eval AT
+                             # 8000, i.e. the full-length result this recipe is judged on.
 CFG_N_TIMESTEPS=5
 CFG_BATCH_SIZE=16
 CFG_CANVAS_GRID=64
