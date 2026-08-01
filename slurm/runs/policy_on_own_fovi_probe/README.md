@@ -4,7 +4,7 @@ The Q-regression ADE20K viewpoint policy trained on the exp22 foveated-teacherin
 and the ADE20K probe trained on it, instead of on the published pair.
 
 **The procedure, and the settings that must not be copied blindly, are documented in
-[`readme_docs/policy_on_own_model.md`](../../../readme_docs/policy_on_own_model.md).**
+[`readme_docs/q_policy_foveated.md`](../../../readme_docs/q_policy_foveated.md).**
 Read that first — the three silent-failure knobs (canvas grid, foveated scale, resize mode)
 are explained there.
 

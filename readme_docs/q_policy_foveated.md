@@ -1,7 +1,13 @@
-# Training a viewpoint policy on your own model
+# Training the Q viewpoint policy for a foveated model
 
-How to train the ADE20K viewpoint policy on a backbone and probe you trained yourself,
-rather than on the published pair.
+How to train the ADE20K viewpoint policy — Q-regression (`objective=qreg`), the recipe the
+published band is defined under — on a **foveated** CanViT backbone and a probe trained on
+it.
+
+> **This combination has never been run end to end.** Every Q-policy result so far is on a
+> **uniform** backbone. The foveated path is implemented and unit-tested,
+> and one bug specific to it has already been found and fixed, but no training run has
+> completed on it. See [Status](#status) before trusting a number from it.
 
 A policy run needs **two** things, and neither alone is enough:
 
@@ -67,10 +73,25 @@ one; `chmod g+r` fixes those in place.
 
 ## Status
 
-**Config-validated, never trained.** The recipe is the standard Q-regression policy arm with
-this backbone and probe swapped in and the grid matched to the probe. That arm runs against
-the published *uniform* backbone; this one is foveated, so the policy's action space becomes
-the fixation grid rather than the safe-box grid — a combination that has not been run.
+**Implemented and unit-tested; never trained end to end.** Worth being precise about which
+parts are which, because "untested" would be too pessimistic and "it works" too optimistic.
+
+What *is* covered:
+
+- The action space branches on the patcher and has for a while: a foveated or square model
+  gets `fixation_candidates(centers_per_axis)` — a pure *where to look* heatmap with **no
+  scale dimension** — while a uniform model gets the safe-box grid with scales.
+- A foveated-specific defect in exactly this path was found and fixed. The fixation
+  candidate table hardcodes its scale column to `1.0`, which pinned every policy glimpse to
+  full-field foveation *regardless of* `foveated_scale`. On a model pretrained at 2.0 — this
+  one — the t0 anchor and the random glimpses used 2.0 while the policy's used 1.0, i.e. the
+  policy looked out of distribution and only the policy did. The selector now asks the scale
+  law instead, as the random path does.
+- The suite exercises the foveated selector and the deployment path.
+
+What is **not** covered: a completed training run. The Q objective, its ε-greedy curriculum
+and its reward standardisation have only ever been driven by the safe-box action space. They
+are action-space agnostic by construction, but that is an argument, not evidence.
 
 Treat the first run as a smoke test. `eval/miou_t0` is the full-image glimpse taken *before*
 any policy action, so it depends only on the frozen backbone, the probe, the resize and the

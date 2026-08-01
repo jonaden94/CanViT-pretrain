@@ -316,9 +316,11 @@ what they train, how to launch them, and how to judge the results:
   exp32–exp35 campaign: pretraining with a learning-rate drop, ImageNet-1k
   finetunes, ADE20K probes, and 10 seeds of viewpoint-policy training, each
   checked against an established expected result.
-- [`readme_docs/policy_on_own_model.md`](readme_docs/policy_on_own_model.md) —
-  training the viewpoint policy on a backbone and probe you trained yourself,
-  and the three settings that fail silently if they do not match that pair.
+- [`readme_docs/q_policy_foveated.md`](readme_docs/q_policy_foveated.md) —
+  training the Q viewpoint policy for a **foveated** model, and the three
+  settings that fail silently if they do not match the backbone/probe pair.
+  Not yet run end to end: every Q-policy result so far is on a uniform
+  backbone.
 
 `unification_docs/` holds design notes and the generated capability matrix.
 
