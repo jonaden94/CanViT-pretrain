@@ -31,7 +31,7 @@ CFG_RESIZE_MODE=squish
 EXTRA_ARGS="--cfg.foveated-scale.fixed-scale 2.0"
 # =================
 
-TRAIN_COMMIT=0dde2d0
+TRAIN_COMMIT=716051a
 PYTORCH_COMMIT=d616b7b
 FOVI_COMMIT=c399d3b
 
@@ -40,7 +40,7 @@ FOVI_COMMIT=c399d3b
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 mkdir -p "logs/$RUN_GROUP/$RUN_NAME/log"
 export ADE20K_ROOT=/mnt/vast-nhr/projects/nib00021/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016
-export TASK RUN_GROUP RUN_NAME NGPU EXTRA_ARGS PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
+export TASK RUN_GROUP RUN_NAME NGPU EXTRA_ARGS TRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
 for v in $(compgen -v); do [[ "$v" == CFG_* || "$v" == OPT_* ]] && export "$v"; done
 
 sbatch \

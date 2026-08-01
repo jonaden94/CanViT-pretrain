@@ -49,7 +49,7 @@ CFG_NUM_WORKERS=4
 EXTRA_ARGS="--cfg.model.patcher-name uniform --cfg.init-backbone-from-teacher"
 # =================
 
-TRAIN_COMMIT=0dde2d0
+TRAIN_COMMIT=716051a
 PYTORCH_COMMIT=d616b7b
 FOVI_COMMIT=c399d3b
 
@@ -57,7 +57,7 @@ FOVI_COMMIT=c399d3b
 # so the run submits from YOUR clone rather than one hardcoded checkout.
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 mkdir -p "logs/$RUN_GROUP/$RUN_NAME/log"
-export TASK RUN_GROUP RUN_NAME NGPU EXTRA_ARGS PRETRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
+export TASK RUN_GROUP RUN_NAME NGPU EXTRA_ARGS TRAIN_COMMIT PYTORCH_COMMIT FOVI_COMMIT
 for v in $(compgen -v); do [[ "$v" == CFG_* || "$v" == OPT_* ]] && export "$v"; done
 
 sbatch \
