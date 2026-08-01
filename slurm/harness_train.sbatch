@@ -76,8 +76,16 @@ _CODE_DIR="$TMPDIR/canvit_src"
 # a silent loss of reproducibility, which is the one failure this whole mechanism exists to
 # prevent. New launchers should use TRAIN_COMMIT.
 TRAIN_COMMIT="${TRAIN_COMMIT:-${PRETRAIN_COMMIT:-}}"
-if [ -z "${TRAIN_COMMIT:-}" ] && [ -n "${PRETRAIN_COMMIT:-}" ]; then
-    log "NOTE: PRETRAIN_COMMIT is the pre-rename name for TRAIN_COMMIT; honouring it."
+
+# Say so LOUDLY when this repo is not pinned. Running unpinned is legal (it is what you want
+# for a quick test), but it is indistinguishable in the log from a pin that silently failed
+# to arrive -- which is exactly what happened when TRAIN_COMMIT was set in a launcher but
+# left out of its `export` list: the variable never reached the job, canvit_train ran from
+# the editable install, and the log simply had no line about it. Absence of evidence read as
+# evidence of absence. Now it is stated either way.
+if [ -z "${TRAIN_COMMIT:-}" ]; then
+    log "WARNING: canvit_train is NOT pinned (no TRAIN_COMMIT) -- this job will use the"
+    log "         venv's editable install, so later edits to the clone CAN change it."
 fi
 
 if [ -n "${TRAIN_COMMIT:-}" ] || [ -n "${PYTORCH_COMMIT:-}" ] || [ -n "${FOVI_COMMIT:-}" ]; then
