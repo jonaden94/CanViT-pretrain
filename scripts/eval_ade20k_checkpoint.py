@@ -15,7 +15,7 @@ shared: `preds_from_logits` upsamples logits bilinearly and argmaxes at full res
 the same reduction canvit_eval/tasks/ade20k_seg.py uses (fixed in 68b635f).
 
     python scripts/eval_ade20k_checkpoint.py \
-        --ckpt logs/exp30_ade20k_probe/<run>/checkpoints/best.pt \
+        --ckpt logs/exp34_ade20k_probe/<run>/checkpoints/best.pt \
         --model-repo <the pretrained backbone dir the probe was trained on> \
         --eval-policy coarse_to_fine --n-timesteps 21 --out results.json
 

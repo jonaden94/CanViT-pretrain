@@ -72,17 +72,35 @@ Change the probe, and `canvas-grid` has to change with it.
 
 ## Checking a run
 
-`eval/miou_t0` is measured *before* any policy action, so it depends only on the frozen
-backbone, the probe, the resize and the eval path — never on the policy. For this pair it
-should land near **0.372**, which is what the probe itself scores at t0 under the same
-canvas grid and resize. If it does not, the pairing is wrong and the later timesteps mean
-nothing — fix that before reading anything else.
+**Step 1 — is the pairing right?** `eval/miou_t0` is measured *before* any policy action, so
+it depends only on the frozen backbone, the probe, the resize and the eval path — never on
+the policy. For this pair it must land at **0.377**. If it does not, backbone and probe are
+mismatched and every later timestep is meaningless; fix that before reading anything else.
 
-After t0, the only thing to check is the **shape**: mIoU should rise monotonically across
-t1–t4. Falling mIoU as glimpses accumulate is the signature of a scale mismatch between the
-rollout and the backbone's pretraining scale.
+**Step 2 — does it beat random?** These two checkpoints under *random* viewpoints, which is
+the bar a learned policy has to clear:
 
-**There is no expected final number for this pair.** Do not borrow the uniform policy
-figures (`ce_mean` ≈ 0.686, `miou_final` ≈ 0.448): those are measured on a different
-backbone, a different probe and canvas grid 64, and they do not transfer. This run is the
-first measurement of the foveated pair, so it defines its own reference.
+| | t0 | t1 | t2 | t3 | t4 |
+|---|---|---|---|---|---|
+| random viewpoints | 0.377 | 0.403 | 0.415 | 0.424 | **0.428** |
+
+Both rows above were measured on 2026-08-02 with exactly this recipe's settings — full
+ADE20K val, `n_timesteps 5`, `canvas_grid 32`, `squish`, `fixed_scale 2.0` — against
+`best.pt`, so they are directly comparable to what the policy run reports:
+
+```bash
+python scripts/eval_ade20k_checkpoint.py \
+  --ckpt   <probe .pt> --model-repo <backbone .pt> \
+  --eval-policy random --n-timesteps 5 --canvas-grid 32 --resize-mode squish --fixed-scale 2.0
+```
+
+A trained policy should beat 0.428 at t4, and should beat random *earliest* — the claim is
+that it reaches a given mIoU in fewer glimpses, so the gap at t1–t2 matters more than at t4.
+
+Also check the **shape**: mIoU must rise monotonically across t1–t4. Falling mIoU as
+glimpses accumulate is the signature of a scale mismatch between the rollout and the
+backbone's pretraining scale.
+
+**Do not borrow the uniform policy figures** (`ce_mean` ≈ 0.686, `miou_final` ≈ 0.448):
+different backbone, different probe, canvas grid 64. They do not transfer, and a correct run
+here would look broken against them.
