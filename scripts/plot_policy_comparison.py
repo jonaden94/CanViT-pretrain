@@ -6,18 +6,23 @@ the paper's Table 4 rows as dashed references.
 Two stages, so re-styling the plot costs no GPU:
 
   measure  -> evaluate each baseline on full ADE20K val + read the trained-Q seeds out of
-              the exp31 run logs, cache everything to JSON
+              the policy run group's logs, cache everything to JSON
   plot     -> read the JSON, draw
 
-    python scripts/plot_policy_comparison.py --out readme_docs/ComparisonPoliciesADE20K.png
+    python scripts/plot_policy_comparison.py --out readme_docs/assets/ComparisonPoliciesADE20K.png
     python scripts/plot_policy_comparison.py --from-cache ...   # re-plot only
 
-All curves share one frozen model: the published c64 pretrain + ADE20K probe that exp31
-trains its scorer against (`Ade20kConfig.model_repo` / `--probe-repo` defaults below),
-canvas 64, squish-512, 5 glimpses. Same model, same data, same metric code -- only the
-viewpoint policy differs, which is the whole point of the figure.
+`--reuse-baselines <old cache>` re-reads only the trained-Q seeds and copies the baseline
+curves out of an earlier cache. The baselines depend on nothing but the frozen model, the
+data and the metric code, so a new policy run group does not change them -- and copying
+them keeps the comparison exactly the one the old figure made.
 
-**The trained-Q curve is read from the exp31 logs, not re-measured.** Each seed is taken
+All curves share one frozen model: the published c64 pretrain + ADE20K probe that the
+policy runs train their scorer against (`Ade20kConfig.model_repo` / `--probe-repo`
+defaults below), canvas 64, squish-512, 5 glimpses. Same model, same data, same metric
+code -- only the viewpoint policy differs, which is the whole point of the figure.
+
+**The trained-Q curve is read from the run logs, not re-measured.** Each seed is taken
 at its early-stop step = the eval with the lowest mean t1..t4 CE, which is the rule the
 published qband is defined by (and what `Ade20kRunTask.best_metric` selects `best.pt` on
 for a policy run). Re-running the eval would give the same number only if the RNG lined
@@ -41,7 +46,7 @@ from pathlib import Path
 import numpy as np
 
 REPO = Path(__file__).resolve().parent.parent
-EXP31 = REPO / "logs/exp31_policy_qreg_10seed"
+TRAINED_DIR = REPO / "logs/exp35_policy_qreg_10seed"
 PROBE_REPO = "canvit/probe-ade20k-40k-s512-c64-in21k"
 T = 5
 
@@ -67,11 +72,11 @@ PAPER_COLOUR = {"coarse_to_fine": "tab:blue", "entropy_coarse_to_fine": "tab:gre
 
 
 # ----------------------------------------------------------------- measure
-def trained_q_from_logs() -> dict:
+def trained_q_from_logs(run_dir: Path) -> dict:
     """Per seed: the eval with the lowest ce_mean, i.e. the early-stop checkpoint."""
     line_re = re.compile(r"step (\d+)\s+eval[^:]*:\s*(\{.*\})")
     seeds, curves, steps = [], [], []
-    for d in sorted(EXP31.glob("exp31-policy-qreg-s*")):
+    for d in sorted(run_dir.glob("*policy-qreg-s*")):
         evals = []
         for log in sorted(d.glob("log/*.log")):
             for m in line_re.finditer(log.read_text(errors="replace")):
@@ -83,7 +88,7 @@ def trained_q_from_logs() -> dict:
         steps.append(step)
         curves.append([best[f"miou_t{t}"] * 100 for t in range(T)])
     if not curves:
-        raise SystemExit(f"no exp31 evals found under {EXP31}")
+        raise SystemExit(f"no policy evals found under {run_dir}")
     return {"seeds": seeds, "early_stop_steps": steps, "curves": curves}
 
 
@@ -201,11 +206,16 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--out", type=Path,
-                   default=REPO / "readme_docs/ComparisonPoliciesADE20K.png")
+                   default=REPO / "readme_docs/assets/ComparisonPoliciesADE20K.png")
     p.add_argument("--cache", type=Path,
-                   default=REPO / "readme_docs/_policy_comparison_data.json")
+                   default=REPO / "readme_docs/assets/_policy_comparison_data.json")
     p.add_argument("--from-cache", action="store_true",
                    help="skip all evaluation, re-plot from --cache")
+    p.add_argument("--trained-dir", type=Path, default=TRAINED_DIR,
+                   help="policy run group whose logs supply the trained-Q seeds")
+    p.add_argument("--reuse-baselines", type=Path, default=None,
+                   help="copy the baseline curves out of this earlier cache instead of "
+                        "re-measuring them (needs no GPU)")
     p.add_argument("--eval-batch-size", type=int, default=16)
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--untrained-seeds", type=int, default=3)
@@ -217,13 +227,19 @@ def main() -> None:
     if args.from_cache:
         data = json.loads(args.cache.read_text())
     else:
-        trained = trained_q_from_logs()
+        trained = trained_q_from_logs(args.trained_dir)
         data = {"policy_trained": trained["curves"],
                 "_trained_seeds": trained["seeds"],
                 "_trained_early_stop_steps": trained["early_stop_steps"]}
-        data.update(measure_baselines(args.eval_batch_size, args.num_workers,
-                                      args.untrained_seeds, args.limit_val_batches))
-        data["_limit_val_batches"] = args.limit_val_batches
+        if args.reuse_baselines:
+            old = json.loads(args.reuse_baselines.read_text())
+            data.update({k: v for k, v in old.items() if not k.startswith(("policy_trained",
+                                                                           "_trained"))})
+            data["_baselines_from"] = str(args.reuse_baselines)
+        else:
+            data.update(measure_baselines(args.eval_batch_size, args.num_workers,
+                                          args.untrained_seeds, args.limit_val_batches))
+            data["_limit_val_batches"] = args.limit_val_batches
         args.cache.parent.mkdir(parents=True, exist_ok=True)
         args.cache.write_text(json.dumps(data, indent=2))
         print(f"wrote {args.cache}")

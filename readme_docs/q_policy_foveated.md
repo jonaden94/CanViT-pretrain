@@ -5,9 +5,9 @@ ADE20K probe trained on it. The policy learns **where to look next**; the backbo
 stay frozen.
 
 > **Never run end to end.** Every Q-policy result so far is on a *uniform* backbone. The
-> foveated path is implemented and covered by unit tests, and one bug specific to it has
-> already been found and fixed — but no training run has completed on it. Treat the first
-> run as a smoke test (see [Checking a run](#checking-a-run)).
+> foveated path is implemented, covered by unit tests, and the exact model this recipe
+> builds has been constructed successfully from both checkpoints — but no training run has
+> completed on it. Treat the first run as a smoke test (see [Checking a run](#checking-a-run)).
 
 ## Run it
 
@@ -17,17 +17,32 @@ for s in 0 1 2 3 4 5 6 7 8 9; do
 done
 ```
 
-One A100 per seed, 9000 steps, ~1.5 h each. The launcher refuses to submit until the probe
-run has finished, so it is safe to fire early.
+One A100 per seed, 9000 steps. The equivalent uniform runs took 75 min each at canvas 64;
+this one runs at canvas 32, so expect that or less.
+
+The launcher refuses to submit unless the probe run has finished (it checks for the probe's
+final `step-40000.pt`, not `best.pt`, which appears at the first evaluation and would hand
+the policy a probe a few hundred steps old). That probe run **is** finished, so the guard is
+already satisfied.
 
 ## The two checkpoints it uses
 
+Absolute paths, readable by anyone in the `HPC_nib00021` project — the files are mode 640
+and every parent directory is group-readable, so a collaborator can point at them directly
+without copying:
+
 | flag | value |
 |---|---|
-| `--cfg.model-repo` | `logs/jon_exp22_full_runs/exp22-fovi-teacherinit-lrdrop-1196k/checkpoints/step-155648.pt` |
-| `--cfg.probe-repo` | `logs/exp34_ade20k_probe/ade20k-fovi-ti-1196k/checkpoints/best.pt` |
+| `--cfg.model-repo` | `/mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train/logs/jon_exp22_full_runs/exp22-fovi-teacherinit-lrdrop-1196k/checkpoints/step-155648.pt` |
+| `--cfg.probe-repo` | `/mnt/vast-nhr/projects/nib00021/jonathan/repos/CanViT-train/logs/exp34_ade20k_probe/ade20k-fovi-ti-1196k/checkpoints/best.pt` |
 
-Both are training checkpoints, passed directly — no conversion step.
+Both are training checkpoints passed straight to the flags — no HF export, no conversion
+step. Both flags accept a training `.pt`, a local HF directory, or a Hub id.
+
+Verified by building the model this recipe specifies: the backbone comes out foveated at
+scale 2.0 on a canvas grid of 32, and all 9 probe-head tensors are bit-identical to the ones
+in the probe checkpoint, i.e. the reward model really is the trained probe and not a fresh
+random head.
 
 The probe is **the reward model**, not a detail: the reward is the fraction of the probe's
 cross-entropy that a glimpse removes, so a mismatched head makes the reward pure noise and
@@ -51,18 +66,23 @@ Each fails **silently** — a worse number, not an error.
 |---|---|---|
 | `--cfg.canvas-grid` | `32` | must equal the grid the probe was trained at, or the reward model sees a canvas resolution it never saw. Easy to get wrong by copying: the uniform recipe uses 64 because *its* probe was trained at 64. |
 | `--cfg.foveated-scale.fixed-scale` | `2.0` | must equal the backbone's pretraining scale, or every glimpse is out of distribution and mIoU decays as glimpses accumulate |
-| `--cfg.resize-mode` | `squish` | the protocol every CanViT number is measured under |
+| `--cfg.resize-mode` | `squish` | the protocol every other CanViT number in this repo is measured under |
 
 Change the probe, and `canvas-grid` has to change with it.
 
 ## Checking a run
 
 `eval/miou_t0` is measured *before* any policy action, so it depends only on the frozen
-backbone, the probe, the resize and the eval path — never on the policy. It should match a
-probe-only evaluation of the same pair. If it does not, the pairing is wrong and the later
-timesteps mean nothing.
+backbone, the probe, the resize and the eval path — never on the policy. For this pair it
+should land near **0.372**, which is what the probe itself scores at t0 under the same
+canvas grid and resize. If it does not, the pairing is wrong and the later timesteps mean
+nothing — fix that before reading anything else.
 
-For a working run expect best `eval/ce_mean` ≈ 0.685–0.686 and `miou_final` ≈ 0.445–0.450.
-**A result materially better than that is evidence of a broken protocol, not of success** —
-that has happened here before, when a changed resize default put an arm 0.016 "better" than
-the published band, about 20× the seed spread.
+After t0, the only thing to check is the **shape**: mIoU should rise monotonically across
+t1–t4. Falling mIoU as glimpses accumulate is the signature of a scale mismatch between the
+rollout and the backbone's pretraining scale.
+
+**There is no expected final number for this pair.** Do not borrow the uniform policy
+figures (`ce_mean` ≈ 0.686, `miou_final` ≈ 0.448): those are measured on a different
+backbone, a different probe and canvas grid 64, and they do not transfer. This run is the
+first measurement of the foveated pair, so it defines its own reference.

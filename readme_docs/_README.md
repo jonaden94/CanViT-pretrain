@@ -13,5 +13,5 @@ training campaigns, how to launch them, and how to judge their results.
 
 | file | produced by |
 |---|---|
-| `ComparisonPoliciesADE20K.png` | `scripts/plot_policy_comparison.py` — the learned Viewpoint-Q policy against the open-loop baselines over t = 0..4, with the paper's Table 4 rows as dashed references |
-| `_policy_comparison_data.json` | the measure stage of that same script (cached evaluations, so re-styling the figure costs no GPU) |
+| `assets/ComparisonPoliciesADE20K.png` | `scripts/plot_policy_comparison.py` — the learned Viewpoint-Q policy against the open-loop baselines over t = 0..4, with the paper's Table 4 rows as dashed references |
+| `assets/_policy_comparison_data.json` | the measure stage of that same script (cached evaluations, so re-styling the figure costs no GPU) |

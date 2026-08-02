@@ -1,9 +1,10 @@
 #!/bin/bash
-# Re-evaluate all four finished exp30 ADE20K probes under COARSE-TO-FINE.
+# Re-evaluate all four finished ADE20K probes of a run group under COARSE-TO-FINE.
 #
-# exp30 trained and validated under `random` viewpoints (ADE20K's historical default,
-# inherited from the specialize probe, which trained on random views). This answers the
-# separate question "what do these models score under the C2F deploy convention?".
+# The probe groups train and validate under `random` viewpoints (ADE20K's historical
+# default, inherited from the specialize probe, which trained on random views). This
+# answers the separate question "what do these models score under the C2F deploy
+# convention?".
 #
 # n_timesteps=21 = canvit_eval's EpisodeConfig default for policy="coarse_to_fine", so
 # these are the numbers CanViT-eval would report.
@@ -13,11 +14,15 @@
 # unpinned every glimpse is out of distribution. Pinning keeps C2F's CENTERS and fixes the
 # scale at the pretraining value -- canvit_eval's `override_scale` semantics.
 #
-# Usage: bash scripts/eval_exp30_c2f.sh [output_dir]
+# The four backbones below are fixed: every probe group is trained from the same four
+# exp22 pretrains, so only the probe run group changes between campaigns.
+#
+# Usage: bash scripts/eval_ade20k_c2f.sh [run_group] [output_dir]
 set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT=${1:-logs/exp30_ade20k_probe/_c2f_eval}
+GROUP=${1:-exp34_ade20k_probe}
+OUT=${2:-logs/$GROUP/_c2f_eval}
 mkdir -p "$OUT"
 
 export ADE20K_ROOT=${ADE20K_ROOT:-/mnt/vast-nhr/projects/nib00021/jonathan/datasets/zhoubolei--scene_parse_150/ADEChallengeData2016}
@@ -39,7 +44,7 @@ for entry in "${RUNS[@]}"; do
     extra=()
     if [ -n "$scale" ]; then extra=(--override-scale "$scale" --fixed-scale "$scale"); fi
     $PY scripts/eval_ade20k_checkpoint.py \
-        --ckpt "logs/exp30_ade20k_probe/$run/checkpoints/best.pt" \
+        --ckpt "logs/$GROUP/$run/checkpoints/best.pt" \
         --model-repo "$SRC/$repo" \
         --eval-policy coarse_to_fine --n-timesteps 21 \
         --eval-batch-size 16 --num-workers 8 \

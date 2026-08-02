@@ -20,6 +20,8 @@ checkpoints/
 *.pth
 *.pt
 *.png
+# ...except figures embedded in the documentation, which have to ship with it
+!readme_docs/assets/*.png
 
 # macOS
 *.DS_Store
