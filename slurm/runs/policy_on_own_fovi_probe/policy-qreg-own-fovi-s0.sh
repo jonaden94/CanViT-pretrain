@@ -47,7 +47,7 @@ set -euo pipefail
 RUN_GROUP=policy_on_own_fovi_probe
 SEED="${SEED:-0}"
 RUN_NAME=policy-qreg-own-fovi-s$SEED
-ARRAY=0-0%1                  # single job: 8000 steps fits inside the walltime
+ARRAY=0-0%1                  # single job: 9000 steps fits inside the walltime
 TIME="${TIME:-0-08:00:00}"
 MEM=64G
 NGPU=1                       # ade20k is single-GPU only (supports_ddp=False)
@@ -66,7 +66,7 @@ CFG_MAX_STEPS=9000           # 9000, not 8000: the loop evaluates on step % val_
                              # is at 7000. Matches the exp35 arm this is compared against.
 CFG_N_TIMESTEPS=5
 CFG_BATCH_SIZE=16
-CFG_CANVAS_GRID=32           # matches the exp30 probe -- see header
+CFG_CANVAS_GRID=32           # matches the exp34 probe -- see header
 CFG_EVAL_POLICY=policy
 CFG_RESIZE_MODE=squish       # the measurement contract every earlier CanViT number used
 CFG_VAL_EVERY=1000

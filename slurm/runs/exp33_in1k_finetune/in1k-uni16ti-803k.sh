@@ -15,8 +15,19 @@ set -euo pipefail
 # === ESSENTIALS ===
 RUN_GROUP=exp33_in1k_finetune
 RUN_NAME=in1k-uni16ti-803k
-ARRAY=0-48%1                 # 49 jobs x 8192 = 401,408 steps (~20 epochs @ batch 64)
-TIME=0-12:00:00              # wide margin: a mid-job timeout would break shard-aligned resume
+ARRAY="${ARRAY:-0-48%1}"     # 49 jobs x 8192 = 401,408 steps (~20 epochs @ batch 64).
+                             # Override when RESUMING a partially-done run: the array is a
+                             # BUDGET, not a schedule (job_index comes from the checkpoint's
+                             # resume_state, not SLURM_ARRAY_TASK_ID), so pass the number of
+                             # chunks still owed, e.g. ARRAY=0-44%1.
+TIME="${TIME:-0-02:00:00}"   # 2h, NOT 12h. <=2h lands in Grete's `2h` QOS, which
+                             # schedules in minutes; a 12h request goes to `normal` and waited
+                             # ~24-31h BETWEEN chunks. Measured chunk times: uniform arms
+                             # 69-78 min (comfortable), foveated arms 93-109 min (only ~11 min
+                             # of headroom -- a timeout costs that chunk, which is recoverable
+                             # because no checkpoint is written, so the next task just redoes
+                             # it). steps_per_job CANNOT be lowered to buy margin:
+                             # _check_schedule_invariants refuses to resume if it changes.
 MEM=128G
 NGPU=1
 TASK=in1k
